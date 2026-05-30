@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}Wallet generated{% endblock %}
+
+{% block body %}
+<div class="card">
+  <h1>Wallet generated</h1>
+  <div class="notice ok">
+    Save the seed phrase below in a safe place. It is the only backup of this
+    wallet and will not be shown again.
+  </div>
+
+  <table>
+    <tr><td>npub</td><td><code>{{ npub }}</code></td></tr>
+    <tr><td>address</td><td><code>{{ address }}</code></td></tr>
+  </table>
+
+  <h2>Seed phrase</h2>
+  <pre>{{ phrase }}</pre>
+
+  <p style="margin-top:20px;">
+    <a class="button" href="/wallet">Back to dashboard</a>
+  </p>
+</div>
+{% endblock %}

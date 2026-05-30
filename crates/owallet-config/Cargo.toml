@@ -1,0 +1,15 @@
+[package]
+name = "owallet-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Environment / dotenv configuration loader for owallet. Replicates the `.owallet` file semantics from wallet_mcp/cli.py."
+
+[dependencies]
+dotenvy = "0.15"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,24 @@
+[package]
+name = "owallet-db"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Encrypted SQLite storage for owallet. Byte-compatible with the Python wallet_mcp.db schema."
+
+[dependencies]
+owallet-crypto = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+time = { version = "0.3.41", default-features = false, features = ["parsing"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }

@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Generate wallet{% endblock %}
+
+{% block body %}
+<div class="card">
+  <h1>Generate a new wallet</h1>
+  <p>A fresh BIP-39 mnemonic will be created on this server. The seed phrase is
+     <strong>shown once</strong> and then never displayed again — copy it before
+     leaving this page.</p>
+
+  {% if let Some(msg) = error %}
+    <div class="notice err">{{ msg }}</div>
+  {% endif %}
+
+  <form method="POST" action="/wallet/generate">
+    <div class="field">
+      <label for="words">Mnemonic length</label>
+      <select id="words" name="words">
+        <option value="12"{% if words == 12 %} selected{% endif %}>12 words</option>
+        <option value="24"{% if words != 12 %} selected{% endif %}>24 words</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="wallet_password">Wallet password <span class="muted">(used to log into the web admin)</span></label>
+      <input id="wallet_password" name="wallet_password" type="password" autocomplete="new-password">
+    </div>
+    <div class="field">
+      <label for="confirm_password">Confirm wallet password</label>
+      <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password">
+    </div>
+    <button type="submit">Generate</button>
+    <a class="button secondary" href="/wallet">Back</a>
+  </form>
+</div>
+{% endblock %}

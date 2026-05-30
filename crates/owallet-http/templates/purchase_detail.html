@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block body %}
+<style>
+  .badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:.72rem; font-weight:500; }
+  .badge-delivered { background:#dcfce7; color:#166534; }
+  .badge-failed    { background:#fee2e2; color:#991b1b; }
+  .badge-cancelled { background:#f3f4f6; color:#6b7280; }
+  .badge-shipping  { background:#fef9c3; color:#854d0e; }
+  .badge-other     { background:#e0e7ff; color:#3730a3; }
+  .delivered-field { margin-bottom:16px; }
+  .delivered-field-label { font-size:.78rem; font-weight:600; color:#6b7280;
+                           text-transform:uppercase; letter-spacing:.04em; margin-bottom:6px; }
+  .delivered-image { max-width:100%; border-radius:8px; border:1px solid #e5e7eb; }
+  .delivered-code  { background:#f3f4f6; padding:14px; border-radius:8px; overflow-x:auto;
+                     white-space:pre-wrap; word-break:break-all; font-size:.85rem; }
+  .delivered-text  { color:#374151; line-height:1.5; }
+  .delivered-link a { color:#2563eb; }
+</style>
+
+<nav class="card" style="padding:14px 24px; display:flex; justify-content:space-between; align-items:center;">
+  <div><strong>owallet</strong> <span class="muted">— purchase</span></div>
+  <a class="button secondary" href="/wallet/purchases">← All purchases</a>
+</nav>
+
+<div class="card">
+  <h1>{{ title }} <span class="badge {{ badge_class }}">{{ status_label }}</span></h1>
+  <table>
+    {% for kv in meta %}
+      <tr><td>{{ kv.0 }}</td><td><code>{{ kv.1 }}</code></td></tr>
+    {% endfor %}
+  </table>
+</div>
+
+{% if !content_html.is_empty() %}
+<div class="card">
+  <h2>Delivered content</h2>
+  {{ content_html|safe }}
+</div>
+{% endif %}
+{% endblock %}

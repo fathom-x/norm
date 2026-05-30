@@ -1,0 +1,33 @@
+[package]
+name = "owallet-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Streamable-HTTP MCP server for owallet. Hand-rolled JSON-RPC 2.0 handler with a tool registry that talks to the Overpay REST client + local wallet."
+
+[dependencies]
+owallet-crypto = { workspace = true }
+owallet-db = { workspace = true }
+owallet-overpay = { workspace = true }
+owallet-evm = { workspace = true }
+
+axum = "0.8"
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+# JSON-Schema validator used by `create_order` for pre-flight buyer_note
+# validation against the listing's `buyer_note_schema`. `default-features =
+# false` drops the regex / URL-resolver features we don't need (and keeps
+# the compile time + binary size down).
+jsonschema = { version = "0.33.0", default-features = false }
+thiserror = { workspace = true }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"
+axum-test = "17"

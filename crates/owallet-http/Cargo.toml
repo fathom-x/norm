@@ -1,0 +1,42 @@
+[package]
+name = "owallet-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "axum-based HTTP dashboard for owallet (Rust port of the /wallet routes in wallet_mcp/server.py)."
+
+[dependencies]
+owallet-crypto = { workspace = true }
+owallet-db = { workspace = true }
+owallet-evm = { workspace = true }
+owallet-overpay = { workspace = true }
+owallet-mcp = { workspace = true }
+
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+sha2 = { workspace = true }
+
+askama = "0.12"
+
+dashmap = "6"
+cookie = "0.18"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = "0.7"
+thiserror = { workspace = true }
+url = "2"
+tracing = "0.1"
+rand = { workspace = true }
+hex = { workspace = true }
+time = { version = "0.3.41", default-features = false, features = ["formatting", "macros"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+axum-test = "17"
+http-body-util = "0.1"
+tokio = { version = "1", features = ["full", "test-util"] }
+wiremock = "0.6"

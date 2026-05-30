@@ -1,0 +1,39 @@
+[package]
+name = "owallet-evm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "EVM transaction signing + ERC-20 USDC transfer for owallet. Wraps the alloy stack so the rest of the workspace can stay alloy-version-agnostic."
+
+[dependencies]
+owallet-crypto = { workspace = true }
+
+alloy = { version = "0.7", default-features = false, features = [
+    "std",
+    # Use rustls only — the `reqwest` feature (without "-rustls-tls"
+    # suffix) pulls in alloy-transport-http/reqwest-default-tls which is
+    # native-tls/openssl on Linux, and that fails the musl static build
+    # in the Dockerfile. `reqwest-rustls-tls` already brings in reqwest
+    # with rustls, no need to also enable `reqwest`.
+    "reqwest-rustls-tls",
+    "signer-local",
+    "provider-http",
+    "rpc-types-eth",
+    "contract",
+    "sol-types",
+    "network",
+    "transports",
+] }
+
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["sync"] }
+hex = { workspace = true }
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"

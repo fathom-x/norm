@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/owallet-crypto",
+    "crates/owallet-db",
+    "crates/owallet-config",
+    "crates/owallet-overpay",
+    "crates/owallet-evm",
+    "crates/owallet-mcp",
+    "crates/owallet-http",
+    "crates/owallet",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/fathom-x/overpay"
+authors = ["fathom-x"]
+homepage = "https://overpay.com"
+
+[workspace.dependencies]
+owallet-crypto = { path = "crates/owallet-crypto", version = "0.0.1" }
+owallet-db = { path = "crates/owallet-db", version = "0.0.1" }
+owallet-config = { path = "crates/owallet-config", version = "0.0.1" }
+owallet-overpay = { path = "crates/owallet-overpay", version = "0.0.1" }
+owallet-evm = { path = "crates/owallet-evm", version = "0.0.1" }
+owallet-mcp = { path = "crates/owallet-mcp", version = "0.0.1" }
+owallet-http = { path = "crates/owallet-http", version = "0.0.1" }
+
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+rand = "0.8"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+hex = "0.4"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Dev / test
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Smaller binary still suitable for shipping in releases.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

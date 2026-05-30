@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}Sign in{% endblock %}
+
+{% block body %}
+<div class="card">
+  <h1>Sign in to owallet</h1>
+  <p>Choose a wallet by its npub, EVM address, or Overpay username, and enter the
+     per-wallet password. To manage every wallet, sign in as <strong>admin</strong>
+     with the database master password instead.</p>
+
+  {% if let Some(msg) = error %}
+    <div class="notice err">{{ msg }}</div>
+  {% endif %}
+
+  <form method="POST" action="/wallet/login">
+    <div class="field">
+      <label for="role">Sign in as</label>
+      <select id="role" name="role">
+        <option value="wallet" {% if role == "wallet" %}selected{% endif %}>Wallet</option>
+        <option value="admin" {% if role == "admin" %}selected{% endif %}>Admin (master password)</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="identifier">Wallet identifier (npub / address / username)</label>
+      <input id="identifier" name="identifier" type="text" value="{{ identifier }}"
+             autocomplete="username" placeholder="npub1… or 0x… or yourname">
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autofocus
+             autocomplete="current-password">
+    </div>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+{% endblock %}

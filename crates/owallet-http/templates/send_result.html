@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block title %}{% if ok %}Send broadcast{% else %}Send failed{% endif %}{% endblock %}
+
+{% block body %}
+<nav class="card" style="padding:14px 24px; display:flex; justify-content:space-between; align-items:center;">
+  <div><strong>owallet</strong></div>
+  <a class="button secondary" href="/wallet">Back to dashboard</a>
+</nav>
+
+<div class="card">
+  {% if ok %}
+    <div class="notice ok">USDC transfer broadcast.</div>
+    <h1>Send confirmed</h1>
+    <table>
+      <tr><td>from wallet</td><td><code>{{ npub }}</code></td></tr>
+      <tr><td>chain</td><td>{{ chain_name }}</td></tr>
+      <tr><td>to</td><td><code>{{ to }}</code></td></tr>
+      <tr><td>amount</td><td>{{ amount }} USDC</td></tr>
+      <tr><td>tx hash</td><td><code>{{ tx_hash }}</code></td></tr>
+      {% if let Some(b) = block_number %}
+        <tr><td>block</td><td>{{ b }}</td></tr>
+      {% endif %}
+      {% if let Some(url) = explorer_url.as_ref() %}
+        <tr><td>explorer</td><td><a href="{{ url }}" rel="noopener noreferrer">{{ url }}</a></td></tr>
+      {% endif %}
+    </table>
+  {% else %}
+    <div class="notice err">{% if let Some(e) = error.as_ref() %}{{ e }}{% else %}Send failed.{% endif %}</div>
+    <h1>Send failed</h1>
+    <p>
+      The transfer was not broadcast. Use the back link above to return
+      to the dashboard and try again.
+    </p>
+  {% endif %}
+</div>
+{% endblock %}

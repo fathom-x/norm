@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Authorize access{% endblock %}
+
+{% block body %}
+<div class="card">
+  <h1>Authorize owallet</h1>
+  <p>An MCP client is asking for access to your wallet. Pick which wallet
+     it should sign as, and enter that wallet's password to approve.</p>
+
+  {% if let Some(msg) = error %}
+    <div class="notice err">{{ msg }}</div>
+  {% endif %}
+
+  <form method="POST" action="/consent">
+    <input type="hidden" name="session" value="{{ session }}">
+    <div class="field">
+      <label for="npub">Wallet</label>
+      <select id="npub" name="npub">
+        {% for (npub, label) in wallets %}
+          <option value="{{ npub }}"
+                  {% if Some(npub.as_str()) == default_npub.as_deref() %}selected{% endif %}>
+            {{ label }}
+          </option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label for="password">Wallet password</label>
+      <input id="password" name="password" type="password" autofocus
+             autocomplete="current-password">
+    </div>
+    <div class="row" style="margin-top: 18px;">
+      <button type="submit" name="action" value="approve">Approve</button>
+      <button type="submit" name="action" value="deny" class="button secondary">Deny</button>
+    </div>
+  </form>
+</div>
+{% endblock %}

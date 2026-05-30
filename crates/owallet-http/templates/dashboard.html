@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block body %}
+<nav class="card" style="padding:14px 24px; display:flex; justify-content:space-between; align-items:center;">
+  <div>
+    <strong>owallet</strong>
+    {% if is_admin %}<span class="muted">— admin</span>{% endif %}
+  </div>
+  <div>
+    <a class="button secondary" href="/wallet/purchases">My purchases</a>
+    <form method="POST" action="/wallet/logout" style="margin:0; display:inline;">
+      <button type="submit" class="button secondary">Sign out</button>
+    </form>
+  </div>
+</nav>
+
+{% if let Some(msg) = notice %}
+  <div class="card"><div class="notice ok">{{ msg }}</div></div>
+{% endif %}
+
+<div class="card">
+  <h1>Account</h1>
+  {% if let Some(w) = active %}
+    <table>
+      <tr><td>npub</td><td><code>{{ w.npub }}</code></td></tr>
+      <tr><td>address</td>
+          <td><code>{% if let Some(a) = w.address.as_ref() %}{{ a }}{% else %}—{% endif %}</code></td></tr>
+      <tr><td>overpay</td>
+          <td>
+            {% if let Some(u) = overpay_username.as_ref() %}
+              {{ u }}
+              {% if let Some(n) = overpay_account_number.as_ref() %} <span class="muted">({{ n }})</span>{% endif %}
+            {% else if let Some(n) = overpay_account_number.as_ref() %}
+              <code>{{ n }}</code> <span class="muted">(anonymous account)</span>
+            {% else if let Some(u) = w.overpay_username.as_ref() %}
+              {{ u }}
+            {% else if has_overpay_token %}
+              <span class="muted">linked (could not load profile)</span>
+            {% else %}
+              <span class="muted">not linked yet</span>
+            {% endif %}
+          </td></tr>
+      {% if let Some(eth) = eth_balance.as_ref() %}
+        <tr>
+          <td>eth{% if let Some(c) = chain_name.as_ref() %} <span class="muted">({{ c }})</span>{% endif %}</td>
+          <td>{{ eth }}</td>
+        </tr>
+      {% endif %}
+      {% if let Some(usdc) = usdc_balance.as_ref() %}
+        <tr>
+          <td>usdc{% if let Some(c) = chain_name.as_ref() %} <span class="muted">({{ c }})</span>{% endif %}</td>
+          <td>{{ usdc }}</td>
+        </tr>
+      {% endif %}
+    </table>
+    <p style="margin-top:14px;">
+      {% if has_overpay_token %}
+        <a class="button" href="/wallet/overpay-login">Open Overpay</a>
+        <a class="button secondary" href="/wallet/authorize">Re-link Overpay account</a>
+      {% else %}
+        <a class="button" href="/wallet/authorize">Link Overpay account</a>
+      {% endif %}
+    </p>
+  {% else %}
+    <p>No default wallet selected. {% if is_admin %}Choose one below.{% endif %}</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Send USDC</h2>
+  <p class="muted" style="margin-bottom:14px;">
+    Signs and broadcasts an on-chain ERC-20 transfer from the active wallet.
+    This is irreversible — confirm the recipient address and amount before submitting.
+  </p>
+  <form method="POST" action="/wallet/send"
+        onsubmit="return confirm('Broadcast this USDC transfer? This is irreversible.');">
+    <div class="field">
+      <label for="to">Recipient address</label>
+      <input id="to" name="to" type="text" placeholder="0x…" required>
+    </div>
+    <div class="field">
+      <label for="amount">Amount (USDC)</label>
+      <input id="amount" name="amount" type="text" placeholder="0.00" required>
+    </div>
+    <button type="submit">Send</button>
+  </form>
+</div>
+
+{% if is_admin %}
+<div class="card">
+  <h2>Wallets ({{ wallets.len() }})</h2>
+  <table>
+    <thead>
+      <tr><th></th><th>npub</th><th>address</th><th>overpay</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for w in wallets %}
+        <tr>
+          <td>{% if Some(w.npub.as_str()) == default_npub.as_deref() %}*{% else %}&nbsp;{% endif %}</td>
+          <td><code>{{ w.npub }}</code></td>
+          <td><code>{% if let Some(a) = w.address.as_ref() %}{{ a }}{% else %}—{% endif %}</code></td>
+          <td>{% if let Some(u) = w.overpay_username.as_ref() %}{{ u }}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td>
+            <form method="POST" action="/wallet/select" style="display:inline; margin:0;">
+              <input type="hidden" name="npub" value="{{ w.npub }}">
+              <button type="submit" class="button secondary">Set default</button>
+            </form>
+            <form method="POST" action="/wallet/delete" style="display:inline; margin:0;"
+                  onsubmit="return confirm('Delete this wallet? This is permanent.');">
+              <input type="hidden" name="npub" value="{{ w.npub }}">
+              <button type="submit" class="button danger">Delete</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p style="margin-top:14px;">
+    <a class="button" href="/wallet/generate">Generate new wallet</a>
+    <a class="button secondary" href="/wallet/import">Import wallet</a>
+    <a class="button secondary" href="/wallet/password">Set wallet password</a>
+  </p>
+</div>
+{% endif %}
+{% endblock %}

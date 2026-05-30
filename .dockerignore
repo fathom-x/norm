@@ -1,0 +1,18 @@
+# Don't ship Rust build artifacts to the Docker daemon — the in-container
+# build starts fresh anyway and this can be many gigabytes locally.
+target/
+**/*.rs.bk
+
+# IDE / OS clutter
+.idea/
+.vscode/
+.DS_Store
+
+# Local dev state
+.env
+.env.local
+
+# Docs that don't influence the build
+README.md
+CHANGELOG.md
+CLAUDE.md

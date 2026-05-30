@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Import wallet{% endblock %}
+
+{% block body %}
+<div class="card">
+  <h1>Import an existing wallet</h1>
+  <p>Paste a 12- or 24-word BIP-39 mnemonic, or a hex secp256k1 private key
+     (with or without a <code>0x</code> prefix). Whitespace is stripped.</p>
+
+  {% if let Some(msg) = error %}
+    <div class="notice err">{{ msg }}</div>
+  {% endif %}
+
+  <form method="POST" action="/wallet/import">
+    <div class="field">
+      <label for="material">Mnemonic or private key</label>
+      <textarea id="material" name="material" rows="3" autofocus
+                placeholder="abandon abandon abandon …  or  0xabcd…"></textarea>
+    </div>
+    <div class="field">
+      <label for="wallet_password">Wallet password <span class="muted">(used to log into the web admin)</span></label>
+      <input id="wallet_password" name="wallet_password" type="password" autocomplete="new-password">
+    </div>
+    <div class="field">
+      <label for="confirm_password">Confirm wallet password</label>
+      <input id="confirm_password" name="confirm_password" type="password" autocomplete="new-password">
+    </div>
+    <button type="submit">Import</button>
+    <a class="button secondary" href="/wallet">Back</a>
+  </form>
+</div>
+{% endblock %}

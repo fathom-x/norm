@@ -1,0 +1,31 @@
+[package]
+name = "owallet-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Crypto primitives for owallet: AES-256-GCM, PBKDF2-SHA256, and key derivation. Byte-compatible with the Python wallet_mcp.db format."
+
+[dependencies]
+aes-gcm = { workspace = true }
+pbkdf2 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+subtle = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+# Wallet / key derivation
+bip39 = "2"
+bip32 = "0.5"
+secp256k1 = { version = "0.29", features = ["global-context", "rand", "std"] }
+bech32 = "0.11"
+tiny-keccak = { version = "2", features = ["keccak"] }
+
+# NIP-98 envelope
+base64 = "0.22"
+serde = { workspace = true }
+serde_json = { workspace = true }
