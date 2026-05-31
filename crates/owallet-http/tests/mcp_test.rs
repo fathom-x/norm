@@ -193,8 +193,18 @@ async fn mcp_list_marketplace_calls_overpay() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false);
+    // content is now a rendered summary (not raw JSON); the full payload
+    // stays in structuredContent (fathom-x/overpay#295).
     let content_text = body["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(content_text.contains("\"id\": \"L1\""));
+    assert!(content_text.contains("L1"), "rendered text: {content_text}");
+    assert!(
+        content_text.contains("Demo"),
+        "rendered text: {content_text}"
+    );
+    assert!(
+        content_text.contains("get_listing"),
+        "next-step steer: {content_text}"
+    );
     assert_eq!(
         body["result"]["structuredContent"]["data"][0]["title"],
         "Demo"
@@ -252,6 +262,8 @@ async fn mcp_get_wallet_orders_without_token_falls_back_to_nip98() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false);
+    let content_text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(content_text.contains("O1"), "rendered text: {content_text}");
     let data = &body["result"]["structuredContent"]["data"];
     assert_eq!(data[0]["id"], "O1");
 }
@@ -279,6 +291,8 @@ async fn mcp_get_wallet_orders_with_no_wallet_returns_no_wallet_error() {
     assert_eq!(body["result"]["isError"], true);
     let text = body["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("no wallet selected"), "got: {text}");
+    // Friendly errors append an actionable next step (#295).
+    assert!(text.contains("owallet select"), "next-step hint: {text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -311,6 +325,7 @@ async fn mcp_send_usdc_rejects_bad_recipient_address() {
     assert_eq!(body["result"]["isError"], true);
     let text = body["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("invalid recipient address"), "got: {text}");
+    assert!(text.contains("Next:"), "next-step hint: {text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -346,6 +361,7 @@ async fn mcp_send_usdc_rejects_unknown_chain() {
     assert_eq!(body["result"]["isError"], true);
     let text = body["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("unsupported chain"), "got: {text}");
+    assert!(text.contains("Next:"), "next-step hint: {text}");
 }
 
 // ---------------------------------------------------------------------------
@@ -423,14 +439,15 @@ async fn mcp_bearer_known_token_unlocks_wallet_scoped_tools() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false);
-    // `get_account_info` now emits two text content blocks (markdown +
-    // JSON) instead of `structuredContent`. The JSON block carries the
-    // username under `account.data.username` to match Python's full
-    // Rails-envelope passthrough.
-    let content = body["result"]["content"].as_array().unwrap();
-    let dump: Value = serde_json::from_str(content[1]["text"].as_str().unwrap()).unwrap();
+    // `get_account_info` now emits a single markdown summary block in
+    // `content`; the structured payload lives in `structuredContent`
+    // (fathom-x/overpay#295). The latter carries the username under
+    // `account.data.username` to match Python's Rails-envelope passthrough.
+    let dump = &body["result"]["structuredContent"];
     assert_eq!(dump["npub"], "npub1alice");
     assert_eq!(dump["account"]["data"]["username"], "alice");
+    let md = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(md.contains("| Username | alice |"), "markdown: {md}");
 }
 
 // ---------------------------------------------------------------------------
@@ -599,15 +616,12 @@ async fn mcp_get_account_info_includes_onchain_balances() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false);
-    // `get_account_info` now emits two text content blocks matching the
-    // Python tool: a markdown summary table + a JSON dump
-    // (fathom-x/overpay#288 follow-up). No `structuredContent`.
+    // `get_account_info` now emits a single markdown summary block in
+    // `content` plus the structured payload in `structuredContent`
+    // (fathom-x/overpay#295). The markdown rows match the Python tool's
+    // table layout.
     let content = body["result"]["content"].as_array().unwrap();
-    assert_eq!(
-        content.len(),
-        2,
-        "expected markdown + JSON blocks: {content:?}"
-    );
+    assert_eq!(content.len(), 1, "expected one markdown block: {content:?}");
     let md = content[0]["text"].as_str().unwrap();
     assert!(
         md.starts_with("| Field | Value |"),
@@ -619,7 +633,7 @@ async fn mcp_get_account_info_includes_onchain_balances() {
     assert!(md.contains("| Username | alice |"));
     assert!(md.contains("| Account Number | 0001-0002-0003-0004 |"));
 
-    let dump: Value = serde_json::from_str(content[1]["text"].as_str().unwrap()).unwrap();
+    let dump = &body["result"]["structuredContent"];
     assert_eq!(dump["network"], "eip155:8453");
     assert_eq!(dump["chain_id"], 8453);
     assert!(dump["pubkey"].as_str().unwrap().len() == 64);
@@ -657,6 +671,9 @@ async fn mcp_get_merchant_credits_lists_all_when_no_slug() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false);
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("@alice"), "rendered text: {text}");
+    assert!(text.contains("$12.34"), "rendered text: {text}");
     assert_eq!(
         body["result"]["structuredContent"]["data"][0]["seller_slug"],
         "alice"
@@ -728,6 +745,9 @@ async fn mcp_redeem_merchant_credits_posts_order_id() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false);
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("$15.00"), "redeemed amount: {text}");
+    assert!(text.contains("$35.00"), "remaining balance: {text}");
     assert_eq!(body["result"]["structuredContent"]["status"], "applied");
     assert_eq!(
         body["result"]["structuredContent"]["amount_redeemed_cents"],
@@ -802,6 +822,11 @@ async fn mcp_buy_composes_purchase_then_send_usdc() {
         structured.get("chain").is_none(),
         "chain must NOT be in the strict-shape output: {structured:?}",
     );
+    // Rendered text confirms the send + steers to wait_for_order (#295).
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("ord_buy_001"), "rendered text: {text}");
+    assert!(text.contains("Payment sent"), "rendered text: {text}");
+    assert!(text.contains("wait_for_order"), "next-step steer: {text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -887,6 +912,11 @@ async fn mcp_get_listing_forwards_rails_envelope_with_schema() {
         structured["data"]["buyer_note_schema"]["required"][0],
         "code"
     );
+    // Rendered text names the required field + steers to create_order (#295).
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("L42"), "rendered text: {text}");
+    assert!(text.contains("code"), "required field surfaced: {text}");
+    assert!(text.contains("create_order"), "steer: {text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1189,6 +1219,9 @@ async fn mcp_wait_for_order_returns_snap_plus_waited_seconds_and_timed_out_false
         "waited_seconds missing: {snap}"
     );
     assert_eq!(snap["timed_out"], false);
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("ord_wait_1"), "rendered text: {text}");
+    assert!(text.contains("Reached after"), "rendered text: {text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1241,6 +1274,8 @@ async fn mcp_wait_for_order_timeout_returns_snap_with_timed_out_true() {
     let snap = &body["result"]["structuredContent"];
     assert_eq!(snap["data"]["fulfillment_status"], "shipping");
     assert_eq!(snap["timed_out"], true);
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Timed out after"), "rendered text: {text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1296,6 +1331,13 @@ async fn mcp_buy_no_usdc_seller_returns_error_dict_not_iserror() {
     assert_eq!(r["order_id"], "ord_partial");
     assert_eq!(r["order_url"], "https://example.com/orders/ord_partial");
     assert!(r["hint"].as_str().unwrap().contains("web checkout"));
+    // Soft error renders as a warning with the order_url surfaced (#295).
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("⚠️"), "warning marker: {text}");
+    assert!(
+        text.contains("https://example.com/orders/ord_partial"),
+        "order_url surfaced: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1342,6 +1384,10 @@ async fn mcp_get_order_status_caches_terminal_and_strips_large_content() {
         .as_str()
         .unwrap()
         .contains("get_purchase"));
+    // Rendered text surfaces the cached-content pointer + steer (#295).
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("3000"), "cached size in text: {text}");
+    assert!(text.contains("get_purchase"), "steer: {text}");
 
     // get_purchase returns the full cached content.
     let res2 = s
@@ -1375,6 +1421,9 @@ async fn mcp_get_order_status_caches_terminal_and_strips_large_content() {
     assert_eq!(purchases[0]["order_id"], "ord1");
     assert!(purchases[0].get("delivered_content").is_none());
     assert!(purchases[0].get("snapshot").is_none());
+    let text3 = body3["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text3.contains("1 cached"), "rendered text: {text3}");
+    assert!(text3.contains("ord1"), "rendered text: {text3}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1419,6 +1468,10 @@ async fn mcp_get_purchase_returns_not_cached_for_unknown() {
     let body: Value = res.json();
     assert_eq!(body["result"]["structuredContent"]["error"], "not_cached");
     assert_eq!(body["result"]["structuredContent"]["order_id"], "nope");
+    // not_cached renders as an info nudge steering to get_order_status (#295).
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("nope"), "rendered text: {text}");
+    assert!(text.contains("get_order_status"), "steer: {text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1454,6 +1507,8 @@ async fn mcp_sync_purchases_backfills_from_rails() {
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false, "body: {body}");
     assert_eq!(body["result"]["structuredContent"]["synced"], 2);
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Synced 2"), "rendered text: {text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

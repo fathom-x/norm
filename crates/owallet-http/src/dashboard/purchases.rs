@@ -144,8 +144,7 @@ pub async fn sync_post(
 
     let result: Value = match owallet_mcp::tools::dispatch(&mcp, "sync_purchases", json!({})).await
     {
-        Ok(owallet_mcp::tools::ToolOutput::Json(v)) => v,
-        Ok(_) => json!({}),
+        Ok(out) => out.data,
         Err(e) => json!({ "error": e.to_string() }),
     };
 

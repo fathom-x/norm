@@ -158,30 +158,24 @@ async fn tools_call(state: &McpState, params: Value) -> Result<Value, JrpcError>
 
     let outcome = tools::dispatch(state, &params.name, params.arguments).await;
     // MCP wraps tool output as `{ content: [...], isError: bool }`.
-    // `ToolOutput::Json(v)` is the common case: one pretty-text block
-    // plus structuredContent. `ToolOutput::Content(blocks)` lets a
-    // tool emit multiple content blocks (used by `get_account_info`
-    // to match the Python tool's markdown-table + JSON dual output).
+    // The model only sees `content`, so we put the rendered, model-facing
+    // summary there (`out.text`, built by `crate::render`) and keep the
+    // raw payload in `structuredContent` for programmatic clients
+    // (fathom-x/overpay#295). Errors render to a friendly, actionable
+    // message via `render::render_error`.
     Ok(match outcome {
-        Ok(tools::ToolOutput::Json(value)) => json!({
+        Ok(out) => json!({
             "content": [{
                 "type": "text",
-                "text": serde_json::to_string_pretty(&value).unwrap_or_default(),
+                "text": out.text,
             }],
-            "structuredContent": value,
-            "isError": false,
-        }),
-        Ok(tools::ToolOutput::Content(blocks)) => json!({
-            "content": blocks
-                .into_iter()
-                .map(|b| json!({"type": "text", "text": b.text}))
-                .collect::<Vec<_>>(),
+            "structuredContent": out.data,
             "isError": false,
         }),
         Err(e) => json!({
             "content": [{
                 "type": "text",
-                "text": e.to_string(),
+                "text": crate::render::render_error(&e),
             }],
             "isError": true,
         }),

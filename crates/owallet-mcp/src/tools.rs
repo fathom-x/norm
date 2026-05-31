@@ -1,11 +1,14 @@
 //! Tool registry and per-tool handlers.
 //!
 //! Each tool is async, takes the shared `McpState` plus a JSON `arguments`
-//! object, and returns a JSON `result`. The 10 tool names mirror
-//! `wallet_mcp/server.py:1418-2118`. `buy` + `redeem_merchant_credits`
-//! still return `NotImplemented` while the Rails endpoint shapes are
-//! locked down; everything else (including the alloy-backed `send_usdc`)
-//! is fully wired.
+//! object, and returns a bare `serde_json::Value`. The tool names mirror
+//! `wallet_mcp/server.py:1418-2118`; all are fully wired (including the
+//! alloy-backed `send_usdc` / `buy`).
+//!
+//! Handlers stay pure data fetchers: [`dispatch`] renders each `Value`
+//! into a concise, model-facing summary via [`crate::render`] and returns
+//! both legs in a [`ToolOutput`] (rendered text → MCP `content`, raw data
+//! → `structuredContent`). See fathom-x/overpay#295.
 
 use std::time::Duration;
 
@@ -219,60 +222,60 @@ pub fn catalog() -> Vec<ToolSpec> {
     ]
 }
 
-/// Output shape from a tool handler.
+/// Output shape from a tool handler (fathom-x/overpay#295).
 ///
-/// Most tools return a single JSON value; the transport wraps that into
-/// one pretty-printed text content block plus `structuredContent`.
-/// `get_account_info` mirrors the Python tool which emits **two**
-/// `TextContent` blocks (a markdown summary table + a JSON dump) — for
-/// those cases the handler builds the `content` array itself and
-/// `structuredContent` is omitted.
-pub enum ToolOutput {
-    Json(Value),
-    Content(Vec<ContentBlock>),
-}
-
-#[derive(Debug, Clone)]
-pub struct ContentBlock {
+/// Every tool yields both legs:
+/// - `text` — a concise, model-readable summary with a `Next:` steer
+///   (built by [`crate::render`]). This is what lands in the MCP
+///   `content` blocks and therefore in the model's context window.
+/// - `data` — the raw `serde_json::Value` the handler produced, kept in
+///   `structuredContent` for programmatic clients (it does **not** count
+///   against the model's context).
+///
+/// Handlers themselves still return a bare `Value`; [`dispatch`] renders
+/// the text and pairs the two together, so per-handler code stays a pure
+/// data fetch.
+pub struct ToolOutput {
     pub text: String,
+    pub data: Value,
 }
 
-impl From<Value> for ToolOutput {
-    fn from(v: Value) -> Self {
-        Self::Json(v)
-    }
-}
-
-/// Dispatch a `tools/call` to the right handler. Returns the JSON value
-/// that should be placed in the JSON-RPC `result.content[0].text` / etc.
+/// Dispatch a `tools/call` to the right handler, then render its `Value`
+/// into the model-facing summary. Returns both the rendered `text` and
+/// the raw `data` for the transport to place in `content` /
+/// `structuredContent` respectively.
 pub async fn dispatch(state: &McpState, name: &str, args: Value) -> Result<ToolOutput, ToolError> {
-    match name {
-        "get_account_info" => get_account_info(state).await,
-        "list_marketplace" => list_marketplace(state, args).await.map(Into::into),
-        "get_wallet_orders" => get_wallet_orders(state, args).await.map(Into::into),
-        "get_listing" => get_listing(state, args).await.map(Into::into),
-        "create_order" => create_order(state, args).await.map(Into::into),
-        "get_order_status" => get_order_status(state, args).await.map(Into::into),
-        "wait_for_order" => wait_for_order(state, args).await.map(Into::into),
-        "get_merchant_credits" => get_merchant_credits(state, args).await.map(Into::into),
-        "redeem_merchant_credits" => redeem_merchant_credits(state, args).await.map(Into::into),
-        "buy" => buy(state, args).await.map(Into::into),
-        "send_usdc" => send_usdc(state, args).await.map(Into::into),
-        "list_purchases" => list_purchases(state, args).await.map(Into::into),
-        "get_purchase" => get_purchase(state, args).await.map(Into::into),
-        "sync_purchases" => sync_purchases(state, args).await.map(Into::into),
-        other => Err(ToolError::InvalidArg {
-            arg: "name",
-            reason: format!("unknown tool '{other}'"),
-        }),
-    }
+    let data: Value = match name {
+        "get_account_info" => get_account_info(state).await?,
+        "list_marketplace" => list_marketplace(state, args).await?,
+        "get_wallet_orders" => get_wallet_orders(state, args).await?,
+        "get_listing" => get_listing(state, args).await?,
+        "create_order" => create_order(state, args).await?,
+        "get_order_status" => get_order_status(state, args).await?,
+        "wait_for_order" => wait_for_order(state, args).await?,
+        "get_merchant_credits" => get_merchant_credits(state, args).await?,
+        "redeem_merchant_credits" => redeem_merchant_credits(state, args).await?,
+        "buy" => buy(state, args).await?,
+        "send_usdc" => send_usdc(state, args).await?,
+        "list_purchases" => list_purchases(state, args).await?,
+        "get_purchase" => get_purchase(state, args).await?,
+        "sync_purchases" => sync_purchases(state, args).await?,
+        other => {
+            return Err(ToolError::InvalidArg {
+                arg: "name",
+                reason: format!("unknown tool '{other}'"),
+            })
+        }
+    };
+    let text = crate::render::render(name, &data);
+    Ok(ToolOutput { text, data })
 }
 
 // ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
 
-async fn get_account_info(state: &McpState) -> Result<ToolOutput, ToolError> {
+async fn get_account_info(state: &McpState) -> Result<Value, ToolError> {
     use owallet_overpay::OverpayError;
 
     let npub = state.resolve_npub().ok_or(ToolError::NoWallet)?;
@@ -314,10 +317,6 @@ async fn get_account_info(state: &McpState) -> Result<ToolOutput, ToolError> {
             .parse::<u64>()
             .ok()
     });
-    let chain_name: String = chain_info
-        .as_ref()
-        .map(|c| c.name.to_string())
-        .unwrap_or_else(|| state.evm_network.clone());
 
     // Field order mirrors the Python tool's dict initialisation in
     // `server.py:1726-1732`.
@@ -412,42 +411,10 @@ async fn get_account_info(state: &McpState) -> Result<ToolOutput, ToolError> {
         }
     }
 
-    let result_value = Value::Object(result);
-
-    // Markdown table: layout matches `server.py:1771-1789`.
-    let eth_display = balance_display(&result_value, "eth_balance", "ETH", &chain_name);
-    let usdc_display = balance_display(&result_value, "usdc_balance", "USDC", &chain_name);
-    let account_data = result_value.get("account").and_then(|a| a.get("data"));
-    let username = account_data
-        .and_then(|d| d.get("username").and_then(|v| v.as_str()))
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            result_value
-                .get("account_hint")
-                .and_then(|v| v.as_str())
-                .unwrap_or("—")
-                .to_string()
-        });
-    let account_number = account_data
-        .and_then(|d| d.get("formatted_account_number").and_then(|v| v.as_str()))
-        .unwrap_or("—");
-
-    let mut md = String::from("| Field | Value |\n|---|---|\n");
-    md.push_str(&format!("| Address | {address} |\n"));
-    md.push_str(&format!("| Network | {} |\n", state.evm_network));
-    md.push_str(&format!("| npub | {npub} |\n"));
-    md.push_str(&format!("| ETH Balance | {eth_display} |\n"));
-    md.push_str(&format!("| USDC Balance | {usdc_display} |\n"));
-    md.push_str(&format!("| Username | {username} |\n"));
-    md.push_str(&format!("| Account Number | {account_number} |"));
-
-    let json_text = serde_json::to_string(&result_value)
-        .map_err(|e| ToolError::Internal(format!("serialize account info: {e}")))?;
-
-    Ok(ToolOutput::Content(vec![
-        ContentBlock { text: md },
-        ContentBlock { text: json_text },
-    ]))
+    // The markdown summary table is built by `render::render_account`
+    // from this same object; the handler just returns the structured
+    // data (which also becomes `structuredContent`).
+    Ok(Value::Object(result))
 }
 
 /// Build a `{raw, formatted, symbol}` balance value matching the shape
@@ -465,22 +432,6 @@ fn balance_value(raw_u128: u128, formatted: String, symbol: &str) -> Value {
         "formatted": formatted,
         "symbol":    symbol,
     })
-}
-
-/// Render the markdown-table cell for a balance, matching the
-/// `eth_bal.get("formatted", result.get("balance_error", ...))` chain
-/// in `server.py:1776-1783`.
-fn balance_display(result: &Value, key: &str, symbol: &str, chain_name: &str) -> String {
-    if let Some(formatted) = result
-        .get(key)
-        .and_then(|v| v.get("formatted").and_then(|v| v.as_str()))
-    {
-        format!("{formatted} {symbol} ({chain_name})")
-    } else if let Some(err) = result.get("balance_error").and_then(|v| v.as_str()) {
-        err.to_string()
-    } else {
-        "unavailable".to_string()
-    }
 }
 
 #[derive(Debug, Deserialize, Default)]
