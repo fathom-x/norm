@@ -140,6 +140,17 @@ pub fn resolve(selector: &ConfigSelector) -> Result<Vec<PathBuf>, ConfigError> {
     })
 }
 
+/// Ordered list of directories searched for `.owallet` config files at
+/// runtime (mirrors the logic used by [`resolve`], without a selector).
+///
+/// Checks, in priority order:
+///   1. `$OWALLET_CONFIG_DIR`, if set and non-empty;
+///   2. the current working directory;
+///   3. the directory containing the running executable.
+pub fn search_dirs() -> Vec<PathBuf> {
+    base_dirs(&ConfigSelector::default())
+}
+
 /// Ordered list of directories to search for a `<name>.owallet` file.
 ///
 /// When `selector.repo_root` is set (tests, or an explicit anchor) only that

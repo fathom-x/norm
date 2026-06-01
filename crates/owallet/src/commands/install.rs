@@ -56,6 +56,10 @@ pub fn run(args: InstallArgs<'_>) -> Result<()> {
         }
         println!("Installed {} entries → {}", entries.len(), path.display());
     }
+
+    let sel = config_selector(args.cli);
+    super::scaffold_owallet_configs([sel.prod, sel.dev, sel.staging])?;
+
     Ok(())
 }
 
