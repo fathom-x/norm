@@ -39,14 +39,16 @@ fn init_creates_db_file() {
 }
 
 #[test]
-fn init_fails_if_db_already_exists() {
+fn init_is_idempotent_when_db_already_exists() {
     let tmp = TempDir::new().unwrap();
     owallet(&tmp, "pw").arg("init").assert().success();
+    // `init` is now idempotent: re-running on an existing DB prints a notice
+    // and succeeds (it still scaffolds any missing .owallet configs).
     owallet(&tmp, "pw")
         .arg("init")
         .assert()
-        .failure()
-        .stderr(contains("already exists"));
+        .success()
+        .stdout(contains("already exists"));
 }
 
 #[test]
@@ -94,14 +96,14 @@ fn generate_stores_a_wallet_and_makes_it_default() {
         .expect("12-word phrase line present");
     assert_eq!(phrase_line.split_whitespace().count(), 12);
 
-    // The account command now shows the wallet.
+    // The account command now shows the wallet in a Field/Value table.
     owallet(&tmp, "pw")
         .arg("account")
         .assert()
         .success()
-        .stdout(contains("Default wallet"))
-        .stdout(contains("npub:"))
-        .stdout(contains("address:"));
+        .stdout(contains("Address"))
+        .stdout(contains("npub1"))
+        .stdout(contains("0x"));
 }
 
 #[test]
