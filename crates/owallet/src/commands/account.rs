@@ -80,7 +80,10 @@ pub fn run() -> Result<()> {
                 let usdc =
                     block_on(async { owallet_evm::usdc_balance(&rpc_url, &chain, address).await })
                         .map(|v| {
-                            format!("{} USDC", owallet_evm::format_amount(v, chain.usdc_decimals))
+                            format!(
+                                "{} USDC",
+                                owallet_evm::format_amount(v, chain.usdc_decimals)
+                            )
                         })
                         .unwrap_or_else(|e| format!("(error: {e})"));
                 (eth, usdc)

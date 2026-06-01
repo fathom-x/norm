@@ -48,7 +48,10 @@ pub fn run() -> Result<()> {
         Err(e) => println!("  ETH:  (could not fetch: {e})"),
     }
     match block_on(async { owallet_evm::usdc_balance(&rpc_url, &chain, address).await }) {
-        Ok(v) => println!("  USDC: {}", owallet_evm::format_amount(v, chain.usdc_decimals)),
+        Ok(v) => println!(
+            "  USDC: {}",
+            owallet_evm::format_amount(v, chain.usdc_decimals)
+        ),
         Err(e) => println!("  USDC: (could not fetch: {e})"),
     }
 
