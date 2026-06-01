@@ -1,10 +1,9 @@
-//! `owallet account` — wallet metadata + the linked Overpay account.
+//! `owallet account` — wallet identity + Overpay account + on-chain balances.
 //!
-//! If a Bearer token is stored we use it. Otherwise we fall back to a
-//! NIP-98-signed request using the wallet key — many Overpay endpoints
-//! accept the wallet's npub identity directly.
+//! If a Bearer token is stored we use it to fetch the Overpay account.
+//! Otherwise we fall back to NIP-98 signing via the wallet key.
 
-use owallet_crypto::derive_from_stored_seed;
+use owallet_crypto::{derive_from_stored_seed, Address};
 use owallet_db::default_db_path;
 use owallet_overpay::Auth;
 
@@ -20,102 +19,108 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
-    let chosen = db
+    let npub = db
         .read_default_npub()?
         .ok_or_else(|| CmdError::BadInput("no default wallet — run `owallet select`".into()))?;
     let w = wallets
         .iter()
-        .find(|w| w.npub == chosen)
-        .ok_or_else(|| CmdError::NotFound(chosen.clone()))?;
+        .find(|w| w.npub == npub)
+        .ok_or_else(|| CmdError::NotFound(npub.clone()))?;
 
-    println!("Default wallet:");
-    println!("  npub:    {}", w.npub);
-    if let Some(a) = &w.address {
-        println!("  address: {a}");
-    }
-    if let Some(u) = &w.overpay_username {
-        println!("  overpay: {u}");
-    }
-    if let Some(ts) = w.last_accessed {
-        println!("  last accessed (unix): {ts}");
-    }
-
-    let stored_token = db.read_token(&w.npub, &host_key())?;
-    let seed = db.read_seed(&w.npub)?;
-
-    let overpay = overpay_client()?;
-    let (auth_label, fetch) = if let Some(t) = stored_token.as_deref() {
-        (
-            "Bearer",
-            block_on(async { overpay.account(Auth::Bearer(t)).await }),
-        )
-    } else if let Some(s) = seed.as_deref() {
-        match derive_from_stored_seed(s) {
-            Ok(sk) => (
-                "NIP-98 (no Bearer stored — run `owallet authorize` to skip this signing)",
-                block_on(async { overpay.account(Auth::Nip98(&sk)).await }),
-            ),
-            Err(e) => {
-                eprintln!("(could not derive wallet key for NIP-98: {e})");
-                return Ok(());
-            }
-        }
+    // Resolve address: stored or derived from seed.
+    let derived_addr;
+    let address = if let Some(a) = w.address.as_deref() {
+        a
+    } else if let Some(seed) = db.read_seed(&npub)? {
+        let sk = derive_from_stored_seed(&seed)?;
+        derived_addr = Address::from_private_key(&sk).to_hex_lower();
+        let _ = db.cache_wallet_address(&npub, &derived_addr);
+        &derived_addr
     } else {
-        return Ok(());
+        ""
     };
 
-    match fetch {
-        Ok(info) => {
-            println!();
-            println!("Linked Overpay account ({auth_label}):");
-            if let Some(u) = info.username.as_deref() {
-                println!("  username:       {u}");
-                let _ = db.cache_wallet_username(&w.npub, u);
-            }
-            if let Some(n) = info.account_number.as_deref() {
-                println!("  account number: {n}");
-            }
-            if let Some(e) = info.email.as_deref() {
-                println!("  email:          {e}");
-            }
-        }
-        Err(e) => {
-            eprintln!("(could not refresh Overpay account info: {e})");
-        }
-    }
-
-    // On-chain balances. Best-effort — RPC failure prints a notice but
-    // never panics or short-circuits the rest of the command.
-    if let Some(addr) = w.address.as_deref() {
-        print_onchain_balances(addr);
-    }
-
-    Ok(())
-}
-
-fn print_onchain_balances(address: &str) {
+    // EVM config.
     let rpc_url =
         std::env::var("EVM_RPC_URL").unwrap_or_else(|_| "https://mainnet.base.org".into());
     let network = std::env::var("EVM_NETWORK").unwrap_or_else(|_| "eip155:8453".into());
-    let chain = match owallet_evm::chains::from_caip2(&network) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("(skipping on-chain balances: bad EVM_NETWORK {network:?}: {e})");
-            return;
+
+    // Fetch Overpay account info (best-effort).
+    let stored_token = db.read_token(&npub, &host_key())?;
+    let seed = db.read_seed(&npub)?;
+    let overpay_info = if let Ok(client) = overpay_client() {
+        if let Some(t) = stored_token.as_deref() {
+            block_on(async { client.account(Auth::Bearer(t)).await }).ok()
+        } else if let Some(s) = seed.as_deref() {
+            derive_from_stored_seed(s)
+                .ok()
+                .and_then(|sk| block_on(async { client.account(Auth::Nip98(&sk)).await }).ok())
+        } else {
+            None
         }
+    } else {
+        None
     };
 
-    println!();
-    println!("On-chain balances on {} ({}):", chain.name, network);
-    match block_on(async { owallet_evm::eth_balance(&rpc_url, address).await }) {
-        Ok(v) => println!("  eth:  {} ETH", owallet_evm::format_amount(v, 18)),
-        Err(e) => println!("  eth:  (could not fetch: {e})"),
+    if let Some(info) = &overpay_info {
+        if let Some(u) = info.username.as_deref() {
+            let _ = db.cache_wallet_username(&npub, u);
+        }
     }
-    match block_on(async { owallet_evm::usdc_balance(&rpc_url, &chain, address).await }) {
-        Ok(v) => println!(
-            "  usdc: {} USDC",
-            owallet_evm::format_amount(v, chain.usdc_decimals)
-        ),
-        Err(e) => println!("  usdc: (could not fetch: {e})"),
+
+    // Fetch on-chain balances (best-effort).
+    let rails_url =
+        std::env::var("OVERPAY_RAILS_URL").unwrap_or_else(|_| "https://overpay.com".into());
+    let (eth_str, usdc_str) = if !address.is_empty() {
+        match owallet_evm::chains::from_caip2(&network) {
+            Ok(chain) => {
+                let eth = block_on(async { owallet_evm::eth_balance(&rpc_url, address).await })
+                    .map(|v| format!("{} ETH", owallet_evm::format_amount(v, 18)))
+                    .unwrap_or_else(|e| format!("(error: {e})"));
+                let usdc =
+                    block_on(async { owallet_evm::usdc_balance(&rpc_url, &chain, address).await })
+                        .map(|v| {
+                            format!("{} USDC", owallet_evm::format_amount(v, chain.usdc_decimals))
+                        })
+                        .unwrap_or_else(|e| format!("(error: {e})"));
+                (eth, usdc)
+            }
+            Err(e) => (
+                format!("(bad EVM_NETWORK: {e})"),
+                format!("(bad EVM_NETWORK: {e})"),
+            ),
+        }
+    } else {
+        ("(no address)".into(), "(no address)".into())
+    };
+
+    let username = overpay_info
+        .as_ref()
+        .and_then(|i| i.username.as_deref())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!("No Overpay account linked to this wallet. Sign up at {rails_url}")
+        });
+    let account_number = overpay_info
+        .as_ref()
+        .and_then(|i| i.account_number.as_deref())
+        .unwrap_or("—");
+
+    let rows: &[(&str, &str)] = &[
+        ("Address", address),
+        ("Network", &network),
+        ("npub", &npub),
+        ("ETH Balance", &eth_str),
+        ("USDC Balance", &usdc_str),
+        ("Username", &username),
+        ("Account Number", account_number),
+    ];
+
+    println!("{:<14}  Value", "Field");
+    println!("{:-<14}  {:-<72}", "", "");
+    for (k, v) in rows {
+        println!("{:<14}  {}", k, v);
     }
+
+    Ok(())
 }

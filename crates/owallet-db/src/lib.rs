@@ -251,6 +251,10 @@ impl Database {
         Ok(None)
     }
 
+    pub fn cache_wallet_address(&self, npub: &str, address: &str) -> Result<()> {
+        wallets::set_address(&self.conn, npub, address)
+    }
+
     pub fn cache_wallet_username(&self, npub: &str, username: &str) -> Result<()> {
         wallets::set_username(&self.conn, npub, username)
     }

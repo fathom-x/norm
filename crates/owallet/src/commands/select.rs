@@ -4,10 +4,10 @@ use std::io::{self, BufRead, Write};
 
 use owallet_db::{default_db_path, Database};
 
-use super::{CmdError, Result};
+use super::{open_unlock, CmdError, Result};
 
 pub fn run(identifier: Option<String>) -> Result<()> {
-    let db = Database::open(&default_db_path())?;
+    let db = open_unlock(&default_db_path())?;
     let wallets = db.list_wallets()?;
     if wallets.is_empty() {
         return Err(CmdError::NoWallets);

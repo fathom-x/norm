@@ -88,6 +88,14 @@ pub(crate) fn list_blobs(conn: &Connection) -> Result<Vec<WalletBlob>> {
     Ok(rows)
 }
 
+pub(crate) fn set_address(conn: &Connection, npub: &str, address: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE wallets SET address = ?1 WHERE npub = ?2",
+        params![address, npub],
+    )?;
+    Ok(())
+}
+
 pub(crate) fn set_username(conn: &Connection, npub: &str, username: &str) -> Result<()> {
     conn.execute(
         "UPDATE wallets SET overpay_username = ?1 WHERE npub = ?2",

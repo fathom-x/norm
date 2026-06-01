@@ -2,6 +2,7 @@
 
 mod account;
 mod authorize;
+mod balance;
 mod config;
 mod export;
 mod generate;
@@ -154,6 +155,7 @@ pub fn dispatch(args: Cli) -> Result<()> {
     }
     match args.command {
         Command::Init => init::run(),
+        Command::Balance => balance::run(),
         Command::Serve { .. } | Command::Install { .. } => unreachable!(),
         Command::Generate { words } => generate::run(words),
         Command::Import {
