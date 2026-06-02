@@ -14,6 +14,7 @@ pub mod hd;
 pub mod kdf;
 pub mod nip98;
 pub mod nostr;
+pub mod statekey;
 
 pub use aesgcm::{decrypt, encrypt, AesKey, DecryptError};
 pub use bip39::{Mnemonic, MnemonicError, WordCount};
@@ -24,3 +25,4 @@ pub use hd::{
 };
 pub use kdf::{derive_key, hashes_equal, verify_hash, KDF_ITERATIONS, KEY_LEN, SALT_LEN};
 pub use nostr::{npub_decode, npub_encode, npub_from_private_key, xonly_pubkey, NostrError};
+pub use statekey::derive_state_key;

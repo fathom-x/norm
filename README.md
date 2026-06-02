@@ -48,7 +48,7 @@ Or build from source:
 
 ```bash
 cd owallet-rs
-cargo install --path crates/owallet
+cargo install --path crates/owallet --features dev-envs
 ```
 
 ## Quick start
@@ -73,26 +73,28 @@ owallet install --claude-local
 The dashboard lives at `http://127.0.0.1:8765/wallet`. The MCP endpoint
 is `http://127.0.0.1:8765/mcp` (JSON-RPC 2.0).
 
-## Multi-env
+## Custom environments
 
-`.owallet` config files (`prod.owallet`, `dev.owallet`, `staging.owallet`)
-hold per-env overrides for `OVERPAY_RAILS_URL`, `OVERPAY_PUBLIC_URL`,
-`OWALLET_PORT`. Combine flags to run multiple servers at once:
+Public builds target production. To point owallet at a different backend,
+pass an explicit dotenv file with `--config PATH`; it can set
+`OVERPAY_RAILS_URL`, `OVERPAY_PUBLIC_URL`, and `OWALLET_PORT`:
 
 ```bash
-owallet --dev --staging serve            # one server per env, each on its OWALLET_PORT
-owallet --prod --dev --staging serve --port 9001,9002,9003   # positional port overrides
-owallet --staging install --claude-global # registers owallet-staging
+owallet --config ./my.owallet serve
+owallet --config ./my.owallet install --claude-global
 ```
 
-To override a URL from the environment (rather than a `.owallet` file),
-the var must carry the env's suffix: `OVERPAY_RAILS_URL_PROD`,
-`OVERPAY_RAILS_URL_DEV`, `OVERPAY_RAILS_URL_STAGING` (same for
-`OVERPAY_PUBLIC_URL`). A bare, unsuffixed `OVERPAY_RAILS_URL` from the
-shell is deliberately ignored when a config is active — values come from
-the config file or the suffixed env var. `owallet install` / `config
---mcp` register only the local `owallet` server (owallet no longer
-calls a hosted Overpay MCP).
+`owallet install` / `config --mcp` register only the local `owallet`
+server (owallet no longer calls a hosted Overpay MCP).
+
+> **Internal `dev-envs` builds.** The `--dev` / `--staging` selectors and
+> their built-in defaults are gated behind the `dev-envs` Cargo feature
+> (`cargo build --features dev-envs`) and are **not present in public
+> release builds**. In those internal builds, combining flags runs one
+> server per environment (`owallet --dev --staging serve`), and a URL
+> override from the shell must carry the env suffix
+> (`OVERPAY_RAILS_URL_DEV`, `OVERPAY_RAILS_URL_STAGING`); a bare,
+> unsuffixed `OVERPAY_RAILS_URL` is ignored while a config is active.
 
 ## CLI reference
 
@@ -112,15 +114,17 @@ calls a hosted Overpay MCP).
 | `install --{claude,opencode,codex}-{local,global}` | Register MCP entries |
 | `config [--mcp]` | Show env config (or print the `.mcp.json` blob) |
 
-Every command accepts `--config PATH` (explicit `.owallet` file, must exist)
-or `--prod`/`--dev`/`--staging` (load the matching file from cwd; missing
-is silently OK except for `--config`).
+Every command accepts `--prod` (built-in production defaults) or
+`--config PATH` (an explicit dotenv file, must exist). The `--dev` /
+`--staging` selectors exist only in internal `dev-envs` builds (see
+[Custom environments](#custom-environments)).
 
 ## Environment variables
 
 | Var | Default | Used by |
 |---|---|---|
 | `OWALLET_DB_PATH` | `~/.owallet.db` | every command |
+| `OWALLET_HOME` | DB path w/o extension (`~/.owallet`) | per-wallet state directory base (`<home>/<npub>/`) |
 | `OWALLET_PASSWORD` | _(prompted)_ | non-interactive DB unlock |
 | `OWALLET_WALLET_PASSWORD` | _(prompted)_ | non-interactive per-wallet password for `generate` / `import` |
 | `OWALLET_PORT` | `8765` | `serve`, `install`, `config` |
@@ -143,6 +147,20 @@ Overpay Rails API, it picks a stored Bearer token if one exists. If not,
 it falls back to a per-request **NIP-98** envelope signed with the
 wallet's secp256k1 key — so most Overpay calls work even without running
 `owallet authorize` first.
+
+**Per-wallet state directory.** Each wallet has a directory at
+`<data dir>/<npub>/` for bulky per-wallet artifacts — chain sync state,
+the order cache — kept beside the rest of the wallet's data so a backup
+is just "copy the directory". The data dir co-locates with the DB file
+(default `~/.owallet.db` → `~/.owallet/`; a custom `OWALLET_DB_PATH`
+moves it too), or `OWALLET_HOME` overrides it. Artifacts written via
+`owallet_db::WalletStateDir` are AES-256-GCM encrypted under a key
+derived (HKDF-SHA256) from that wallet's private key
+(`owallet_crypto::derive_state_key`, `Database::wallet_state`), so they're
+bound to the wallet rather than the DB password. The **order cache** is
+the one deliberate exception — plaintext JSON at `<npub>/orders/` since
+it's regenerable via `sync_purchases` and read without unlocking. (Chain
+sync state is not wired yet.)
 
 **USDC send.** `send_usdc` (CLI + MCP tool) goes through `alloy` with
 `with_recommended_fillers`, which auto-populates nonce / gas / EIP-1559

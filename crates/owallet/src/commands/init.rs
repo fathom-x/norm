@@ -21,7 +21,5 @@ pub fn run() -> Result<()> {
         println!("Next: `owallet generate` to mint a fresh seed phrase, or `owallet import` to bring an existing one in.");
     }
 
-    super::scaffold_owallet_configs([false, false, false])?;
-
     Ok(())
 }

@@ -17,19 +17,20 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Load `prod.owallet` (searched in $OWALLET_CONFIG_DIR, the current
-    /// directory, then the executable's directory).
+    /// Use the built-in production environment defaults.
     #[arg(long, global = true)]
     pub prod: bool,
 
-    /// Load `dev.owallet` (searched in $OWALLET_CONFIG_DIR, the current
-    /// directory, then the executable's directory).
-    #[arg(long, global = true)]
+    /// Use the built-in dev environment defaults (internal `dev-envs` builds
+    /// only; the flag is not registered in public release builds).
+    #[cfg_attr(feature = "dev-envs", arg(long, global = true))]
+    #[cfg_attr(not(feature = "dev-envs"), arg(skip))]
     pub dev: bool,
 
-    /// Load `staging.owallet` (searched in $OWALLET_CONFIG_DIR, the current
-    /// directory, then the executable's directory).
-    #[arg(long, global = true)]
+    /// Use the built-in staging environment defaults (internal `dev-envs`
+    /// builds only; the flag is not registered in public release builds).
+    #[cfg_attr(feature = "dev-envs", arg(long, global = true))]
+    #[cfg_attr(not(feature = "dev-envs"), arg(skip))]
     pub staging: bool,
 
     #[command(subcommand)]
@@ -38,7 +39,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Initialize an encrypted wallet database at $OWALLET_DB_PATH or ~/.owallet.db.
+    /// Initialize an encrypted wallet database at $OWALLET_DB_PATH or ~/.owallet/owallet.db.
     Init,
 
     /// Run one or more HTTP servers (dashboard + OAuth AS + /mcp).
@@ -203,24 +204,23 @@ pub enum ExportFormat {
 pub fn load_env_from_flags(args: &Cli) -> Result<(), owallet_config::ConfigError> {
     let selector = config_selector(args);
     // When `serve` is going to run with multiple configs, we deliberately
-    // don't pollute the process env: each server reads its own `.owallet`
-    // in isolation. For every other command (and single-config `serve`)
-    // the standard env-population behaviour is correct.
+    // don't pollute the process env: each server resolves its own config in
+    // isolation. For every other command (and single-config `serve`) the
+    // standard env-population behaviour is correct.
     if let Command::Serve { .. } = args.command {
         if multi_config(args) {
             return Ok(());
         }
     }
-    let paths = resolve(&selector)?;
+    let configs = resolve(&selector)?;
     // Single active config: resolve the per-environment `OVERPAY_*_<POSTFIX>`
     // env vars into their unsuffixed forms (and clear any stale unsuffixed
-    // ones) before loading the file — matches `_apply_env_overrides` in
+    // ones) before applying defaults — matches `_apply_env_overrides` in
     // `wallet_mcp/cli.py`, which runs only when exactly one config is active.
-    // With zero configs the generic env var is left untouched.
-    if paths.len() == 1 {
-        owallet_config::apply_env_overrides(&owallet_config::env_postfix(&paths[0]));
+    if configs.len() == 1 {
+        owallet_config::apply_env_overrides(&configs[0].postfix());
     }
-    owallet_config::load_into_env(&paths)
+    owallet_config::load_resolved_into_env(&configs)
 }
 
 pub fn config_selector(args: &Cli) -> ConfigSelector {
@@ -229,7 +229,6 @@ pub fn config_selector(args: &Cli) -> ConfigSelector {
         prod: args.prod,
         dev: args.dev,
         staging: args.staging,
-        repo_root: None,
     }
 }
 

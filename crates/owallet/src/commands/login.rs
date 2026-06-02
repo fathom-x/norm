@@ -25,6 +25,7 @@ pub fn run() -> Result<()> {
     let url = overpay.to_public_url(&resp.url);
     println!("Opening Overpay login in your browser…");
     println!("If it doesn't open automatically, visit:\n  {url}");
-    let _ = open::that(url);
+    // Detached so a blocking browser-opener never stalls the command.
+    let _ = open::that_detached(url);
     Ok(())
 }

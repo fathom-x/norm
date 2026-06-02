@@ -15,65 +15,9 @@ mod select;
 mod send;
 mod serve;
 
-use std::path::{Path, PathBuf};
-
-use owallet_config::search_dirs;
 use thiserror::Error;
 
 use crate::cli::{Cli, Command};
-
-const SCAFFOLD_ENVS: [(&str, &str, &str); 3] = [
-    (
-        "prod",
-        "prod.owallet",
-        "OVERPAY_RAILS_URL=https://overpay.com\nOWALLET_PORT=8765\n",
-    ),
-    (
-        "dev",
-        "dev.owallet",
-        "OVERPAY_RAILS_URL=http://localhost:3001\nOWALLET_PORT=8766\n",
-    ),
-    (
-        "staging",
-        "staging.owallet",
-        "# Set OVERPAY_RAILS_URL to your staging instance\nOWALLET_PORT=8767\n",
-    ),
-];
-
-/// Scaffold missing `.owallet` config files next to the binary (or in
-/// `$OWALLET_CONFIG_DIR`). `active` = [prod, dev, staging]; pass all `false`
-/// (e.g. from `init`) to scaffold every env.
-pub(crate) fn scaffold_owallet_configs(active: [bool; 3]) -> Result<()> {
-    let dir = {
-        let from_env = std::env::var_os("OWALLET_CONFIG_DIR")
-            .filter(|d| !d.is_empty())
-            .map(PathBuf::from);
-        let from_exe = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(Path::to_path_buf));
-        match from_env.or(from_exe) {
-            Some(d) => d,
-            None => return Ok(()),
-        }
-    };
-
-    let any_explicit = active.iter().any(|b| *b);
-    let search = search_dirs();
-
-    for (i, (_env, filename, content)) in SCAFFOLD_ENVS.iter().enumerate() {
-        if any_explicit && !active[i] {
-            continue;
-        }
-        if search.iter().any(|d| d.join(filename).exists()) {
-            continue;
-        }
-        let dest = dir.join(filename);
-        std::fs::write(&dest, content)?;
-        println!("Created {}", dest.display());
-    }
-
-    Ok(())
-}
 
 #[derive(Debug, Error)]
 pub enum CmdError {

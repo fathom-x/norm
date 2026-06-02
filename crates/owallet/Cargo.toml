@@ -11,6 +11,12 @@ description = "owallet command-line interface — Overpay wallet CLI (Rust port 
 name = "owallet"
 path = "src/main.rs"
 
+[features]
+# Internal-only build that re-enables the `--dev` / `--staging` selectors and
+# their non-public environment defaults. Off by default so public releases
+# expose only `--prod` / `--config PATH`.
+dev-envs = ["owallet-config/dev-envs"]
+
 [dependencies]
 owallet-crypto = { workspace = true }
 owallet-db = { workspace = true }

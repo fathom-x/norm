@@ -11,6 +11,7 @@ mod purchases;
 mod schema;
 mod settings;
 mod tokens;
+mod wallet_state;
 mod wallets;
 
 use std::path::{Path, PathBuf};
@@ -28,16 +29,56 @@ pub use auth_codes::AuthCodeRow;
 pub use oauth_clients::OAuthClientRow;
 pub use purchases::PurchaseRow;
 pub use tokens::TokenRow;
+pub use wallet_state::{data_dir, wallet_state_dir, WalletStateDir};
 pub use wallets::WalletRow;
 
-/// Default DB path: `~/.owallet.db` (override via `OWALLET_DB_PATH`).
+/// Default DB path: `~/.owallet/owallet.db` (override via `OWALLET_DB_PATH`).
 #[must_use]
 pub fn default_db_path() -> PathBuf {
     if let Ok(path) = std::env::var("OWALLET_DB_PATH") {
         return PathBuf::from(path);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".owallet.db")
+    PathBuf::from(home).join(".owallet").join("owallet.db")
+}
+
+/// Move `~/.owallet.db` → `~/.owallet/owallet.db` if the legacy path exists
+/// and the new path does not. Skipped when `OWALLET_DB_PATH` is set (the user
+/// controls the path explicitly). Prints a one-line notice on success.
+///
+/// Returns `Err` if the legacy file exists but could not be moved — callers
+/// should treat this as fatal to avoid silently creating a fresh empty DB
+/// while the user's real data sits untouched at the old location.
+pub fn migrate_legacy_db_if_needed() -> std::io::Result<()> {
+    if std::env::var("OWALLET_DB_PATH").is_ok() {
+        return Ok(());
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let legacy = PathBuf::from(&home).join(".owallet.db");
+    let new = PathBuf::from(&home).join(".owallet").join("owallet.db");
+    if !legacy.exists() || new.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = new.parent() {
+        if parent.exists() && !parent.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} exists as a file; remove or rename it so the directory can be created",
+                    parent.display()
+                ),
+            ));
+        }
+        std::fs::create_dir_all(parent)?;
+    }
+    // rename(2) fails across devices (EXDEV) and on some macOS configs; fall
+    // back to copy + remove so the move always works.
+    if std::fs::rename(&legacy, &new).is_err() {
+        std::fs::copy(&legacy, &new)?;
+        std::fs::remove_file(&legacy)?;
+    }
+    eprintln!("Migrated {} → {}", legacy.display(), new.display());
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -56,6 +97,12 @@ pub enum DbError {
     Corrupt(String),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("wallet state: {0}")]
+    State(String),
+    #[error("key derivation: {0}")]
+    KeyDerivation(#[from] owallet_crypto::HdError),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -68,6 +115,10 @@ pub struct Database {
     conn: Connection,
     key: Option<AesKey>,
     path: PathBuf,
+    /// Base directory for per-wallet state (`<data_dir>/<npub>/…`). Defaults
+    /// to [`data_dir`]; override with [`Database::with_data_dir`] (used by
+    /// tests for isolation).
+    data_dir: PathBuf,
 }
 
 impl Database {
@@ -96,6 +147,7 @@ impl Database {
             conn,
             key: None,
             path: path.to_path_buf(),
+            data_dir: state_dir_for(path),
         };
         // Derive the AES key and leave the DB unlocked, matching db.py:189.
         db.key = Some(AesKey::new(derive_key(password, &salt)));
@@ -121,7 +173,16 @@ impl Database {
             conn,
             key: None,
             path: path.to_path_buf(),
+            data_dir: state_dir_for(path),
         })
+    }
+
+    /// Override the base directory for per-wallet state (default
+    /// [`state_dir_for`] the DB path). Mainly for tests / unusual layouts.
+    #[must_use]
+    pub fn with_data_dir(mut self, dir: PathBuf) -> Self {
+        self.data_dir = dir;
+        self
     }
 
     /// Check whether a DB file exists at the given path.
@@ -290,17 +351,36 @@ impl Database {
         Ok(wallets::read_password_hash(&self.conn, npub)?.is_some())
     }
 
-    // ---- Purchase cache ----
+    // ---- Per-wallet encrypted state directory (issue #310) ----
+
+    /// Open the per-`npub` encrypted state directory (`<data dir>/<npub>/`).
+    ///
+    /// Requires the DB to be unlocked: the directory's encryption key is
+    /// derived from the wallet's own private key, recovered from the stored
+    /// (encrypted) seed — so artifacts under it are bound to the wallet, not
+    /// the DB password. Errors if no wallet is stored for `npub`.
+    pub fn wallet_state(&self, npub: &str) -> Result<WalletStateDir> {
+        let seed = self
+            .read_seed(npub)?
+            .ok_or_else(|| DbError::State(format!("no stored wallet for {npub}")))?;
+        let sk = owallet_crypto::derive_from_stored_seed(&seed)?;
+        let key = owallet_crypto::derive_state_key(&sk);
+        let dir = wallet_state::wallet_dir_in(&self.data_dir, npub)?;
+        Ok(WalletStateDir::new(dir, key))
+    }
+
+    // ---- Order cache (per-wallet JSON files under <data_dir>/<npub>/orders) ----
 
     /// Store/refresh a cached order for `npub`. `order` is the Rails order
     /// payload (already unwrapped from any `{data: …}` envelope). Returns the
-    /// order_id, or `None` if the payload has no id. Does not require unlock —
-    /// the cached fields are plaintext metadata, like the wallet address.
+    /// order_id, or `None` if the payload has no usable id. Does not require
+    /// unlock — the order cache is stored as plaintext files (regenerable via
+    /// `sync_purchases`), so it stays readable without the master password.
     pub fn upsert_purchase(&self, npub: &str, order: &serde_json::Value) -> Result<Option<String>> {
-        purchases::upsert(&self.conn, npub, order, now_secs())
+        purchases::upsert(&self.data_dir, npub, order, now_secs())
     }
 
-    /// Cached purchases for `npub`, newest first.
+    /// Cached orders for `npub`, newest first.
     pub fn list_purchases(
         &self,
         npub: &str,
@@ -308,20 +388,20 @@ impl Database {
         offset: i64,
         fulfillment_status: Option<&str>,
     ) -> Result<Vec<PurchaseRow>> {
-        purchases::list(&self.conn, npub, limit, offset, fulfillment_status)
+        purchases::list(&self.data_dir, npub, limit, offset, fulfillment_status)
     }
 
-    /// A single cached purchase by `(npub, order_id)`.
+    /// A single cached order by `(npub, order_id)`.
     pub fn read_purchase(&self, npub: &str, order_id: &str) -> Result<Option<PurchaseRow>> {
-        purchases::read(&self.conn, npub, order_id)
+        purchases::read(&self.data_dir, npub, order_id)
     }
 
     pub fn delete_purchase(&self, npub: &str, order_id: &str) -> Result<()> {
-        purchases::delete(&self.conn, npub, order_id)
+        purchases::delete(&self.data_dir, npub, order_id)
     }
 
     pub fn count_purchases(&self, npub: &str) -> Result<i64> {
-        purchases::count(&self.conn, npub)
+        purchases::count(&self.data_dir, npub)
     }
 
     // ---- Default npub ----
@@ -446,6 +526,26 @@ impl Drop for Database {
         // AesKey zeroes itself on drop; explicit clear here is belt-and-braces.
         self.key = None;
     }
+}
+
+/// Default per-wallet state directory for a DB at `db_path`.
+///
+/// `OWALLET_HOME` wins if set. Otherwise uses the parent directory of the DB
+/// file — so the default `~/.owallet/owallet.db` yields `~/.owallet/`, and a
+/// custom `OWALLET_DB_PATH=/some/path/wallet.db` keeps its state in
+/// `/some/path/`. Falls back to [`data_dir`] when the DB has no parent.
+fn state_dir_for(db_path: &Path) -> PathBuf {
+    if let Ok(home) = std::env::var("OWALLET_HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    if let Some(parent) = db_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            return parent.to_path_buf();
+        }
+    }
+    data_dir()
 }
 
 fn now_secs() -> i64 {

@@ -1,26 +1,32 @@
-//! `purchases` table — local mirror of delivered/terminal orders per wallet.
+//! Per-wallet order cache — local mirror of delivered/terminal orders.
 //!
-//! Ports the purchase-cache functions from `wallet_mcp/db.py`. Keyed by
-//! `(npub, order_id)` so multiple wallets in one DB stay isolated.
-//! `snapshot_json` holds the full Rails order payload (including
-//! `delivered_content`) so tools don't have to re-fetch large blobs;
-//! `delivered_content` is also broken out into its own column. Plaintext —
-//! consistent with the existing unencrypted wallet metadata (address,
-//! username); the DB file itself sits behind the master password.
+//! Each wallet's cached orders live as plaintext JSON files under its per-`npub`
+//! state directory: `<data dir>/<npub>/orders/<order_id>.json` (issue #310).
+//! One file per order, written atomically (temp + rename), so concurrent
+//! upserts of different orders never race on a shared file.
+//!
+//! Plaintext for now (deliberately *not* encrypted to the wallet key — unlike
+//! the other artifacts in the per-wallet dir): the order cache is regenerable
+//! from the Rails API via `sync_purchases`, and keeping it clear avoids
+//! requiring an unlocked DB just to render the dashboard. The full Rails order
+//! payload is kept under `snapshot` so tools don't have to re-fetch large
+//! blobs.
 
-use rusqlite::{params, Connection, OptionalExtension, Row};
-use serde::Serialize;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::Result;
+use crate::{wallet_state, DbError, Result};
 
-/// One cached purchase. `snapshot` is the full Rails order payload;
+/// One cached order. `snapshot` is the full Rails order payload;
 /// `delivered_content_schema` is the parsed listing schema (if any).
-/// Serialized field names match the Python `_purchase_row_to_dict` output
-/// so the MCP/dashboard layers see byte-identical JSON.
-#[derive(Debug, Clone, Serialize)]
+/// Serialized field names match the Python `_purchase_row_to_dict` output so
+/// the MCP/dashboard layers see byte-identical JSON — and the same shape is
+/// what's persisted on disk (round-trips via `Deserialize`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PurchaseRow {
     pub order_id: String,
     pub listing_id: Option<String>,
@@ -36,6 +42,13 @@ pub struct PurchaseRow {
     pub delivered_content_schema: Option<Value>,
     pub cached_at: i64,
     pub snapshot: Value,
+}
+
+impl PurchaseRow {
+    /// Sort key matching the SQL `COALESCE(delivered_at, paid_at, cached_at)`.
+    fn order_key(&self) -> i64 {
+        self.delivered_at.or(self.paid_at).unwrap_or(self.cached_at)
+    }
 }
 
 /// Coerce a JSON value into unix seconds. Accepts an integer, a numeric
@@ -64,16 +77,59 @@ fn s(o: &Value, k: &str) -> Option<String> {
     o.get(k).and_then(Value::as_str).map(str::to_string)
 }
 
+/// `<base>/<npub>/orders`.
+fn orders_dir(base: &Path, npub: &str) -> Result<PathBuf> {
+    Ok(wallet_state::wallet_dir_in(base, npub)?.join("orders"))
+}
+
+/// Path to one order's JSON file, or `None` if `order_id` isn't a safe
+/// filename component.
+fn order_path(base: &Path, npub: &str, order_id: &str) -> Result<Option<PathBuf>> {
+    if !wallet_state::is_safe_component(order_id) {
+        return Ok(None);
+    }
+    Ok(Some(
+        orders_dir(base, npub)?.join(format!("{order_id}.json")),
+    ))
+}
+
+/// Build a [`PurchaseRow`] from a Rails order payload. Mirrors the column
+/// extraction in the former SQL `upsert`.
+fn row_from_order(order: &Value, order_id: String, now: i64) -> PurchaseRow {
+    let listing = order.get("listing").filter(|v| v.is_object());
+    let seller = order.get("seller").filter(|v| v.is_object());
+    let schema = listing
+        .and_then(|l| l.get("delivered_content_schema"))
+        .filter(|v| !v.is_null())
+        .cloned();
+
+    PurchaseRow {
+        order_id,
+        listing_id: s(order, "listing_id").or_else(|| listing.and_then(|l| s(l, "id"))),
+        title: s(order, "product_title")
+            .or_else(|| s(order, "title"))
+            .or_else(|| listing.and_then(|l| s(l, "title"))),
+        seller: s(order, "seller_slug")
+            .or_else(|| s(order, "seller_username"))
+            .or_else(|| seller.and_then(|x| s(x, "username"))),
+        payment_status: s(order, "status").or_else(|| s(order, "payment_status")),
+        fulfillment_status: s(order, "fulfillment_status"),
+        delivered_at: coerce_unix_secs(order.get("delivered_at")),
+        paid_at: coerce_unix_secs(order.get("paid_at")),
+        total_usd_cents: coerce_unix_secs(order.get("total_usd_cents")),
+        delivered_content: s(order, "delivered_content"),
+        delivered_content_type: s(order, "delivered_content_type"),
+        delivered_content_schema: schema,
+        cached_at: now,
+        snapshot: order.clone(),
+    }
+}
+
 /// Store/refresh a cached order for a wallet. `order` is the Rails order
 /// payload (already unwrapped from any `{data: …}` envelope). Returns the
-/// order_id on success, or `None` if the payload has no id. Mirrors
-/// `upsert_purchase` in `wallet_mcp/db.py`.
-pub(crate) fn upsert(
-    conn: &Connection,
-    npub: &str,
-    order: &Value,
-    now: i64,
-) -> Result<Option<String>> {
+/// order_id on success, or `None` if the payload has no id (or the id can't be
+/// used as a filename). Mirrors `upsert_purchase` in `wallet_mcp/db.py`.
+pub(crate) fn upsert(base: &Path, npub: &str, order: &Value, now: i64) -> Result<Option<String>> {
     if !order.is_object() {
         return Ok(None);
     }
@@ -81,146 +137,94 @@ pub(crate) fn upsert(
         Some(id) => id,
         None => return Ok(None),
     };
+    let Some(path) = order_path(base, npub, &order_id)? else {
+        return Ok(None);
+    };
 
-    let listing = order.get("listing").filter(|v| v.is_object());
-    let seller = order.get("seller").filter(|v| v.is_object());
-    let schema = listing.and_then(|l| l.get("delivered_content_schema"));
+    let row = row_from_order(order, order_id.clone(), now);
+    let bytes = serde_json::to_vec(&row)?;
 
-    let listing_id = s(order, "listing_id").or_else(|| listing.and_then(|l| s(l, "id")));
-    let title = s(order, "product_title")
-        .or_else(|| s(order, "title"))
-        .or_else(|| listing.and_then(|l| s(l, "title")));
-    let seller_str = s(order, "seller_slug")
-        .or_else(|| s(order, "seller_username"))
-        .or_else(|| seller.and_then(|x| s(x, "username")));
-    let payment_status = s(order, "status").or_else(|| s(order, "payment_status"));
-    let fulfillment_status = s(order, "fulfillment_status");
-    let delivered_at = coerce_unix_secs(order.get("delivered_at"));
-    let paid_at = coerce_unix_secs(order.get("paid_at"));
-    let total_usd_cents = coerce_unix_secs(order.get("total_usd_cents"));
-    let delivered_content = s(order, "delivered_content");
-    let delivered_content_type = s(order, "delivered_content_type");
-    let schema_json = schema
-        .filter(|v| !v.is_null())
-        .map(serde_json::to_string)
-        .transpose()?;
-    let snapshot_json = serde_json::to_string(order)?;
-
-    conn.execute(
-        "INSERT INTO purchases(
-             npub, order_id, listing_id, title, seller, payment_status,
-             fulfillment_status, delivered_at, paid_at, total_usd_cents,
-             delivered_content, delivered_content_type, schema_json,
-             snapshot_json, cached_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
-         ON CONFLICT(npub, order_id) DO UPDATE SET
-             listing_id=excluded.listing_id,
-             title=excluded.title,
-             seller=excluded.seller,
-             payment_status=excluded.payment_status,
-             fulfillment_status=excluded.fulfillment_status,
-             delivered_at=excluded.delivered_at,
-             paid_at=excluded.paid_at,
-             total_usd_cents=excluded.total_usd_cents,
-             delivered_content=excluded.delivered_content,
-             delivered_content_type=excluded.delivered_content_type,
-             schema_json=excluded.schema_json,
-             snapshot_json=excluded.snapshot_json,
-             cached_at=excluded.cached_at",
-        params![
-            npub,
-            order_id,
-            listing_id,
-            title,
-            seller_str,
-            payment_status,
-            fulfillment_status,
-            delivered_at,
-            paid_at,
-            total_usd_cents,
-            delivered_content,
-            delivered_content_type,
-            schema_json,
-            snapshot_json,
-            now,
-        ],
-    )?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, &bytes)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(Some(order_id))
 }
 
-fn row_to_purchase(row: &Row) -> rusqlite::Result<PurchaseRow> {
-    let snapshot_json: String = row.get("snapshot_json")?;
-    let schema_json: Option<String> = row.get("schema_json")?;
-    Ok(PurchaseRow {
-        order_id: row.get("order_id")?,
-        listing_id: row.get("listing_id")?,
-        title: row.get("title")?,
-        seller: row.get("seller")?,
-        payment_status: row.get("payment_status")?,
-        fulfillment_status: row.get("fulfillment_status")?,
-        delivered_at: row.get("delivered_at")?,
-        paid_at: row.get("paid_at")?,
-        total_usd_cents: row.get("total_usd_cents")?,
-        delivered_content: row.get("delivered_content")?,
-        delivered_content_type: row.get("delivered_content_type")?,
-        delivered_content_schema: schema_json
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok()),
-        cached_at: row.get("cached_at")?,
-        snapshot: serde_json::from_str(&snapshot_json).unwrap_or(Value::Null),
-    })
+/// Read and parse every cached order for `npub`. Missing dir → empty.
+fn read_all(base: &Path, npub: &str) -> Result<Vec<PurchaseRow>> {
+    let dir = orders_dir(base, npub)?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(DbError::Io(e)),
+    };
+    let mut rows = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue; // skip stray *.json.tmp or unrelated files
+        }
+        let bytes = std::fs::read(&path)?;
+        match serde_json::from_slice::<PurchaseRow>(&bytes) {
+            Ok(row) => rows.push(row),
+            // A corrupt cache entry shouldn't sink the whole listing; the
+            // cache is regenerable via sync_purchases.
+            Err(_) => continue,
+        }
+    }
+    Ok(rows)
 }
 
-/// Cached purchases for a wallet, newest first
-/// (`COALESCE(delivered_at, paid_at, cached_at) DESC`).
+/// Cached orders for a wallet, newest first
+/// (`COALESCE(delivered_at, paid_at, cached_at)` descending), optionally
+/// filtered by `fulfillment_status`, then `offset`/`limit` applied.
 pub(crate) fn list(
-    conn: &Connection,
+    base: &Path,
     npub: &str,
     limit: i64,
     offset: i64,
     fulfillment_status: Option<&str>,
 ) -> Result<Vec<PurchaseRow>> {
-    let mut sql = String::from("SELECT * FROM purchases WHERE npub = ?1");
-    if fulfillment_status.is_some() {
-        sql.push_str(" AND fulfillment_status = ?2");
+    let mut rows = read_all(base, npub)?;
+    if let Some(fs) = fulfillment_status {
+        rows.retain(|r| r.fulfillment_status.as_deref() == Some(fs));
     }
-    sql.push_str(" ORDER BY COALESCE(delivered_at, paid_at, cached_at) DESC LIMIT ? OFFSET ?");
+    rows.sort_by_key(|r| std::cmp::Reverse(r.order_key()));
 
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = if let Some(fs) = fulfillment_status {
-        stmt.query_map(params![npub, fs, limit, offset], row_to_purchase)?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    } else {
-        stmt.query_map(params![npub, limit, offset], row_to_purchase)?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+    let offset = offset.max(0) as usize;
+    let mut out: Vec<PurchaseRow> = rows.into_iter().skip(offset).collect();
+    if limit >= 0 {
+        out.truncate(limit as usize);
+    }
+    Ok(out)
+}
+
+pub(crate) fn read(base: &Path, npub: &str, order_id: &str) -> Result<Option<PurchaseRow>> {
+    let Some(path) = order_path(base, npub, order_id)? else {
+        return Ok(None);
     };
-    Ok(rows)
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(DbError::Io(e)),
+    };
+    Ok(Some(serde_json::from_slice(&bytes)?))
 }
 
-pub(crate) fn read(conn: &Connection, npub: &str, order_id: &str) -> Result<Option<PurchaseRow>> {
-    let row = conn
-        .query_row(
-            "SELECT * FROM purchases WHERE npub = ?1 AND order_id = ?2",
-            params![npub, order_id],
-            row_to_purchase,
-        )
-        .optional()?;
-    Ok(row)
+pub(crate) fn delete(base: &Path, npub: &str, order_id: &str) -> Result<()> {
+    let Some(path) = order_path(base, npub, order_id)? else {
+        return Ok(());
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(DbError::Io(e)),
+    }
 }
 
-pub(crate) fn delete(conn: &Connection, npub: &str, order_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM purchases WHERE npub = ?1 AND order_id = ?2",
-        params![npub, order_id],
-    )?;
-    Ok(())
-}
-
-pub(crate) fn count(conn: &Connection, npub: &str) -> Result<i64> {
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM purchases WHERE npub = ?1",
-        params![npub],
-        |r| r.get(0),
-    )?;
-    Ok(n)
+pub(crate) fn count(base: &Path, npub: &str) -> Result<i64> {
+    Ok(read_all(base, npub)?.len() as i64)
 }
