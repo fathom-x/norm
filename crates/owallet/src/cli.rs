@@ -98,10 +98,6 @@ pub enum Command {
         all: bool,
     },
 
-    /// Fetch and print on-chain ETH + USDC balances for the active wallet.
-    /// Uses EVM_RPC_URL and EVM_NETWORK (default: Base mainnet).
-    Balance,
-
     /// Link this wallet to an Overpay account via the OAuth PKCE flow.
     /// Opens the browser; spins up a local callback server on a free port.
     Authorize,
