@@ -4,6 +4,23 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Per-wallet encrypted state directory (#310)
+
+- **New per-`npub` state directory.** Groundwork for keeping all of a
+  wallet's files together so "backing up a fully synced wallet" is just
+  "copy the data directory". Layout: `<data dir>/<npub>/<artifact>`, where
+  the data dir is `~/.owallet/` (override `OWALLET_HOME`), distinct from
+  the legacy single-file DB at `~/.owallet.db`.
+- **Artifacts are encrypted with the wallet's own private key.** Each
+  file written into a wallet's directory is AES-256-GCM encrypted under a
+  key derived (HKDF-SHA256) from that wallet's secp256k1 private key, so
+  the state is bound to the wallet rather than the DB password. New
+  `owallet_crypto::derive_state_key`, `owallet_db::WalletStateDir`
+  (`write` / `read` / `exists` / `remove`, atomic writes, path-traversal
+  guarded), and `Database::wallet_state(npub)` (derives the key from the
+  unlocked seed). This is the storage substrate for upcoming chain
+  sync-state (e.g. Zcash); no command wiring yet.
+
 ### Hide internal dev/staging environments from public builds (#312)
 
 - **`--dev` / `--staging` are now gated behind the `dev-envs` Cargo

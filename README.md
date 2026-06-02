@@ -114,15 +114,17 @@ server (owallet no longer calls a hosted Overpay MCP).
 | `install --{claude,opencode,codex}-{local,global}` | Register MCP entries |
 | `config [--mcp]` | Show env config (or print the `.mcp.json` blob) |
 
-Every command accepts `--config PATH` (explicit `.owallet` file, must exist)
-or `--prod`/`--dev`/`--staging` (load the matching file from cwd; missing
-is silently OK except for `--config`).
+Every command accepts `--prod` (built-in production defaults) or
+`--config PATH` (an explicit dotenv file, must exist). The `--dev` /
+`--staging` selectors exist only in internal `dev-envs` builds (see
+[Custom environments](#custom-environments)).
 
 ## Environment variables
 
 | Var | Default | Used by |
 |---|---|---|
 | `OWALLET_DB_PATH` | `~/.owallet.db` | every command |
+| `OWALLET_HOME` | `~/.owallet` | per-wallet state directory base (`<home>/<npub>/`) |
 | `OWALLET_PASSWORD` | _(prompted)_ | non-interactive DB unlock |
 | `OWALLET_WALLET_PASSWORD` | _(prompted)_ | non-interactive per-wallet password for `generate` / `import` |
 | `OWALLET_PORT` | `8765` | `serve`, `install`, `config` |
@@ -145,6 +147,16 @@ Overpay Rails API, it picks a stored Bearer token if one exists. If not,
 it falls back to a per-request **NIP-98** envelope signed with the
 wallet's secp256k1 key — so most Overpay calls work even without running
 `owallet authorize` first.
+
+**Per-wallet state directory.** Each wallet has a directory at
+`<OWALLET_HOME>/<npub>/` (default `~/.owallet/<npub>/`) for bulky
+per-wallet artifacts — chain sync state and the like — kept beside the
+rest of the wallet's data so a backup is just "copy the directory".
+Every file written there is AES-256-GCM encrypted under a key derived
+(HKDF-SHA256) from that wallet's private key, so the contents are bound
+to the wallet, not the DB password. See `owallet_db::WalletStateDir` /
+`Database::wallet_state` and `owallet_crypto::derive_state_key`. (Storage
+substrate only for now; no chain integration is wired yet.)
 
 **USDC send.** `send_usdc` (CLI + MCP tool) goes through `alloy` with
 `with_recommended_fillers`, which auto-populates nonce / gas / EIP-1559

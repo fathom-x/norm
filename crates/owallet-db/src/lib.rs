@@ -11,6 +11,7 @@ mod purchases;
 mod schema;
 mod settings;
 mod tokens;
+mod wallet_state;
 mod wallets;
 
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ pub use auth_codes::AuthCodeRow;
 pub use oauth_clients::OAuthClientRow;
 pub use purchases::PurchaseRow;
 pub use tokens::TokenRow;
+pub use wallet_state::{data_dir, wallet_state_dir, WalletStateDir};
 pub use wallets::WalletRow;
 
 /// Default DB path: `~/.owallet.db` (override via `OWALLET_DB_PATH`).
@@ -56,6 +58,12 @@ pub enum DbError {
     Corrupt(String),
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("wallet state: {0}")]
+    State(String),
+    #[error("key derivation: {0}")]
+    KeyDerivation(#[from] owallet_crypto::HdError),
 }
 
 pub type Result<T> = std::result::Result<T, DbError>;
@@ -288,6 +296,23 @@ impl Database {
 
     pub fn has_wallet_password(&self, npub: &str) -> Result<bool> {
         Ok(wallets::read_password_hash(&self.conn, npub)?.is_some())
+    }
+
+    // ---- Per-wallet encrypted state directory (issue #310) ----
+
+    /// Open the per-`npub` encrypted state directory (`<data dir>/<npub>/`).
+    ///
+    /// Requires the DB to be unlocked: the directory's encryption key is
+    /// derived from the wallet's own private key, recovered from the stored
+    /// (encrypted) seed — so artifacts under it are bound to the wallet, not
+    /// the DB password. Errors if no wallet is stored for `npub`.
+    pub fn wallet_state(&self, npub: &str) -> Result<WalletStateDir> {
+        let seed = self
+            .read_seed(npub)?
+            .ok_or_else(|| DbError::State(format!("no stored wallet for {npub}")))?;
+        let sk = owallet_crypto::derive_from_stored_seed(&seed)?;
+        let key = owallet_crypto::derive_state_key(&sk);
+        Ok(WalletStateDir::new(wallet_state_dir(npub)?, key))
     }
 
     // ---- Purchase cache ----
