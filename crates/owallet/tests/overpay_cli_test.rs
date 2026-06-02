@@ -20,10 +20,16 @@ const ABANDON_12: &str = "abandon abandon abandon abandon abandon abandon \
      abandon abandon abandon abandon abandon about";
 
 fn init_and_import(db_path: &Path) {
+    // `init` scaffolds prod/dev/staging.owallet files; point OWALLET_CONFIG_DIR
+    // at the per-test tempdir so they land there instead of next to the
+    // binary (target/debug), where a stray prod.owallet would clobber other
+    // tests' OVERPAY_RAILS_URL with the production default.
+    let config_dir = db_path.parent().unwrap();
     Command::cargo_bin("owallet")
         .unwrap()
         .env("OWALLET_DB_PATH", db_path)
         .env("OWALLET_PASSWORD", "pw")
+        .env("OWALLET_CONFIG_DIR", config_dir)
         .arg("init")
         .assert()
         .success();
@@ -31,6 +37,7 @@ fn init_and_import(db_path: &Path) {
         .unwrap()
         .env("OWALLET_DB_PATH", db_path)
         .env("OWALLET_PASSWORD", "pw")
+        .env("OWALLET_CONFIG_DIR", config_dir)
         // `import` now prompts for a per-wallet password; supply it
         // non-interactively for the test harness.
         .env("OWALLET_WALLET_PASSWORD", "wallet-pw")
@@ -39,6 +46,17 @@ fn init_and_import(db_path: &Path) {
         .arg(ABANDON_12)
         .assert()
         .success();
+}
+
+/// Write a `test.owallet` config carrying the wiremock Rails URL and return
+/// its path. Passing `--config <path>` makes the binary read this file and
+/// ignore any scaffolded `prod.owallet` (which would otherwise clobber
+/// OVERPAY_RAILS_URL with the production default), so the command talks to
+/// the mock server rather than the real overpay.com.
+fn write_test_config(dir: &Path, rails_url: &str) -> std::path::PathBuf {
+    let path = dir.join("test.owallet");
+    std::fs::write(&path, format!("OVERPAY_RAILS_URL={rails_url}\n")).unwrap();
+    path
 }
 
 // ---------------------------------------------------------------------------
@@ -64,12 +82,14 @@ async fn list_marketplace_pretty_prints_response() {
     let tmp = TempDir::new().unwrap();
     let server_uri = server.uri();
     let db_path = tmp.path().join("test.db");
+    let config = write_test_config(tmp.path(), &server_uri);
     tokio::task::spawn_blocking(move || {
         Command::cargo_bin("owallet")
             .unwrap()
             .env("OWALLET_DB_PATH", &db_path)
             .env("OWALLET_PASSWORD", "pw")
-            .env("OVERPAY_RAILS_URL", &server_uri)
+            .arg("--config")
+            .arg(&config)
             .arg("list")
             .arg("marketplace")
             .arg("--category")
@@ -106,13 +126,15 @@ async fn account_fetches_overpay_info_when_token_present() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("test.db");
     let server_uri = server.uri();
+    let config = write_test_config(tmp.path(), &server_uri);
 
     let db_path2 = db_path.clone();
     let server_uri2 = server_uri.clone();
     tokio::task::spawn_blocking(move || {
         init_and_import(&db_path2);
 
-        // Inject a bearer token directly via the DB API.
+        // Inject a bearer token directly via the DB API. host_key() is the
+        // trimmed OVERPAY_RAILS_URL, which --config sets to the mock server.
         let mut db = owallet_db::Database::open(&db_path2).unwrap();
         assert!(db.unlock("pw").unwrap());
         let npub = db.read_default_npub().unwrap().unwrap();
@@ -124,21 +146,26 @@ async fn account_fetches_overpay_info_when_token_present() {
     .unwrap();
 
     let db_path3 = db_path.clone();
-    let server_uri3 = server_uri.clone();
     tokio::task::spawn_blocking(move || {
         Command::cargo_bin("owallet")
             .unwrap()
             .env("OWALLET_DB_PATH", &db_path3)
             .env("OWALLET_PASSWORD", "pw")
-            .env("OVERPAY_RAILS_URL", &server_uri3)
+            // Dead RPC endpoint: the on-chain balance lookups fail fast and
+            // render as "(error: …)" rows instead of hanging on the public
+            // Base RPC. The Overpay account fields are what this test asserts.
+            .env("EVM_RPC_URL", "http://127.0.0.1:1")
+            .arg("--config")
+            .arg(&config)
             .arg("account")
             .assert()
             .success()
-            .stdout(contains("Default wallet"))
-            .stdout(contains("Linked Overpay account"))
+            // `account` now prints a Field/Value table (#307); assert the
+            // Overpay identity the mock returns is surfaced.
+            .stdout(contains("Username"))
             .stdout(contains("alice"))
-            .stdout(contains("1234567890123456"))
-            .stdout(contains("alice@example.com"));
+            .stdout(contains("Account Number"))
+            .stdout(contains("1234567890123456"));
     })
     .await
     .unwrap();
@@ -164,19 +191,25 @@ async fn account_falls_back_to_nip98_when_no_token() {
     let db_path = tmp.path().join("test.db");
     let db_path2 = db_path.clone();
     let server_uri = server.uri();
+    let config = write_test_config(tmp.path(), &server_uri);
     tokio::task::spawn_blocking(move || {
         init_and_import(&db_path2);
         Command::cargo_bin("owallet")
             .unwrap()
             .env("OWALLET_DB_PATH", &db_path2)
             .env("OWALLET_PASSWORD", "pw")
-            .env("OVERPAY_RAILS_URL", &server_uri)
+            // Dead RPC endpoint so balance lookups fail fast instead of
+            // hanging on the public Base RPC (see the token-present test).
+            .env("EVM_RPC_URL", "http://127.0.0.1:1")
+            .arg("--config")
+            .arg(&config)
             .arg("account")
             .assert()
             .success()
-            .stdout(contains("Default wallet"))
-            .stdout(contains("Linked Overpay account"))
-            .stdout(contains("NIP-98"))
+            // No stored bearer → the account fetch is signed with NIP-98, which
+            // the mock requires via its `authorization: ^Nostr ` matcher. The
+            // username it returns proves the NIP-98-authed call succeeded.
+            .stdout(contains("Username"))
             .stdout(contains("alice-via-nip98"));
     })
     .await
@@ -220,6 +253,7 @@ async fn authorize_drives_full_pkce_flow_against_fake_rails() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("test.db");
     let server_uri = server.uri();
+    let config = write_test_config(tmp.path(), &server_uri);
 
     // Seed a wallet.
     let db_path2 = db_path.clone();
@@ -230,13 +264,16 @@ async fn authorize_drives_full_pkce_flow_against_fake_rails() {
     // Run the binary as a manual subprocess so we can read its stdout
     // line by line, extract the printed authorize URL, and deliver the
     // callback ourselves. (Real users would let the browser do this.)
+    // --config points the binary at the mock Rails; passing it as a global
+    // flag before the subcommand.
     let mut child = std::process::Command::new(cargo_bin("owallet"))
         .env("OWALLET_DB_PATH", &db_path)
         .env("OWALLET_PASSWORD", "pw")
-        .env("OVERPAY_RAILS_URL", &server_uri)
         // Suppress any actual browser opening; on Linux the `open` crate
         // ultimately shells out to xdg-open which we don't want to run.
         .env("BROWSER", "/bin/true")
+        .arg("--config")
+        .arg(&config)
         .arg("authorize")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
