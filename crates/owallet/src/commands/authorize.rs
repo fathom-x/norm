@@ -90,7 +90,11 @@ pub fn run() -> Result<()> {
 
         println!("Opening the Overpay authorize URL in your browser…");
         println!("If it doesn't open automatically, visit:\n  {auth_url}");
-        let _ = open::that(auth_url.as_str());
+        // Detached: never wait for the browser-opener to exit. On a
+        // current-thread runtime a blocking `open::that` would monopolise the
+        // only thread and starve the callback server task below — deadlocking
+        // the whole flow in headless environments.
+        let _ = open::that_detached(auth_url.as_str());
 
         let cb = tokio::time::timeout(CALLBACK_TIMEOUT, rx)
             .await
