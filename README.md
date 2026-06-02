@@ -48,7 +48,7 @@ Or build from source:
 
 ```bash
 cd owallet-rs
-cargo install --path crates/owallet
+cargo install --path crates/owallet --features dev-envs
 ```
 
 ## Quick start
