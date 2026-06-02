@@ -156,6 +156,7 @@ pub fn dispatch(args: Cli) -> Result<()> {
     match args.command {
         Command::Init => init::run(),
         Command::Balance => balance::run(),
+        Command::Account { all } => account::run(all),
         Command::Serve { .. } | Command::Install { .. } => unreachable!(),
         Command::Generate { words } => generate::run(words),
         Command::Import {
@@ -164,7 +165,6 @@ pub fn dispatch(args: Cli) -> Result<()> {
         } => import::run(mnemonic, private_key),
         Command::Select { identifier } => select::run(identifier),
         Command::Export { what } => export::run(what),
-        Command::Account => account::run(),
         Command::Authorize => authorize::run(),
         Command::Login => login::run(),
         Command::List { what } => list::run(what),

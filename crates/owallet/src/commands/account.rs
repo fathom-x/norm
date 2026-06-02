@@ -4,13 +4,13 @@
 //! Otherwise we fall back to NIP-98 signing via the wallet key.
 
 use owallet_crypto::{derive_from_stored_seed, Address};
-use owallet_db::default_db_path;
+use owallet_db::{default_db_path, Database, WalletRow};
 use owallet_overpay::Auth;
 
 use super::overpay::{block_on, client as overpay_client, host_key};
 use super::{open_unlock, CmdError, Result};
 
-pub fn run() -> Result<()> {
+pub fn run(all: bool) -> Result<()> {
     let db = open_unlock(&default_db_path())?;
     let wallets = db.list_wallets()?;
 
@@ -19,22 +19,55 @@ pub fn run() -> Result<()> {
         return Ok(());
     }
 
-    let npub = db
-        .read_default_npub()?
-        .ok_or_else(|| CmdError::BadInput("no default wallet — run `owallet select`".into()))?;
-    let w = wallets
-        .iter()
-        .find(|w| w.npub == npub)
-        .ok_or_else(|| CmdError::NotFound(npub.clone()))?;
+    let npubs: Vec<String> = if all {
+        wallets.iter().map(|w| w.npub.clone()).collect()
+    } else {
+        let npub = db
+            .read_default_npub()?
+            .ok_or_else(|| CmdError::BadInput("no default wallet — run `owallet select`".into()))?;
+        vec![npub]
+    };
+
+    let default_npub = db.read_default_npub()?;
+
+    let total = npubs.len();
+    for (i, npub) in npubs.iter().enumerate() {
+        let w = wallets
+            .iter()
+            .find(|w| &w.npub == npub)
+            .ok_or_else(|| CmdError::NotFound(npub.clone()))?;
+        if all {
+            let marker = if Some(npub) == default_npub.as_ref() {
+                " (default)"
+            } else {
+                ""
+            };
+            println!("Wallet {}{}", i + 1, marker);
+        }
+        print_wallet_table(&db, w)?;
+        if all && i + 1 < total {
+            println!();
+            println!("{}", "─".repeat(90));
+            println!();
+            // Avoid hitting the free public RPC rate limit when looping over many wallets.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
+
+    Ok(())
+}
+
+fn print_wallet_table(db: &Database, w: &WalletRow) -> Result<()> {
+    let npub = &w.npub;
 
     // Resolve address: stored or derived from seed.
     let derived_addr;
     let address = if let Some(a) = w.address.as_deref() {
         a
-    } else if let Some(seed) = db.read_seed(&npub)? {
+    } else if let Some(seed) = db.read_seed(npub)? {
         let sk = derive_from_stored_seed(&seed)?;
         derived_addr = Address::from_private_key(&sk).to_hex_lower();
-        let _ = db.cache_wallet_address(&npub, &derived_addr);
+        let _ = db.cache_wallet_address(npub, &derived_addr);
         &derived_addr
     } else {
         ""
@@ -46,8 +79,8 @@ pub fn run() -> Result<()> {
     let network = std::env::var("EVM_NETWORK").unwrap_or_else(|_| "eip155:8453".into());
 
     // Fetch Overpay account info (best-effort).
-    let stored_token = db.read_token(&npub, &host_key())?;
-    let seed = db.read_seed(&npub)?;
+    let stored_token = db.read_token(npub, &host_key())?;
+    let seed = db.read_seed(npub)?;
     let overpay_info = if let Ok(client) = overpay_client() {
         if let Some(t) = stored_token.as_deref() {
             block_on(async { client.account(Auth::Bearer(t)).await }).ok()
@@ -64,7 +97,7 @@ pub fn run() -> Result<()> {
 
     if let Some(info) = &overpay_info {
         if let Some(u) = info.username.as_deref() {
-            let _ = db.cache_wallet_username(&npub, u);
+            let _ = db.cache_wallet_username(npub, u);
         }
     }
 
@@ -112,7 +145,7 @@ pub fn run() -> Result<()> {
     let rows: &[(&str, &str)] = &[
         ("Address", address),
         ("Network", &network),
-        ("npub", &npub),
+        ("npub", npub),
         ("ETH Balance", &eth_str),
         ("USDC Balance", &usdc_str),
         ("Username", &username),

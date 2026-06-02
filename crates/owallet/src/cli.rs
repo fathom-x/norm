@@ -92,7 +92,11 @@ pub enum Command {
 
     /// Show wallet metadata + (when a token is stored) the linked Overpay
     /// account info fetched live from the Rails API.
-    Account,
+    Account {
+        /// Show info for every stored wallet, not just the default.
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Fetch and print on-chain ETH + USDC balances for the active wallet.
     /// Uses EVM_RPC_URL and EVM_NETWORK (default: Base mainnet).
