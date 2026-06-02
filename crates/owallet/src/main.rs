@@ -12,6 +12,7 @@ mod password;
 use std::process::ExitCode;
 
 use clap::Parser;
+use owallet_db::migrate_legacy_db_if_needed;
 
 fn main() -> ExitCode {
     let args = cli::Cli::parse();
@@ -20,6 +21,12 @@ fn main() -> ExitCode {
     // before any subcommand reads env vars.
     if let Err(e) = cli::load_env_from_flags(&args) {
         eprintln!("error: {e}");
+        return ExitCode::from(1);
+    }
+
+    if let Err(e) = migrate_legacy_db_if_needed() {
+        eprintln!("error: could not migrate ~/.owallet.db to ~/.owallet/owallet.db: {e}");
+        eprintln!("Your wallet data is still at ~/.owallet.db — fix the error above, then retry.");
         return ExitCode::from(1);
     }
 

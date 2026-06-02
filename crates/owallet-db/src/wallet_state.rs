@@ -31,8 +31,7 @@ use crate::{DbError, Result};
 const NONCE_LEN: usize = owallet_crypto::aesgcm::NONCE_LEN;
 
 /// Base data directory for all wallet state: `OWALLET_HOME` if set, else
-/// `~/.owallet`. This is a *directory* (distinct from the legacy single-file
-/// DB at `~/.owallet.db`, which [`crate::default_db_path`] still returns).
+/// `~/.owallet`. The default DB lives inside this directory at `owallet.db`.
 #[must_use]
 pub fn data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("OWALLET_HOME") {

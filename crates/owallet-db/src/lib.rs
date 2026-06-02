@@ -32,14 +32,53 @@ pub use tokens::TokenRow;
 pub use wallet_state::{data_dir, wallet_state_dir, WalletStateDir};
 pub use wallets::WalletRow;
 
-/// Default DB path: `~/.owallet.db` (override via `OWALLET_DB_PATH`).
+/// Default DB path: `~/.owallet/owallet.db` (override via `OWALLET_DB_PATH`).
 #[must_use]
 pub fn default_db_path() -> PathBuf {
     if let Ok(path) = std::env::var("OWALLET_DB_PATH") {
         return PathBuf::from(path);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".owallet.db")
+    PathBuf::from(home).join(".owallet").join("owallet.db")
+}
+
+/// Move `~/.owallet.db` → `~/.owallet/owallet.db` if the legacy path exists
+/// and the new path does not. Skipped when `OWALLET_DB_PATH` is set (the user
+/// controls the path explicitly). Prints a one-line notice on success.
+///
+/// Returns `Err` if the legacy file exists but could not be moved — callers
+/// should treat this as fatal to avoid silently creating a fresh empty DB
+/// while the user's real data sits untouched at the old location.
+pub fn migrate_legacy_db_if_needed() -> std::io::Result<()> {
+    if std::env::var("OWALLET_DB_PATH").is_ok() {
+        return Ok(());
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let legacy = PathBuf::from(&home).join(".owallet.db");
+    let new = PathBuf::from(&home).join(".owallet").join("owallet.db");
+    if !legacy.exists() || new.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = new.parent() {
+        if parent.exists() && !parent.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} exists as a file; remove or rename it so the directory can be created",
+                    parent.display()
+                ),
+            ));
+        }
+        std::fs::create_dir_all(parent)?;
+    }
+    // rename(2) fails across devices (EXDEV) and on some macOS configs; fall
+    // back to copy + remove so the move always works.
+    if std::fs::rename(&legacy, &new).is_err() {
+        std::fs::copy(&legacy, &new)?;
+        std::fs::remove_file(&legacy)?;
+    }
+    eprintln!("Migrated {} → {}", legacy.display(), new.display());
+    Ok(())
 }
 
 #[derive(Debug, Error)]
@@ -491,22 +530,22 @@ impl Drop for Database {
 
 /// Default per-wallet state directory for a DB at `db_path`.
 ///
-/// `OWALLET_HOME` wins if set. Otherwise the state dir co-locates with the DB
-/// file by stripping its extension — so the default `~/.owallet.db` yields
-/// `~/.owallet/`, and a custom `OWALLET_DB_PATH` carries its state alongside
-/// it. Falls back to the canonical [`data_dir`] when the DB path has no
-/// extension (so the dir can't collide with the DB file itself).
+/// `OWALLET_HOME` wins if set. Otherwise uses the parent directory of the DB
+/// file — so the default `~/.owallet/owallet.db` yields `~/.owallet/`, and a
+/// custom `OWALLET_DB_PATH=/some/path/wallet.db` keeps its state in
+/// `/some/path/`. Falls back to [`data_dir`] when the DB has no parent.
 fn state_dir_for(db_path: &Path) -> PathBuf {
     if let Ok(home) = std::env::var("OWALLET_HOME") {
         if !home.is_empty() {
             return PathBuf::from(home);
         }
     }
-    if db_path.extension().is_some() {
-        db_path.with_extension("")
-    } else {
-        data_dir()
+    if let Some(parent) = db_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            return parent.to_path_buf();
+        }
     }
+    data_dir()
 }
 
 fn now_secs() -> i64 {

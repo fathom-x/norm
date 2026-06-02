@@ -39,7 +39,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Initialize an encrypted wallet database at $OWALLET_DB_PATH or ~/.owallet.db.
+    /// Initialize an encrypted wallet database at $OWALLET_DB_PATH or ~/.owallet/owallet.db.
     Init,
 
     /// Run one or more HTTP servers (dashboard + OAuth AS + /mcp).
