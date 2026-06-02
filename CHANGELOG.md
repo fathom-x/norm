@@ -8,18 +8,26 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 - **New per-`npub` state directory.** Groundwork for keeping all of a
   wallet's files together so "backing up a fully synced wallet" is just
-  "copy the data directory". Layout: `<data dir>/<npub>/<artifact>`, where
-  the data dir is `~/.owallet/` (override `OWALLET_HOME`), distinct from
-  the legacy single-file DB at `~/.owallet.db`.
-- **Artifacts are encrypted with the wallet's own private key.** Each
-  file written into a wallet's directory is AES-256-GCM encrypted under a
-  key derived (HKDF-SHA256) from that wallet's secp256k1 private key, so
-  the state is bound to the wallet rather than the DB password. New
-  `owallet_crypto::derive_state_key`, `owallet_db::WalletStateDir`
-  (`write` / `read` / `exists` / `remove`, atomic writes, path-traversal
-  guarded), and `Database::wallet_state(npub)` (derives the key from the
-  unlocked seed). This is the storage substrate for upcoming chain
-  sync-state (e.g. Zcash); no command wiring yet.
+  "copy the data directory". Layout: `<data dir>/<npub>/<artifact>`. The
+  data dir co-locates with the DB file (the default `~/.owallet.db`
+  yields `~/.owallet/`; a custom `OWALLET_DB_PATH` carries its state
+  alongside it), and `OWALLET_HOME` overrides it outright.
+- **Encrypted artifacts are bound to the wallet's own private key.** The
+  general-purpose `owallet_db::WalletStateDir` (`write` / `read` /
+  `exists` / `remove`, atomic writes, path-traversal guarded) AES-256-GCM
+  encrypts each file under a key derived (HKDF-SHA256) from that wallet's
+  secp256k1 private key — see `owallet_crypto::derive_state_key` and
+  `Database::wallet_state(npub)` (derives the key from the unlocked seed).
+  This is the storage substrate for upcoming chain sync-state (e.g.
+  Zcash); no command wiring yet.
+- **Order cache moved from SQLite into the state directory.** The
+  per-wallet order/purchase cache now lives as plaintext JSON files at
+  `<npub>/orders/<order_id>.json` instead of the `purchases` table. It is
+  deliberately **not** encrypted (regenerable via `sync_purchases`, and
+  kept readable without unlocking the DB). The `Database` purchase API
+  (`upsert/list/read/delete/count_purchases`) is unchanged, so the MCP
+  tools and `/wallet/purchases` dashboard are unaffected. Existing rows in
+  the old `purchases` table are not migrated (the cache rebuilds on sync).
 
 ### Hide internal dev/staging environments from public builds (#312)
 

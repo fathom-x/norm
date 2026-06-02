@@ -76,6 +76,10 @@ pub struct Database {
     conn: Connection,
     key: Option<AesKey>,
     path: PathBuf,
+    /// Base directory for per-wallet state (`<data_dir>/<npub>/…`). Defaults
+    /// to [`data_dir`]; override with [`Database::with_data_dir`] (used by
+    /// tests for isolation).
+    data_dir: PathBuf,
 }
 
 impl Database {
@@ -104,6 +108,7 @@ impl Database {
             conn,
             key: None,
             path: path.to_path_buf(),
+            data_dir: state_dir_for(path),
         };
         // Derive the AES key and leave the DB unlocked, matching db.py:189.
         db.key = Some(AesKey::new(derive_key(password, &salt)));
@@ -129,7 +134,16 @@ impl Database {
             conn,
             key: None,
             path: path.to_path_buf(),
+            data_dir: state_dir_for(path),
         })
+    }
+
+    /// Override the base directory for per-wallet state (default
+    /// [`state_dir_for`] the DB path). Mainly for tests / unusual layouts.
+    #[must_use]
+    pub fn with_data_dir(mut self, dir: PathBuf) -> Self {
+        self.data_dir = dir;
+        self
     }
 
     /// Check whether a DB file exists at the given path.
@@ -312,20 +326,22 @@ impl Database {
             .ok_or_else(|| DbError::State(format!("no stored wallet for {npub}")))?;
         let sk = owallet_crypto::derive_from_stored_seed(&seed)?;
         let key = owallet_crypto::derive_state_key(&sk);
-        Ok(WalletStateDir::new(wallet_state_dir(npub)?, key))
+        let dir = wallet_state::wallet_dir_in(&self.data_dir, npub)?;
+        Ok(WalletStateDir::new(dir, key))
     }
 
-    // ---- Purchase cache ----
+    // ---- Order cache (per-wallet JSON files under <data_dir>/<npub>/orders) ----
 
     /// Store/refresh a cached order for `npub`. `order` is the Rails order
     /// payload (already unwrapped from any `{data: …}` envelope). Returns the
-    /// order_id, or `None` if the payload has no id. Does not require unlock —
-    /// the cached fields are plaintext metadata, like the wallet address.
+    /// order_id, or `None` if the payload has no usable id. Does not require
+    /// unlock — the order cache is stored as plaintext files (regenerable via
+    /// `sync_purchases`), so it stays readable without the master password.
     pub fn upsert_purchase(&self, npub: &str, order: &serde_json::Value) -> Result<Option<String>> {
-        purchases::upsert(&self.conn, npub, order, now_secs())
+        purchases::upsert(&self.data_dir, npub, order, now_secs())
     }
 
-    /// Cached purchases for `npub`, newest first.
+    /// Cached orders for `npub`, newest first.
     pub fn list_purchases(
         &self,
         npub: &str,
@@ -333,20 +349,20 @@ impl Database {
         offset: i64,
         fulfillment_status: Option<&str>,
     ) -> Result<Vec<PurchaseRow>> {
-        purchases::list(&self.conn, npub, limit, offset, fulfillment_status)
+        purchases::list(&self.data_dir, npub, limit, offset, fulfillment_status)
     }
 
-    /// A single cached purchase by `(npub, order_id)`.
+    /// A single cached order by `(npub, order_id)`.
     pub fn read_purchase(&self, npub: &str, order_id: &str) -> Result<Option<PurchaseRow>> {
-        purchases::read(&self.conn, npub, order_id)
+        purchases::read(&self.data_dir, npub, order_id)
     }
 
     pub fn delete_purchase(&self, npub: &str, order_id: &str) -> Result<()> {
-        purchases::delete(&self.conn, npub, order_id)
+        purchases::delete(&self.data_dir, npub, order_id)
     }
 
     pub fn count_purchases(&self, npub: &str) -> Result<i64> {
-        purchases::count(&self.conn, npub)
+        purchases::count(&self.data_dir, npub)
     }
 
     // ---- Default npub ----
@@ -470,6 +486,26 @@ impl Drop for Database {
     fn drop(&mut self) {
         // AesKey zeroes itself on drop; explicit clear here is belt-and-braces.
         self.key = None;
+    }
+}
+
+/// Default per-wallet state directory for a DB at `db_path`.
+///
+/// `OWALLET_HOME` wins if set. Otherwise the state dir co-locates with the DB
+/// file by stripping its extension — so the default `~/.owallet.db` yields
+/// `~/.owallet/`, and a custom `OWALLET_DB_PATH` carries its state alongside
+/// it. Falls back to the canonical [`data_dir`] when the DB path has no
+/// extension (so the dir can't collide with the DB file itself).
+fn state_dir_for(db_path: &Path) -> PathBuf {
+    if let Ok(home) = std::env::var("OWALLET_HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    if db_path.extension().is_some() {
+        db_path.with_extension("")
+    } else {
+        data_dir()
     }
 }
 

@@ -50,9 +50,21 @@ pub fn data_dir() -> PathBuf {
 /// stable directory names. As defence-in-depth the value is still validated
 /// to be a single path component (no separators, no `..`).
 pub fn wallet_state_dir(npub: &str) -> Result<PathBuf> {
+    wallet_dir_in(&data_dir(), npub)
+}
+
+/// Like [`wallet_state_dir`] but rooted at an explicit `base` (so `Database`
+/// can honour a per-instance data dir without touching process-global env).
+pub(crate) fn wallet_dir_in(base: &Path, npub: &str) -> Result<PathBuf> {
     validate_component(npub)
         .map_err(|_| DbError::State(format!("invalid npub for state directory: {npub:?}")))?;
-    Ok(data_dir().join(npub))
+    Ok(base.join(npub))
+}
+
+/// Whether `name` is a safe single path component (no separators / `..`).
+#[must_use]
+pub(crate) fn is_safe_component(name: &str) -> bool {
+    validate_component(name).is_ok()
 }
 
 /// An open handle to one wallet's encrypted state directory.
@@ -146,7 +158,7 @@ impl WalletStateDir {
 }
 
 /// Reject path components that aren't a single safe segment.
-fn validate_component(name: &str) -> std::result::Result<(), &'static str> {
+pub(crate) fn validate_component(name: &str) -> std::result::Result<(), &'static str> {
     if name.is_empty() {
         return Err("empty");
     }

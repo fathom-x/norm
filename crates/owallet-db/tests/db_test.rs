@@ -22,6 +22,9 @@ struct TestDb {
 fn fresh(password: &str) -> TestDb {
     let tmp = TempDir::new().expect("tempdir");
     let path = tmp.path().join("test_owallet.db");
+    // The per-wallet data dir (order cache, wallet state) co-locates with the
+    // DB file by default — here `<tmp>/test_owallet/` — so tests are isolated
+    // from the real ~/.owallet with no extra setup.
     let db = Database::init(&path, password).expect("init");
     TestDb {
         db,

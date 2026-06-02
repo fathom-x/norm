@@ -124,7 +124,7 @@ Every command accepts `--prod` (built-in production defaults) or
 | Var | Default | Used by |
 |---|---|---|
 | `OWALLET_DB_PATH` | `~/.owallet.db` | every command |
-| `OWALLET_HOME` | `~/.owallet` | per-wallet state directory base (`<home>/<npub>/`) |
+| `OWALLET_HOME` | DB path w/o extension (`~/.owallet`) | per-wallet state directory base (`<home>/<npub>/`) |
 | `OWALLET_PASSWORD` | _(prompted)_ | non-interactive DB unlock |
 | `OWALLET_WALLET_PASSWORD` | _(prompted)_ | non-interactive per-wallet password for `generate` / `import` |
 | `OWALLET_PORT` | `8765` | `serve`, `install`, `config` |
@@ -149,14 +149,18 @@ wallet's secp256k1 key — so most Overpay calls work even without running
 `owallet authorize` first.
 
 **Per-wallet state directory.** Each wallet has a directory at
-`<OWALLET_HOME>/<npub>/` (default `~/.owallet/<npub>/`) for bulky
-per-wallet artifacts — chain sync state and the like — kept beside the
-rest of the wallet's data so a backup is just "copy the directory".
-Every file written there is AES-256-GCM encrypted under a key derived
-(HKDF-SHA256) from that wallet's private key, so the contents are bound
-to the wallet, not the DB password. See `owallet_db::WalletStateDir` /
-`Database::wallet_state` and `owallet_crypto::derive_state_key`. (Storage
-substrate only for now; no chain integration is wired yet.)
+`<data dir>/<npub>/` for bulky per-wallet artifacts — chain sync state,
+the order cache — kept beside the rest of the wallet's data so a backup
+is just "copy the directory". The data dir co-locates with the DB file
+(default `~/.owallet.db` → `~/.owallet/`; a custom `OWALLET_DB_PATH`
+moves it too), or `OWALLET_HOME` overrides it. Artifacts written via
+`owallet_db::WalletStateDir` are AES-256-GCM encrypted under a key
+derived (HKDF-SHA256) from that wallet's private key
+(`owallet_crypto::derive_state_key`, `Database::wallet_state`), so they're
+bound to the wallet rather than the DB password. The **order cache** is
+the one deliberate exception — plaintext JSON at `<npub>/orders/` since
+it's regenerable via `sync_purchases` and read without unlocking. (Chain
+sync state is not wired yet.)
 
 **USDC send.** `send_usdc` (CLI + MCP tool) goes through `alloy` with
 `with_recommended_fillers`, which auto-populates nonce / gas / EIP-1559
