@@ -203,24 +203,23 @@ pub enum ExportFormat {
 pub fn load_env_from_flags(args: &Cli) -> Result<(), owallet_config::ConfigError> {
     let selector = config_selector(args);
     // When `serve` is going to run with multiple configs, we deliberately
-    // don't pollute the process env: each server reads its own `.owallet`
-    // in isolation. For every other command (and single-config `serve`)
-    // the standard env-population behaviour is correct.
+    // don't pollute the process env: each server resolves its own config in
+    // isolation. For every other command (and single-config `serve`) the
+    // standard env-population behaviour is correct.
     if let Command::Serve { .. } = args.command {
         if multi_config(args) {
             return Ok(());
         }
     }
-    let paths = resolve(&selector)?;
+    let configs = resolve(&selector)?;
     // Single active config: resolve the per-environment `OVERPAY_*_<POSTFIX>`
     // env vars into their unsuffixed forms (and clear any stale unsuffixed
-    // ones) before loading the file — matches `_apply_env_overrides` in
+    // ones) before applying defaults — matches `_apply_env_overrides` in
     // `wallet_mcp/cli.py`, which runs only when exactly one config is active.
-    // With zero configs the generic env var is left untouched.
-    if paths.len() == 1 {
-        owallet_config::apply_env_overrides(&owallet_config::env_postfix(&paths[0]));
+    if configs.len() == 1 {
+        owallet_config::apply_env_overrides(&configs[0].postfix());
     }
-    owallet_config::load_into_env(&paths)
+    owallet_config::load_resolved_into_env(&configs)
 }
 
 pub fn config_selector(args: &Cli) -> ConfigSelector {
@@ -229,7 +228,6 @@ pub fn config_selector(args: &Cli) -> ConfigSelector {
         prod: args.prod,
         dev: args.dev,
         staging: args.staging,
-        repo_root: None,
     }
 }
 

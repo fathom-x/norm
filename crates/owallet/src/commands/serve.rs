@@ -7,7 +7,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
-use owallet_config::{defaults, parse_ports, read_all_vars, resolve};
+use owallet_config::{defaults, parse_ports, read_all_vars, resolve, BuiltinEnv, ResolvedConfig};
 use owallet_db::{default_db_path, Database};
 use owallet_http::{build_full_router, AppState, EvmConfig};
 use owallet_overpay::OverpayClient;
@@ -145,26 +145,22 @@ fn collect_configs(
         None => Vec::new(),
     };
 
-    let paths = resolve(&config_selector(cli)).map_err(CmdError::Config)?;
+    let configs = resolve(&config_selector(cli)).map_err(CmdError::Config)?;
+
+    if !port_overrides.is_empty() && port_overrides.len() != configs.len() {
+        return Err(CmdError::BadInput(format!(
+            "--port has {} value(s); expected {} (one per active config)",
+            port_overrides.len(),
+            configs.len()
+        )));
+    }
 
     let mut out = Vec::new();
-    if paths.is_empty() {
-        // No `.owallet` selection — run a single server using the process
-        // env (which already has any explicit `--config` loaded by
-        // load_env_from_flags).
-        let port = port_overrides.first().copied().unwrap_or_else(env_port);
-        out.push(server_from_env(ip, port, "default".to_string())?);
-    } else {
-        if !port_overrides.is_empty() && port_overrides.len() != paths.len() {
-            return Err(CmdError::BadInput(format!(
-                "--port has {} value(s); expected {} (one per active config)",
-                port_overrides.len(),
-                paths.len()
-            )));
-        }
-        for (i, p) in paths.iter().enumerate() {
-            let port_override = port_overrides.get(i).copied();
-            out.push(server_from_dotenv(ip, port_override, p)?);
+    for (i, config) in configs.iter().enumerate() {
+        let port_override = port_overrides.get(i).copied();
+        match config {
+            ResolvedConfig::Builtin(env) => out.push(server_from_builtin(ip, port_override, *env)?),
+            ResolvedConfig::File(path) => out.push(server_from_dotenv(ip, port_override, path)?),
         }
     }
     Ok(out)
@@ -177,20 +173,40 @@ fn env_port() -> u16 {
         .unwrap_or(defaults::OWALLET_PORT)
 }
 
-fn server_from_env(ip: IpAddr, port: u16, label: String) -> Result<ServerConfig> {
+fn server_from_builtin(ip: IpAddr, port_override: Option<u16>, env: BuiltinEnv) -> Result<ServerConfig> {
+    let cfg = env.config();
+    let postfix = env.postfix();
+
+    let port = port_override
+        .or_else(|| std::env::var(format!("OWALLET_PORT_{postfix}")).ok().and_then(|s| s.parse().ok()))
+        .or_else(env_port_from_env)
+        .unwrap_or(cfg.port);
     let bind = SocketAddr::new(ip, port);
+
     let issuer_url = std::env::var("OWALLET_MCP_BASE_URL").unwrap_or_else(|_| match ip {
         IpAddr::V4(v4) if v4.is_unspecified() => format!("http://127.0.0.1:{port}"),
         _ => format!("http://{bind}"),
     });
-    let rails_url = std::env::var("OVERPAY_RAILS_URL")
-        .unwrap_or_else(|_| defaults::OVERPAY_RAILS_URL.to_string());
-    let public_url = std::env::var("OVERPAY_PUBLIC_URL").ok();
+
+    // Priority: suffixed env var > unsuffixed env var > built-in default.
+    // (Single-config commands run apply_env_overrides first so the unsuffixed
+    // form is already set; multi-config serve skips that and each server reads
+    // its own suffixed var here.)
+    let rails_url = std::env::var(format!("OVERPAY_RAILS_URL_{postfix}"))
+        .ok()
+        .or_else(|| std::env::var("OVERPAY_RAILS_URL").ok())
+        .or_else(|| cfg.rails_url.map(str::to_string))
+        .unwrap_or_else(|| defaults::OVERPAY_RAILS_URL.to_string());
+    let public_url = std::env::var(format!("OVERPAY_PUBLIC_URL_{postfix}"))
+        .ok()
+        .or_else(|| std::env::var("OVERPAY_PUBLIC_URL").ok());
+
     let evm_rpc_url =
         std::env::var("EVM_RPC_URL").unwrap_or_else(|_| "https://mainnet.base.org".to_string());
     let evm_network = std::env::var("EVM_NETWORK").unwrap_or_else(|_| "eip155:8453".to_string());
+
     Ok(ServerConfig {
-        label,
+        label: cfg.label.to_string(),
         bind,
         issuer_url,
         rails_url,
@@ -198,6 +214,10 @@ fn server_from_env(ip: IpAddr, port: u16, label: String) -> Result<ServerConfig>
         evm_rpc_url,
         evm_network,
     })
+}
+
+fn env_port_from_env() -> Option<u16> {
+    std::env::var("OWALLET_PORT").ok().and_then(|s| s.parse().ok())
 }
 
 fn server_from_dotenv(
@@ -307,26 +327,11 @@ mod tests {
         };
         let confs = collect_configs(&cli, None, Some("127.0.0.1")).unwrap();
         assert_eq!(confs.len(), 1);
-        assert_eq!(confs[0].label, "default");
+        assert_eq!(confs[0].label, "prod");
     }
 
     #[test]
-    #[serial_test::serial]
-    fn collect_configs_multi_uses_each_files_port() {
-        let tmp = TempDir::new().unwrap();
-        write_envfile(
-            tmp.path(),
-            "dev.owallet",
-            "OWALLET_PORT=18888\nOVERPAY_RAILS_URL=http://dev.test\nEVM_RPC_URL=http://dev.rpc\n",
-        );
-        write_envfile(
-            tmp.path(),
-            "staging.owallet",
-            "OWALLET_PORT=18889\nOVERPAY_RAILS_URL=http://staging.test\n",
-        );
-        // Run from the temp dir so `resolve` finds the files at repo_root=cwd.
-        let _g = ChdirGuard::new(tmp.path());
-
+    fn collect_configs_multi_uses_builtin_defaults() {
         let cli = Cli {
             config: None,
             prod: false,
@@ -343,22 +348,38 @@ mod tests {
         assert!(labels.contains(&"dev"));
         assert!(labels.contains(&"staging"));
         let ports: Vec<u16> = confs.iter().map(|c| c.bind.port()).collect();
-        assert!(ports.contains(&18888));
-        assert!(ports.contains(&18889));
-        // Each config gets its own Rails URL.
+        assert!(ports.contains(&8766));
+        assert!(ports.contains(&8767));
         let rails: Vec<&str> = confs.iter().map(|c| c.rails_url.as_str()).collect();
-        assert!(rails.contains(&"http://dev.test"));
-        assert!(rails.contains(&"http://staging.test"));
+        assert!(rails.contains(&"http://localhost:3001"));
     }
 
     #[test]
-    #[serial_test::serial]
-    fn collect_configs_port_override_must_match_active_count() {
+    fn collect_configs_explicit_file_still_works() {
         let tmp = TempDir::new().unwrap();
-        write_envfile(tmp.path(), "dev.owallet", "OWALLET_PORT=18888\n");
-        write_envfile(tmp.path(), "staging.owallet", "OWALLET_PORT=18889\n");
-        let _g = ChdirGuard::new(tmp.path());
+        write_envfile(
+            tmp.path(),
+            "custom.owallet",
+            "OWALLET_PORT=19999\nOVERPAY_RAILS_URL=http://custom.test\n",
+        );
+        let cli = Cli {
+            config: Some(tmp.path().join("custom.owallet")),
+            prod: false,
+            dev: false,
+            staging: false,
+            command: crate::cli::Command::Serve {
+                port: None,
+                host: None,
+            },
+        };
+        let confs = collect_configs(&cli, None, Some("127.0.0.1")).unwrap();
+        assert_eq!(confs.len(), 1);
+        assert_eq!(confs[0].bind.port(), 19999);
+        assert_eq!(confs[0].rails_url, "http://custom.test");
+    }
 
+    #[test]
+    fn collect_configs_port_override_must_match_active_count() {
         let cli = Cli {
             config: None,
             prod: false,
@@ -377,13 +398,7 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
     fn collect_configs_port_override_maps_positionally() {
-        let tmp = TempDir::new().unwrap();
-        write_envfile(tmp.path(), "dev.owallet", "OWALLET_PORT=1\n");
-        write_envfile(tmp.path(), "staging.owallet", "OWALLET_PORT=2\n");
-        let _g = ChdirGuard::new(tmp.path());
-
         let cli = Cli {
             config: None,
             prod: false,
@@ -399,24 +414,4 @@ mod tests {
         assert_eq!(ports, vec![19001, 19002]);
     }
 
-    /// Tests in this module share the global cwd; serialize chdir via this
-    /// guard. Not perfectly thread-safe under `cargo test` parallelism, but
-    /// good enough for a handful of cases.
-    struct ChdirGuard {
-        prev: std::path::PathBuf,
-    }
-
-    impl ChdirGuard {
-        fn new(p: &std::path::Path) -> Self {
-            let prev = std::env::current_dir().unwrap();
-            std::env::set_current_dir(p).unwrap();
-            Self { prev }
-        }
-    }
-
-    impl Drop for ChdirGuard {
-        fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.prev);
-        }
-    }
 }

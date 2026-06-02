@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use owallet_config::{defaults, read_all_vars, resolve};
+use owallet_config::{defaults, read_all_vars, resolve, ResolvedConfig};
 use serde_json::{json, Value};
 
 use super::{CmdError, Result};
@@ -56,9 +56,6 @@ pub fn run(args: InstallArgs<'_>) -> Result<()> {
         }
         println!("Installed {} entries → {}", entries.len(), path.display());
     }
-
-    let sel = config_selector(args.cli);
-    super::scaffold_owallet_configs([sel.prod, sel.dev, sel.staging])?;
 
     Ok(())
 }
@@ -121,71 +118,45 @@ fn target_path(t: Target) -> Result<PathBuf> {
 // ---------------------------------------------------------------------------
 
 fn build_entries(cli: &Cli, port_override: Option<u16>) -> Result<Vec<McpEntry>> {
-    let paths = resolve(&config_selector(cli)).map_err(CmdError::Config)?;
+    let configs = resolve(&config_selector(cli)).map_err(CmdError::Config)?;
     let mut out = Vec::new();
-    if paths.is_empty() {
-        // No `.owallet` selection: install the prod entries from process env.
-        out.extend(entries_for("", &EntrySource::Env(port_override))?);
-    } else {
-        for p in &paths {
-            let env = env_label_from_path(p);
-            let suffix = if env == "prod" {
-                String::new()
-            } else {
-                format!("-{env}")
-            };
-            out.extend(entries_for(
-                &suffix,
-                &EntrySource::Dotenv {
-                    path: p.clone(),
-                    port_override,
-                },
-            )?);
-        }
+    for config in &configs {
+        let (label, port) = match config {
+            ResolvedConfig::Builtin(env) => {
+                let p = port_override
+                    .or_else(|| {
+                        std::env::var("OWALLET_PORT")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                    })
+                    .unwrap_or_else(|| env.config().port);
+                (env.config().label.to_string(), p)
+            }
+            ResolvedConfig::File(path) => {
+                let vars = read_all_vars(path).map_err(CmdError::Config)?;
+                let p = port_override
+                    .or_else(|| vars.get("OWALLET_PORT").and_then(|s| s.parse().ok()))
+                    .unwrap_or(defaults::OWALLET_PORT);
+                let label = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "default".to_string());
+                (label, p)
+            }
+        };
+        let suffix = if label == "prod" {
+            String::new()
+        } else {
+            format!("-{label}")
+        };
+        // Only the local owallet server — the hosted Overpay MCP entry was
+        // dropped upstream (owallet no longer calls it).
+        out.push(McpEntry {
+            name: format!("owallet{suffix}"),
+            url: format!("http://127.0.0.1:{port}/mcp"),
+        });
     }
     Ok(out)
-}
-
-enum EntrySource {
-    Env(Option<u16>),
-    Dotenv {
-        path: PathBuf,
-        port_override: Option<u16>,
-    },
-}
-
-fn entries_for(suffix: &str, source: &EntrySource) -> Result<Vec<McpEntry>> {
-    let port = match source {
-        EntrySource::Env(port_override) => port_override
-            .or_else(|| {
-                std::env::var("OWALLET_PORT")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-            })
-            .unwrap_or(defaults::OWALLET_PORT),
-        EntrySource::Dotenv {
-            path,
-            port_override,
-        } => {
-            let vars = read_all_vars(path).map_err(CmdError::Config)?;
-            port_override
-                .or_else(|| vars.get("OWALLET_PORT").and_then(|s| s.parse().ok()))
-                .unwrap_or(defaults::OWALLET_PORT)
-        }
-    };
-
-    // Only the local owallet server — the hosted Overpay MCP entry was
-    // dropped upstream (owallet no longer calls it).
-    Ok(vec![McpEntry {
-        name: format!("owallet{suffix}"),
-        url: format!("http://127.0.0.1:{port}/mcp"),
-    }])
-}
-
-fn env_label_from_path(path: &Path) -> String {
-    path.file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "default".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -440,13 +411,4 @@ mod tests {
         assert!(text.contains("[mcp_servers.owallet]"));
     }
 
-    #[test]
-    fn env_label_from_path_strips_extension() {
-        assert_eq!(env_label_from_path(Path::new("dev.owallet")), "dev");
-        assert_eq!(env_label_from_path(Path::new("staging.owallet")), "staging");
-        assert_eq!(
-            env_label_from_path(Path::new("/some/path/prod.owallet")),
-            "prod"
-        );
-    }
 }
