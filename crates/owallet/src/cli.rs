@@ -17,19 +17,20 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Load `prod.owallet` (searched in $OWALLET_CONFIG_DIR, the current
-    /// directory, then the executable's directory).
+    /// Use the built-in production environment defaults.
     #[arg(long, global = true)]
     pub prod: bool,
 
-    /// Load `dev.owallet` (searched in $OWALLET_CONFIG_DIR, the current
-    /// directory, then the executable's directory).
-    #[arg(long, global = true)]
+    /// Use the built-in dev environment defaults (internal `dev-envs` builds
+    /// only; the flag is not registered in public release builds).
+    #[cfg_attr(feature = "dev-envs", arg(long, global = true))]
+    #[cfg_attr(not(feature = "dev-envs"), arg(skip))]
     pub dev: bool,
 
-    /// Load `staging.owallet` (searched in $OWALLET_CONFIG_DIR, the current
-    /// directory, then the executable's directory).
-    #[arg(long, global = true)]
+    /// Use the built-in staging environment defaults (internal `dev-envs`
+    /// builds only; the flag is not registered in public release builds).
+    #[cfg_attr(feature = "dev-envs", arg(long, global = true))]
+    #[cfg_attr(not(feature = "dev-envs"), arg(skip))]
     pub staging: bool,
 
     #[command(subcommand)]

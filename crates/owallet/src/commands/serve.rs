@@ -173,12 +173,20 @@ fn env_port() -> u16 {
         .unwrap_or(defaults::OWALLET_PORT)
 }
 
-fn server_from_builtin(ip: IpAddr, port_override: Option<u16>, env: BuiltinEnv) -> Result<ServerConfig> {
+fn server_from_builtin(
+    ip: IpAddr,
+    port_override: Option<u16>,
+    env: BuiltinEnv,
+) -> Result<ServerConfig> {
     let cfg = env.config();
     let postfix = env.postfix();
 
     let port = port_override
-        .or_else(|| std::env::var(format!("OWALLET_PORT_{postfix}")).ok().and_then(|s| s.parse().ok()))
+        .or_else(|| {
+            std::env::var(format!("OWALLET_PORT_{postfix}"))
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
         .or_else(env_port_from_env)
         .unwrap_or(cfg.port);
     let bind = SocketAddr::new(ip, port);
@@ -217,7 +225,9 @@ fn server_from_builtin(ip: IpAddr, port_override: Option<u16>, env: BuiltinEnv) 
 }
 
 fn env_port_from_env() -> Option<u16> {
-    std::env::var("OWALLET_PORT").ok().and_then(|s| s.parse().ok())
+    std::env::var("OWALLET_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
 }
 
 fn server_from_dotenv(
@@ -330,6 +340,7 @@ mod tests {
         assert_eq!(confs[0].label, "prod");
     }
 
+    #[cfg(feature = "dev-envs")]
     #[test]
     fn collect_configs_multi_uses_builtin_defaults() {
         let cli = Cli {
@@ -378,6 +389,7 @@ mod tests {
         assert_eq!(confs[0].rails_url, "http://custom.test");
     }
 
+    #[cfg(feature = "dev-envs")]
     #[test]
     fn collect_configs_port_override_must_match_active_count() {
         let cli = Cli {
@@ -397,6 +409,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "dev-envs")]
     #[test]
     fn collect_configs_port_override_maps_positionally() {
         let cli = Cli {
@@ -413,5 +426,4 @@ mod tests {
         let ports: Vec<u16> = confs.iter().map(|c| c.bind.port()).collect();
         assert_eq!(ports, vec![19001, 19002]);
     }
-
 }

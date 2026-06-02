@@ -7,9 +7,9 @@
 //! - OpenCode:    `./opencode.json` (local) / `~/.config/opencode/opencode.json` (global)
 //! - Codex:       `./.codex/config.toml` (local) / `~/.codex/config.toml` (global)
 //!
-//! With `--prod/--dev/--staging` flags, one entry is added per active env
-//! with a `-dev` / `-staging` suffix on the server name (prod = no suffix).
-//! Ports come from each `.owallet` file's `OWALLET_PORT`.
+//! With the internal `dev-envs`-only `--dev`/`--staging` flags, one entry is
+//! added per active env with a `-dev` / `-staging` suffix on the server name
+//! (prod = no suffix). Ports come from each config's `OWALLET_PORT`.
 
 use std::path::{Path, PathBuf};
 
@@ -410,5 +410,4 @@ mod tests {
         assert!(text.contains("[mcp_servers.old]"));
         assert!(text.contains("[mcp_servers.owallet]"));
     }
-
 }

@@ -73,26 +73,28 @@ owallet install --claude-local
 The dashboard lives at `http://127.0.0.1:8765/wallet`. The MCP endpoint
 is `http://127.0.0.1:8765/mcp` (JSON-RPC 2.0).
 
-## Multi-env
+## Custom environments
 
-`.owallet` config files (`prod.owallet`, `dev.owallet`, `staging.owallet`)
-hold per-env overrides for `OVERPAY_RAILS_URL`, `OVERPAY_PUBLIC_URL`,
-`OWALLET_PORT`. Combine flags to run multiple servers at once:
+Public builds target production. To point owallet at a different backend,
+pass an explicit dotenv file with `--config PATH`; it can set
+`OVERPAY_RAILS_URL`, `OVERPAY_PUBLIC_URL`, and `OWALLET_PORT`:
 
 ```bash
-owallet --dev --staging serve            # one server per env, each on its OWALLET_PORT
-owallet --prod --dev --staging serve --port 9001,9002,9003   # positional port overrides
-owallet --staging install --claude-global # registers owallet-staging
+owallet --config ./my.owallet serve
+owallet --config ./my.owallet install --claude-global
 ```
 
-To override a URL from the environment (rather than a `.owallet` file),
-the var must carry the env's suffix: `OVERPAY_RAILS_URL_PROD`,
-`OVERPAY_RAILS_URL_DEV`, `OVERPAY_RAILS_URL_STAGING` (same for
-`OVERPAY_PUBLIC_URL`). A bare, unsuffixed `OVERPAY_RAILS_URL` from the
-shell is deliberately ignored when a config is active — values come from
-the config file or the suffixed env var. `owallet install` / `config
---mcp` register only the local `owallet` server (owallet no longer
-calls a hosted Overpay MCP).
+`owallet install` / `config --mcp` register only the local `owallet`
+server (owallet no longer calls a hosted Overpay MCP).
+
+> **Internal `dev-envs` builds.** The `--dev` / `--staging` selectors and
+> their built-in defaults are gated behind the `dev-envs` Cargo feature
+> (`cargo build --features dev-envs`) and are **not present in public
+> release builds**. In those internal builds, combining flags runs one
+> server per environment (`owallet --dev --staging serve`), and a URL
+> override from the shell must carry the env suffix
+> (`OVERPAY_RAILS_URL_DEV`, `OVERPAY_RAILS_URL_STAGING`); a bare,
+> unsuffixed `OVERPAY_RAILS_URL` is ignored while a config is active.
 
 ## CLI reference
 

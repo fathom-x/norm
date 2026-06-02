@@ -4,6 +4,16 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Hide internal dev/staging environments from public builds (#312)
+
+- **`--dev` / `--staging` are now gated behind the `dev-envs` Cargo
+  feature** (off by default). Public release builds register only
+  `--prod` / `--config PATH`; the `--dev` / `--staging` flags are absent
+  from `--help` and rejected as unexpected arguments, and the non-public
+  dev/staging URLs and ports are no longer compiled into the binary.
+  Internal builds re-enable the full multi-environment behaviour with
+  `cargo build --features dev-envs`.
+
 ### Final Python-parity port (last sync before Python sunset)
 
 - **Per-environment URL env vars.** External URL overrides now require an

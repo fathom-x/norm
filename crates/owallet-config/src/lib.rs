@@ -1,9 +1,11 @@
 //! Config resolution for owallet.
 //!
-//! Three environments (`--prod`, `--dev`, `--staging`) each have hardcoded
-//! built-in defaults applied with `setdefault` semantics so any env var already
-//! in the shell always wins.  `--config PATH` still loads an explicit dotenv
-//! file for truly custom configurations.
+//! The `--prod` environment has hardcoded built-in defaults applied with
+//! `setdefault` semantics so any env var already in the shell always wins.
+//! `--config PATH` loads an explicit dotenv file for custom configurations.
+//!
+//! The internal `--dev` / `--staging` environments are compiled in only under
+//! the `dev-envs` Cargo feature; public release builds omit them entirely.
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +31,9 @@ pub const SUFFIXED_ENV_KEYS: [&str; 2] = ["OVERPAY_RAILS_URL", "OVERPAY_PUBLIC_U
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinEnv {
     Prod,
+    #[cfg(feature = "dev-envs")]
     Dev,
+    #[cfg(feature = "dev-envs")]
     Staging,
 }
 
@@ -47,7 +51,9 @@ impl BuiltinEnv {
     pub fn postfix(self) -> &'static str {
         match self {
             BuiltinEnv::Prod => "PROD",
+            #[cfg(feature = "dev-envs")]
             BuiltinEnv::Dev => "DEV",
+            #[cfg(feature = "dev-envs")]
             BuiltinEnv::Staging => "STAGING",
         }
     }
@@ -59,11 +65,13 @@ impl BuiltinEnv {
                 rails_url: Some(defaults::OVERPAY_RAILS_URL),
                 port: defaults::OWALLET_PORT,
             },
+            #[cfg(feature = "dev-envs")]
             BuiltinEnv::Dev => BuiltinDefaults {
                 label: "dev",
                 rails_url: Some("http://localhost:3001"),
                 port: 8766,
             },
+            #[cfg(feature = "dev-envs")]
             BuiltinEnv::Staging => BuiltinDefaults {
                 label: "staging",
                 rails_url: None,
@@ -133,7 +141,11 @@ pub struct ConfigSelector {
     /// Explicit `--config PATH` (required to exist if set).
     pub explicit: Option<PathBuf>,
     pub prod: bool,
+    /// Only honored when the `dev-envs` feature is enabled; ignored by
+    /// `resolve` in public builds (the `--dev` flag isn't registered there).
     pub dev: bool,
+    /// Only honored when the `dev-envs` feature is enabled; ignored by
+    /// `resolve` in public builds (the `--staging` flag isn't registered there).
     pub staging: bool,
 }
 
@@ -152,7 +164,9 @@ pub enum ConfigError {
 /// Resolve CLI flags to a list of configs.
 ///
 /// - `--config PATH` — explicit dotenv file; errors if missing.
-/// - `--prod`/`--dev`/`--staging` — built-in defaults for those environments.
+/// - `--prod` — built-in production defaults.
+/// - `--dev`/`--staging` — built-in defaults for those environments
+///   (only available when the `dev-envs` feature is enabled).
 /// - No flags — `Builtin(Prod)` (production defaults).
 pub fn resolve(selector: &ConfigSelector) -> Result<Vec<ResolvedConfig>, ConfigError> {
     if let Some(p) = &selector.explicit {
@@ -163,16 +177,24 @@ pub fn resolve(selector: &ConfigSelector) -> Result<Vec<ResolvedConfig>, ConfigE
         return Err(ConfigError::NotFound(path));
     }
 
-    if selector.prod || selector.dev || selector.staging {
+    #[cfg(feature = "dev-envs")]
+    let any_builtin = selector.prod || selector.dev || selector.staging;
+    #[cfg(not(feature = "dev-envs"))]
+    let any_builtin = selector.prod;
+
+    if any_builtin {
         let mut out = Vec::new();
         if selector.prod {
             out.push(ResolvedConfig::Builtin(BuiltinEnv::Prod));
         }
-        if selector.dev {
-            out.push(ResolvedConfig::Builtin(BuiltinEnv::Dev));
-        }
-        if selector.staging {
-            out.push(ResolvedConfig::Builtin(BuiltinEnv::Staging));
+        #[cfg(feature = "dev-envs")]
+        {
+            if selector.dev {
+                out.push(ResolvedConfig::Builtin(BuiltinEnv::Dev));
+            }
+            if selector.staging {
+                out.push(ResolvedConfig::Builtin(BuiltinEnv::Staging));
+            }
         }
         return Ok(out);
     }
@@ -369,6 +391,7 @@ mod tests {
         assert_eq!(resolved, vec![ResolvedConfig::Builtin(BuiltinEnv::Prod)]);
     }
 
+    #[cfg(feature = "dev-envs")]
     #[test]
     fn dev_flag_returns_dev_builtin() {
         let resolved = resolve(&ConfigSelector {
@@ -379,6 +402,20 @@ mod tests {
         assert_eq!(resolved, vec![ResolvedConfig::Builtin(BuiltinEnv::Dev)]);
     }
 
+    #[cfg(not(feature = "dev-envs"))]
+    #[test]
+    fn dev_flag_ignored_without_feature() {
+        // The flag can't be set via the public CLI, but even if a caller
+        // constructs the selector directly, `resolve` ignores it.
+        let resolved = resolve(&ConfigSelector {
+            dev: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(resolved, vec![ResolvedConfig::Builtin(BuiltinEnv::Prod)]);
+    }
+
+    #[cfg(feature = "dev-envs")]
     #[test]
     fn multi_flag_returns_all_builtins() {
         let resolved = resolve(&ConfigSelector {
@@ -401,8 +438,11 @@ mod tests {
     #[test]
     fn builtin_postfixes() {
         assert_eq!(BuiltinEnv::Prod.postfix(), "PROD");
-        assert_eq!(BuiltinEnv::Dev.postfix(), "DEV");
-        assert_eq!(BuiltinEnv::Staging.postfix(), "STAGING");
+        #[cfg(feature = "dev-envs")]
+        {
+            assert_eq!(BuiltinEnv::Dev.postfix(), "DEV");
+            assert_eq!(BuiltinEnv::Staging.postfix(), "STAGING");
+        }
     }
 
     #[test]
@@ -412,21 +452,24 @@ mod tests {
             Some("https://overpay.com")
         );
         assert_eq!(BuiltinEnv::Prod.config().port, 8765);
-        assert_eq!(
-            BuiltinEnv::Dev.config().rails_url,
-            Some("http://localhost:3001")
-        );
-        assert_eq!(BuiltinEnv::Dev.config().port, 8766);
-        assert!(BuiltinEnv::Staging.config().rails_url.is_none());
-        assert_eq!(BuiltinEnv::Staging.config().port, 8767);
+        #[cfg(feature = "dev-envs")]
+        {
+            assert_eq!(
+                BuiltinEnv::Dev.config().rails_url,
+                Some("http://localhost:3001")
+            );
+            assert_eq!(BuiltinEnv::Dev.config().port, 8766);
+            assert!(BuiltinEnv::Staging.config().rails_url.is_none());
+            assert_eq!(BuiltinEnv::Staging.config().port, 8767);
+        }
     }
 
     #[test]
     fn resolved_config_postfix() {
-        assert_eq!(
-            ResolvedConfig::Builtin(BuiltinEnv::Dev).postfix(),
-            "DEV"
-        );
+        #[cfg(feature = "dev-envs")]
+        assert_eq!(ResolvedConfig::Builtin(BuiltinEnv::Dev).postfix(), "DEV");
+        // File-based postfix derives from the filename, no built-in variant
+        // required — works in every build.
         assert_eq!(
             ResolvedConfig::File(PathBuf::from("staging.owallet")).postfix(),
             "STAGING"
@@ -437,7 +480,11 @@ mod tests {
     fn read_var_works() {
         let tmp = tempfile::TempDir::new().unwrap();
         let p = tmp.path().join("dev.owallet");
-        std::fs::write(&p, "OVERPAY_RAILS_URL=http://localhost:3001\nOWALLET_PORT=8766\n").unwrap();
+        std::fs::write(
+            &p,
+            "OVERPAY_RAILS_URL=http://localhost:3001\nOWALLET_PORT=8766\n",
+        )
+        .unwrap();
         let v = read_var(&p, "OWALLET_PORT").unwrap().unwrap();
         assert_eq!(v, "8766");
     }
@@ -446,7 +493,11 @@ mod tests {
     fn read_all_vars_returns_everything() {
         let tmp = tempfile::TempDir::new().unwrap();
         let p = tmp.path().join("dev.owallet");
-        std::fs::write(&p, "OVERPAY_RAILS_URL=http://localhost:3001\nOWALLET_PORT=8766\n").unwrap();
+        std::fs::write(
+            &p,
+            "OVERPAY_RAILS_URL=http://localhost:3001\nOWALLET_PORT=8766\n",
+        )
+        .unwrap();
         let vars = read_all_vars(&p).unwrap();
         assert_eq!(vars.get("OWALLET_PORT").map(String::as_str), Some("8766"));
         assert_eq!(
