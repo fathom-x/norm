@@ -12,6 +12,7 @@ pub struct WalletRow {
     pub last_accessed: Option<i64>,
     pub address: Option<String>,
     pub overpay_username: Option<String>,
+    pub zcash_address: Option<String>,
 }
 
 pub(crate) fn insert(
@@ -52,7 +53,7 @@ pub(crate) fn delete(conn: &Connection, npub: &str) -> Result<()> {
 
 pub(crate) fn list(conn: &Connection) -> Result<Vec<WalletRow>> {
     let mut stmt = conn.prepare(
-        "SELECT npub, created_at, last_accessed, address, overpay_username
+        "SELECT npub, created_at, last_accessed, address, overpay_username, zcash_address
          FROM wallets
          ORDER BY created_at",
     )?;
@@ -64,6 +65,7 @@ pub(crate) fn list(conn: &Connection) -> Result<Vec<WalletRow>> {
                 last_accessed: row.get(2)?,
                 address: row.get(3)?,
                 overpay_username: row.get(4)?,
+                zcash_address: row.get(5)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -124,6 +126,25 @@ pub(crate) fn read_password_hash(conn: &Connection, npub: &str) -> Result<Option
     let row = conn
         .query_row(
             "SELECT wallet_password_hash FROM wallets WHERE npub = ?1",
+            params![npub],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?;
+    Ok(row.flatten())
+}
+
+pub(crate) fn set_zcash_address(conn: &Connection, npub: &str, address: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE wallets SET zcash_address = ?1 WHERE npub = ?2",
+        params![address, npub],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn read_zcash_address(conn: &Connection, npub: &str) -> Result<Option<String>> {
+    let row = conn
+        .query_row(
+            "SELECT zcash_address FROM wallets WHERE npub = ?1",
             params![npub],
             |row| row.get::<_, Option<String>>(0),
         )

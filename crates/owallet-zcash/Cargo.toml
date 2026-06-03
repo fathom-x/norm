@@ -1,0 +1,54 @@
+[package]
+name = "owallet-zcash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+
+# Orchard-only Zcash wallet backend for owallet, built on librustzcash.
+# Mirrors the surface of `owallet-evm`: derive a receive address, query a
+# balance, sync against lightwalletd, and send a shielded payment. The
+# wallet plumbing is adapted from the `zecrocks/zkv` reference wallet.
+
+[dependencies]
+owallet-crypto = { workspace = true }
+owallet-db = { workspace = true }
+thiserror = { workspace = true }
+anyhow = "1"
+hex = { workspace = true }
+rand = { workspace = true }
+tracing = "0.1"
+
+# rusqlite is declared directly (not `.workspace = true`) only so the version
+# matches what `zcash_client_sqlite` resolves to (the workspace has a single
+# `libsqlite3-sys`, which uses `links = "sqlite3"`). Plaintext `bundled` build
+# — no system crypto dependency, so the static-musl release binary links
+# cleanly (matching the zkv reference wallet's on-disk posture).
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# Async + lightwalletd gRPC
+futures-util = "0.3"
+tokio = { version = "1", features = ["fs", "rt", "rt-multi-thread", "macros", "io-util"] }
+tonic = { version = "0.14", features = ["tls-ring", "tls-webpki-roots"] }
+prost = "0.14"
+
+# Zcash / librustzcash — the network-upgrade release train (mutually
+# compatible; bump the whole set together). Matches zcash/zcash-devtool#170.
+orchard = { version = "0.14", default-features = false }
+sapling = { package = "sapling-crypto", version = "0.7" }
+zcash_address = "0.12"
+zcash_client_backend = { version = "0.23", default-features = false, features = ["lightwalletd-tonic-tls-webpki-roots", "orchard"] }
+zcash_client_sqlite = { version = "0.21", default-features = false, features = ["unstable", "orchard"] }
+zcash_keys = { version = "0.14", features = ["orchard", "unstable"] }
+zcash_primitives = "0.28"
+zcash_proofs = { version = "0.28", features = ["bundled-prover"] }
+zcash_protocol = { version = "0.9", features = ["local-consensus"] }
+zip32 = "0.2"
+zip321 = "0.8"
+secrecy = "0.8"
+
+[dev-dependencies]
+tempfile = { workspace = true }

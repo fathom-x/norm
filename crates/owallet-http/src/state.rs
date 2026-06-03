@@ -8,7 +8,7 @@ use owallet_db::Database;
 use owallet_overpay::{OverpayClient, Pkce};
 
 use crate::session::SessionStore;
-use crate::EvmConfig;
+use crate::{EvmConfig, ZcashConfig};
 
 /// Cookie name for the dashboard session token. Matches the Python
 /// implementation (`server.py:199`).
@@ -47,6 +47,9 @@ pub struct AppState {
     /// JSON-RPC URL + CAIP-2 chain id used by the dashboard `POST /wallet/send`
     /// handler (and propagated into the MCP server's `send_usdc` tool).
     pub evm: EvmConfig,
+    /// lightwalletd + network used by the dashboard `POST /wallet/send` ZEC
+    /// branch and propagated into the MCP `send_zcash`/`sync_zcash` tools.
+    pub zcash: ZcashConfig,
     /// Stable identifier of the host the dashboard's bearer tokens are
     /// stored under (the OAuth issuer URL). Used by the dashboard handlers
     /// that look up stored Overpay tokens.
@@ -68,6 +71,7 @@ impl AppState {
             sessions: SessionStore::new(),
             overpay,
             evm,
+            zcash: ZcashConfig::default(),
             host_key,
             pending_auth: PendingDashboardAuthMap::default(),
         }
@@ -96,6 +100,7 @@ impl AppState {
             sessions: SessionStore::new(),
             overpay: self.overpay.clone(),
             evm: self.evm.clone(),
+            zcash: self.zcash.clone(),
             host_key: self.host_key.clone(),
             pending_auth: PendingDashboardAuthMap::default(),
         }

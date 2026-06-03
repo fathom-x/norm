@@ -69,19 +69,34 @@
 </div>
 
 <div class="card">
-  <h2>Send USDC</h2>
+  <h2>Send</h2>
   <p class="muted" style="margin-bottom:14px;">
-    Signs and broadcasts an on-chain ERC-20 transfer from the active wallet.
-    This is irreversible — confirm the recipient address and amount before submitting.
+    Signs and broadcasts a payment from the active wallet — USDC on the
+    configured EVM chain, or shielded ZEC (Orchard) to a Unified Address.
+    This is irreversible — confirm the recipient and amount before submitting.
   </p>
+  {% if let Some(w) = active.as_ref() %}
+    {% if let Some(ua) = w.zcash_address.as_ref() %}
+      <p class="muted" style="margin-bottom:14px;">
+        Your Zcash receive address (Orchard UA): <code>{{ ua }}</code>
+      </p>
+    {% endif %}
+  {% endif %}
   <form method="POST" action="/wallet/send"
-        onsubmit="return confirm('Broadcast this USDC transfer? This is irreversible.');">
+        onsubmit="return confirm('Broadcast this transfer? This is irreversible.');">
     <div class="field">
-      <label for="to">Recipient address</label>
-      <input id="to" name="to" type="text" placeholder="0x…" required>
+      <label for="asset">Asset</label>
+      <select id="asset" name="asset">
+        <option value="usdc">USDC (EVM)</option>
+        <option value="zec">ZEC (Zcash / Orchard)</option>
+      </select>
     </div>
     <div class="field">
-      <label for="amount">Amount (USDC)</label>
+      <label for="to">Recipient address</label>
+      <input id="to" name="to" type="text" placeholder="0x… or u1…" required>
+    </div>
+    <div class="field">
+      <label for="amount">Amount</label>
       <input id="amount" name="amount" type="text" placeholder="0.00" required>
     </div>
     <button type="submit">Send</button>

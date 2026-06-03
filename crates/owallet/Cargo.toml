@@ -23,6 +23,7 @@ owallet-db = { workspace = true }
 owallet-config = { workspace = true }
 owallet-overpay = { workspace = true }
 owallet-evm = { workspace = true }
+owallet-zcash = { workspace = true }
 owallet-http = { workspace = true }
 
 axum = "0.8"

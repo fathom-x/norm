@@ -374,6 +374,19 @@ pub struct PurchaseCreditsResponse {
     pub payment_address: Option<String>,
     #[serde(default)]
     pub payment_amount_usdc: Option<f64>,
+    /// Settlement currency the server picked for this order (`"USDC"` /
+    /// `"ZEC"`). Present once a payment row is created; absent when no rail
+    /// is configured.
+    #[serde(default)]
+    pub currency: Option<String>,
+    /// Crypto address for a non-USDC rail — for Zcash, the Orchard Unified
+    /// Address to pay. Rails emits this as `crypto_address` on the payment.
+    #[serde(default)]
+    pub crypto_address: Option<String>,
+    /// Generic payment amount in the settlement `currency` (ZEC when
+    /// `currency == "ZEC"`). USDC orders also carry `payment_amount_usdc`.
+    #[serde(default)]
+    pub payment_amount: Option<f64>,
     #[serde(default)]
     pub total_usd_cents: Option<i64>,
     #[serde(default)]
@@ -382,6 +395,31 @@ pub struct PurchaseCreditsResponse {
     pub order_url: Option<String>,
     #[serde(default)]
     pub message: Option<String>,
+}
+
+impl PurchaseCreditsResponse {
+    /// If the server picked Zcash for this order, return the
+    /// `(orchard_ua, amount_zec)` to pay. Routes on a Zcash-shaped address
+    /// (`currency == "ZEC"` or a UA in `crypto_address`/`payment_address`)
+    /// so the buy flow can dispatch to the Zcash backend.
+    #[must_use]
+    pub fn zcash_payment(&self) -> Option<(String, f64)> {
+        let is_zec = self
+            .currency
+            .as_deref()
+            .is_some_and(|c| c.eq_ignore_ascii_case("zec"));
+        let addr = self
+            .crypto_address
+            .clone()
+            .or_else(|| self.payment_address.clone())?;
+        // Only treat as Zcash when the currency says so, or the address
+        // clearly isn't an EVM `0x…` address (i.e. looks like a UA).
+        if !is_zec && addr.starts_with("0x") {
+            return None;
+        }
+        let amount = self.payment_amount.or(self.payment_amount_usdc)?;
+        Some((addr, amount))
+    }
 }
 
 impl<'de> Deserialize<'de> for PurchaseCreditsResponse {
@@ -395,6 +433,9 @@ impl<'de> Deserialize<'de> for PurchaseCreditsResponse {
             order_id,
             payment_address: opt_string(o, "payment_address"),
             payment_amount_usdc: opt_f64(o, "payment_amount_usdc"),
+            currency: opt_string(o, "currency"),
+            crypto_address: opt_string(o, "crypto_address"),
+            payment_amount: opt_f64(o, "payment_amount"),
             total_usd_cents: opt_i64(o, "total_usd_cents"),
             payment_status: opt_string(o, "payment_status"),
             order_url: opt_string(o, "order_url"),
@@ -461,4 +502,50 @@ pub struct OrderFilters {
     /// against it. Bearer-authenticated requests skip the check, and
     /// passing the address anyway widens the result set.
     pub payer_address: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn purchase_response_usdc_does_not_route_to_zcash() {
+        let v = serde_json::json!({
+            "order_id": "o1",
+            "payment_address": "0xabc0000000000000000000000000000000000000",
+            "payment_amount_usdc": 1.5,
+        });
+        let r: PurchaseCreditsResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(r.payment_amount_usdc, Some(1.5));
+        assert!(r.zcash_payment().is_none());
+    }
+
+    #[test]
+    fn purchase_response_zec_routes_to_zcash() {
+        let v = serde_json::json!({
+            "order_id": "o2",
+            "currency": "ZEC",
+            "crypto_address": "u1exampleorchardunifiedaddress",
+            "payment_amount": 0.25,
+        });
+        let r: PurchaseCreditsResponse = serde_json::from_value(v).unwrap();
+        let (ua, amt) = r.zcash_payment().expect("should route to zcash");
+        assert_eq!(ua, "u1exampleorchardunifiedaddress");
+        assert_eq!(amt, 0.25);
+    }
+
+    #[test]
+    fn purchase_response_zec_via_data_envelope() {
+        let v = serde_json::json!({
+            "data": {
+                "order_id": "o3",
+                "currency": "ZEC",
+                "crypto_address": "u1another",
+                "payment_amount": 2.0,
+            }
+        });
+        let r: PurchaseCreditsResponse = serde_json::from_value(v).unwrap();
+        assert_eq!(r.order_id, "o3");
+        assert_eq!(r.zcash_payment(), Some(("u1another".into(), 2.0)));
+    }
 }

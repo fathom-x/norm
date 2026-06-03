@@ -63,6 +63,26 @@ impl Default for EvmConfig {
     }
 }
 
+/// Zcash config injected into [`build_full_router`]. The MCP `send_zcash` /
+/// `sync_zcash` tools and the dashboard ZEC send read `lightwalletd` +
+/// `network` from here.
+#[derive(Debug, Clone)]
+pub struct ZcashConfig {
+    /// lightwalletd operator alias or `host:port`.
+    pub lightwalletd: String,
+    /// Network name (`mainnet`/`testnet`).
+    pub network: String,
+}
+
+impl Default for ZcashConfig {
+    fn default() -> Self {
+        Self {
+            lightwalletd: "zecrocks".to_string(),
+            network: "mainnet".to_string(),
+        }
+    }
+}
+
 /// Build the full router: dashboard + OAuth AS + `/mcp`. `issuer_url` is
 /// the externally-reachable base URL that goes into the OAuth metadata
 /// document (e.g. `http://127.0.0.1:8765`). The Overpay client + EVM
@@ -82,7 +102,11 @@ pub fn build_full_router(state: AppState, issuer_url: String) -> Router {
         state.overpay.clone(),
         state.host_key.clone(),
     )
-    .with_evm(state.evm.rpc_url.clone(), state.evm.network.clone());
+    .with_evm(state.evm.rpc_url.clone(), state.evm.network.clone())
+    .with_zcash(
+        state.zcash.lightwalletd.clone(),
+        state.zcash.network.clone(),
+    );
     let app_for_auth = state.clone();
     let auth: BearerAuthCheck = Arc::new(move |bearer: Option<&str>| match bearer {
         Some(b) => oauth_as::lookup_token(&app_for_auth, b),

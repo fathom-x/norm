@@ -44,6 +44,8 @@ pub enum ToolError {
     Overpay(#[from] owallet_overpay::OverpayError),
     #[error("evm: {0}")]
     Evm(#[from] owallet_evm::EvmError),
+    #[error("zcash: {0}")]
+    Zcash(#[from] owallet_zcash::ZcashError),
     #[error("not yet implemented in this build")]
     NotImplemented,
     #[error("wait_for_order: target {target} not reached within {seconds}s")]
@@ -197,6 +199,22 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
+            name: "send_zcash",
+            description: "Sync, then sign and broadcast a shielded Zcash (Orchard) payment to a Unified Address (u1…). Returns `{txid}`.",
+            input_schema: schema_with_required(
+                json!({
+                    "to_address": {"type": "string"},
+                    "amount_zec": {"type": "number"},
+                }),
+                &["to_address", "amount_zec"],
+            ),
+        },
+        ToolSpec {
+            name: "sync_zcash",
+            description: "Sync the wallet's Zcash (Orchard) state from lightwalletd and return `{height, balance_zec, balance_zat, spendable_zat}`.",
+            input_schema: schema_object(json!({})),
+        },
+        ToolSpec {
             name: "list_purchases",
             description: "List orders this wallet has cached locally from past purchases. The cache fills automatically when an order reaches a terminal fulfillment status. Call this before issuing a new `buy` to check whether a deliverable is already paid for. `delivered_content` is omitted — fetch it with get_purchase.",
             input_schema: schema_object(json!({
@@ -257,6 +275,8 @@ pub async fn dispatch(state: &McpState, name: &str, args: Value) -> Result<ToolO
         "redeem_merchant_credits" => redeem_merchant_credits(state, args).await?,
         "buy" => buy(state, args).await?,
         "send_usdc" => send_usdc(state, args).await?,
+        "send_zcash" => send_zcash(state, args).await?,
+        "sync_zcash" => sync_zcash(state, args).await?,
         "list_purchases" => list_purchases(state, args).await?,
         "get_purchase" => get_purchase(state, args).await?,
         "sync_purchases" => sync_purchases(state, args).await?,
@@ -408,6 +428,39 @@ async fn get_account_info(state: &McpState) -> Result<Value, ToolError> {
                 "account_hint".into(),
                 json!(format!("Could not reach Overpay: {e}")),
             );
+        }
+    }
+
+    // Zcash receive address + balance. Auto-sync first (best-effort,
+    // sync-on-read like zkv); the sync fast-path keeps repeat calls cheap, and
+    // a failure just falls back to the last-known local balance.
+    if let Some(ua) = wallet.zcash_address.as_deref() {
+        result.insert("zcash_address".into(), json!(ua));
+        if let (Ok(zseed), Ok(net), Ok(dir)) = (
+            owallet_crypto::bip39_seed_from_stored(&seed),
+            state.zcash_net(),
+            state.zcash_data_dir(&npub),
+        ) {
+            let lwd = state.zcash_lightwalletd.clone();
+            let sync_dir = dir.clone();
+            // `zseed` is `[u8; 64]` (Copy), so it's still usable below.
+            let _ = blocking_zcash(move |rt| {
+                rt.block_on(async move {
+                    owallet_zcash::init_account(&sync_dir, net, &lwd, &zseed, None).await?;
+                    owallet_zcash::sync(&sync_dir, net, &lwd).await
+                })
+            })
+            .await;
+            if let Ok(bal) = owallet_zcash::zec_balance(&dir, net) {
+                result.insert(
+                    "zec_balance".into(),
+                    json!({
+                        "zec": owallet_zcash::format_zec(bal.total_zat),
+                        "total_zat": bal.total_zat,
+                        "spendable_zat": bal.spendable_zat,
+                    }),
+                );
+            }
         }
     }
 
@@ -1204,6 +1257,58 @@ async fn buy(state: &McpState, args: Value) -> Result<Value, ToolError> {
         .purchase_merchant_credits(&args.seller_slug, amount_cents, auth.as_auth())
         .await?;
 
+    // Zcash rail: if the server picked ZEC (Orchard UA + ZEC amount), pay
+    // shielded. Detected via `PurchaseCreditsResponse::zcash_payment` (a
+    // Zcash-shaped address, not an EVM `0x…`).
+    if let Some((to_ua, amount_zec)) = purchase.zcash_payment() {
+        let seed_str = {
+            let db = state
+                .db
+                .lock()
+                .map_err(|e| ToolError::Internal(format!("db mutex: {e}")))?;
+            db.read_seed(&npub)
+                .map_err(|e| ToolError::Internal(e.to_string()))?
+                .ok_or(ToolError::NoWallet)?
+        };
+        let zseed = match owallet_crypto::bip39_seed_from_stored(&seed_str) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(json!({
+                    "error":     format!("wallet has no Zcash account: {e}"),
+                    "order_id":  purchase.order_id,
+                    "order_url": purchase.order_url,
+                    "hint":      "Pay via order_url, or import a mnemonic-backed wallet.",
+                }));
+            }
+        };
+        let network = state.zcash_net()?;
+        let dir = state.zcash_data_dir(&npub)?;
+        let lwd = state.zcash_lightwalletd.clone();
+        let result = blocking_zcash(move |rt| {
+            rt.block_on(async move {
+                owallet_zcash::sync(&dir, network, &lwd).await?;
+                owallet_zcash::send_zcash(&dir, network, &lwd, &zseed, &to_ua, amount_zec).await
+            })
+        })
+        .await;
+        return Ok(match result {
+            Ok(send) => json!({
+                "order_id":          purchase.order_id,
+                "txid":              send.txid,
+                "payment_amount_zec": amount_zec,
+                "order_url":         purchase.order_url,
+                "status":            "payment_sent",
+                "note":              "Credits will be funded automatically once the transfer is detected on-chain.",
+            }),
+            Err(e) => json!({
+                "error":     format!("ZEC transfer failed: {e}"),
+                "order_id":  purchase.order_id,
+                "order_url": purchase.order_url,
+                "hint":      "Order created but payment not sent. Pay via order_url.",
+            }),
+        });
+    }
+
     // Rails only fills payment_address + payment_amount_usdc when the
     // seller has a USDC wallet on file. For non-USDC sellers, return a
     // partial-success error dict matching `server.py:2154-2160` — the
@@ -1314,6 +1419,105 @@ async fn send_usdc(state: &McpState, args: Value) -> Result<Value, ToolError> {
 
     // Strict parity with Python `server.py:1824-1825`: only `tx_hash`.
     Ok(json!({ "tx_hash": outcome.tx_hash }))
+}
+
+#[derive(Deserialize)]
+struct SendZcashArgs {
+    #[serde(alias = "to")]
+    to_address: String,
+    #[serde(alias = "amount")]
+    amount_zec: f64,
+}
+
+/// Resolve the active wallet's BIP-39 seed, Zcash network, and per-wallet data
+/// directory for the Zcash tools.
+fn zcash_ctx(
+    state: &McpState,
+) -> Result<(String, [u8; 64], owallet_zcash::Network, std::path::PathBuf), ToolError> {
+    let npub = state.resolve_npub().ok_or(ToolError::NoWallet)?;
+    let seed_str = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|e| ToolError::Internal(format!("db mutex: {e}")))?;
+        db.read_seed(&npub)
+            .map_err(|e| ToolError::Internal(e.to_string()))?
+            .ok_or(ToolError::NoWallet)?
+    };
+    let seed =
+        owallet_crypto::bip39_seed_from_stored(&seed_str).map_err(|e| ToolError::InvalidArg {
+            arg: "wallet",
+            reason: format!("wallet has no Zcash account: {e}"),
+        })?;
+    let network = state.zcash_net()?;
+    let dir = state.zcash_data_dir(&npub)?;
+    Ok((npub, seed, network, dir))
+}
+
+/// Drive an `owallet_zcash` async operation to completion on a dedicated
+/// blocking thread with its own current-thread runtime.
+///
+/// librustzcash holds non-`Send` state (the rusqlite-backed `WalletDb`, the
+/// gRPC client, the local prover) across await points, so its futures can't be
+/// awaited directly inside an axum (`Send`-future) handler. Running them under
+/// `spawn_blocking` keeps the whole non-`Send` future on one thread; the
+/// handler only awaits the `Send` `JoinHandle`.
+async fn blocking_zcash<T, F>(f: F) -> Result<T, ToolError>
+where
+    F: FnOnce(&tokio::runtime::Runtime) -> Result<T, owallet_zcash::ZcashError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(owallet_zcash::ZcashError::from)?;
+        f(&rt)
+    })
+    .await
+    .map_err(|e| ToolError::Internal(format!("zcash task: {e}")))?
+    .map_err(ToolError::Zcash)
+}
+
+async fn send_zcash(state: &McpState, args: Value) -> Result<Value, ToolError> {
+    let args: SendZcashArgs = serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
+        arg: "arguments",
+        reason: e.to_string(),
+    })?;
+    let (_npub, seed, network, dir) = zcash_ctx(state)?;
+    let lwd = state.zcash_lightwalletd.clone();
+    let to = args.to_address;
+    let amount = args.amount_zec;
+    // Sync first so the wallet has spendable notes, then broadcast.
+    let outcome = blocking_zcash(move |rt| {
+        rt.block_on(async move {
+            owallet_zcash::sync(&dir, network, &lwd).await?;
+            owallet_zcash::send_zcash(&dir, network, &lwd, &seed, &to, amount).await
+        })
+    })
+    .await?;
+    Ok(json!({ "txid": outcome.txid }))
+}
+
+async fn sync_zcash(state: &McpState, _args: Value) -> Result<Value, ToolError> {
+    let (_npub, seed, network, dir) = zcash_ctx(state)?;
+    let lwd = state.zcash_lightwalletd.clone();
+    let balance = blocking_zcash(move |rt| {
+        rt.block_on(async move {
+            owallet_zcash::init_account(&dir, network, &lwd, &seed, None).await?;
+            let height = owallet_zcash::sync(&dir, network, &lwd).await?;
+            let balance = owallet_zcash::zec_balance(&dir, network)?;
+            Ok::<_, owallet_zcash::ZcashError>((height, balance))
+        })
+    })
+    .await?;
+    let (height, balance) = balance;
+    Ok(json!({
+        "height": height,
+        "balance_zec": owallet_zcash::format_zec(balance.total_zat),
+        "balance_zat": balance.total_zat,
+        "spendable_zat": balance.spendable_zat,
+    }))
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,46 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Zcash (Orchard-only) support
+
+- **New `owallet-zcash` crate** built on librustzcash (the `zecrocks/zkv`
+  wallet stack). A wallet can now receive, sync, show a balance of, and send
+  Zcash using **Orchard-only Unified Addresses**, alongside the existing
+  USDC/EVM rail. The same BIP-39 seed drives both chains.
+- **Receive / sync / balance / send.** `generate` / `import` derive and cache
+  the Orchard UA (offline); `import` gains `--zec-birthday <height>` to scan
+  from an earlier height. `owallet send --asset zec --to u1… --amount N`
+  broadcasts a shielded payment. New MCP tools `send_zcash` / `sync_zcash`.
+- **Sync-on-read (like zkv) + manual sync.** The balance-display paths
+  (`owallet account`, MCP `get_account_info`) and `send` auto-sync first,
+  best-effort — the sync fast-path (compare chain tip, skip if unchanged)
+  keeps repeat reads cheap, and an offline failure falls back to the
+  last-known local balance. `owallet sync` and the `sync_zcash` MCP tool force
+  a sync explicitly.
+- **Overpay pay-with-Zcash.** The MCP `buy` flow routes to Zcash automatically
+  when the server returns an Orchard UA + ZEC amount (`PurchaseCreditsResponse`
+  gained `currency` / `crypto_address` / `payment_amount`). The dashboard
+  `Send` form gained a USDC/ZEC asset selector.
+- **Data files.** librustzcash's sqlite lives in the wallet's #310 per-`npub`
+  state directory at `<data dir>/<npub>/zcash/` (e.g. `~/.owallet/<npub>/zcash/`,
+  `0700`; `OWALLET_HOME` relocates the data dir, `ZEC_DATA_DIR` overrides just
+  the Zcash base). So one backup of the owallet data dir captures the wallet DB,
+  order cache, and Zcash sync state together. The wallet DB is stored unencrypted (matching the zkv
+  reference; no SQLCipher/OpenSSL, so the static-musl release binary links
+  cleanly): it holds the Unified *viewing* key + note metadata, which can't
+  spend (the seed stays in owallet's encrypted DB). Proving parameters are
+  **bundled into the binary** (no downloads), which increases binary size and
+  build time noticeably.
+- **Config.** `ZEC_NETWORK` (default `mainnet`), `ZEC_LIGHTWALLETD_URL`
+  (default `zecrocks`), `ZEC_DATA_DIR`. Per-env suffixes supported under
+  `serve`.
+- **librustzcash kept current with the network.** The `zcash_*` crate set
+  tracks the latest network-upgrade release train (e.g. `zcash_client_backend`
+  0.23 / `zcash_client_sqlite` 0.21 / `zcash_keys` 0.14 / `zcash_primitives`
+  0.28 / `zcash_protocol` 0.9 / `orchard` 0.14), so sync keeps working across
+  consensus upgrades. Workspace `rusqlite` bumped to match the version
+  `zcash_client_sqlite` resolves to (single `libsqlite3-sys`); MSRV 1.81.
+
 ### Per-wallet encrypted state directory (#310)
 
 - **New per-`npub` state directory.** Groundwork for keeping all of a

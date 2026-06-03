@@ -110,6 +110,10 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (npub, order_id)
     )",
     "CREATE INDEX IF NOT EXISTS idx_purchases_npub_cached ON purchases(npub, cached_at DESC)",
+    // Orchard Unified Address for Zcash. Plaintext, non-secret metadata
+    // (like `address`); lets the dashboard/CLI/MCP show the receive address
+    // without opening the librustzcash wallet DB. Absent in Python DBs.
+    "ALTER TABLE wallets ADD COLUMN zcash_address TEXT",
 ];
 
 pub(crate) fn create(conn: &Connection) -> rusqlite::Result<()> {

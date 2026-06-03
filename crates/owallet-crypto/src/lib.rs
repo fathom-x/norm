@@ -20,8 +20,8 @@ pub use aesgcm::{decrypt, encrypt, AesKey, DecryptError};
 pub use bip39::{Mnemonic, MnemonicError, WordCount};
 pub use evm::Address;
 pub use hd::{
-    derive_from_mnemonic, derive_from_seed, derive_from_stored_seed, HdError, PrivateKey,
-    EVM_HD_PATH,
+    bip39_seed_from_stored, derive_from_mnemonic, derive_from_seed, derive_from_stored_seed,
+    HdError, PrivateKey, EVM_HD_PATH,
 };
 pub use kdf::{derive_key, hashes_equal, verify_hash, KDF_ITERATIONS, KEY_LEN, SALT_LEN};
 pub use nostr::{npub_decode, npub_encode, npub_from_private_key, xonly_pubkey, NostrError};

@@ -26,6 +26,8 @@ struct ServerConfig {
     public_url: Option<String>,
     evm_rpc_url: String,
     evm_network: String,
+    zcash_lightwalletd: String,
+    zcash_network: String,
 }
 
 pub fn run_with_cli(
@@ -61,12 +63,17 @@ pub fn run_with_cli(
             rpc_url: cfg.evm_rpc_url.clone(),
             network: cfg.evm_network.clone(),
         };
+        let zcash = owallet_http::ZcashConfig {
+            lightwalletd: cfg.zcash_lightwalletd.clone(),
+            network: cfg.zcash_network.clone(),
+        };
         let host_key = cfg.issuer_url.trim_end_matches('/').to_string();
         let state = AppState {
             db: db.clone(),
             sessions: owallet_http::SessionStore::new(),
             overpay,
             evm,
+            zcash,
             host_key,
             pending_auth: owallet_http::PendingDashboardAuthMap::default(),
         };
@@ -212,7 +219,9 @@ fn server_from_builtin(
     let evm_rpc_url =
         std::env::var("EVM_RPC_URL").unwrap_or_else(|_| "https://mainnet.base.org".to_string());
     let evm_network = std::env::var("EVM_NETWORK").unwrap_or_else(|_| "eip155:8453".to_string());
-
+    let zcash_lightwalletd =
+        std::env::var("ZEC_LIGHTWALLETD_URL").unwrap_or_else(|_| "zecrocks".to_string());
+    let zcash_network = std::env::var("ZEC_NETWORK").unwrap_or_else(|_| "mainnet".to_string());
     Ok(ServerConfig {
         label: cfg.label.to_string(),
         bind,
@@ -221,6 +230,8 @@ fn server_from_builtin(
         public_url,
         evm_rpc_url,
         evm_network,
+        zcash_lightwalletd,
+        zcash_network,
     })
 }
 
@@ -272,6 +283,14 @@ fn server_from_dotenv(
         .get("EVM_NETWORK")
         .cloned()
         .unwrap_or_else(|| "eip155:8453".to_string());
+    let zcash_lightwalletd = std::env::var(format!("ZEC_LIGHTWALLETD_URL_{postfix}"))
+        .ok()
+        .or_else(|| vars.get("ZEC_LIGHTWALLETD_URL").cloned())
+        .unwrap_or_else(|| "zecrocks".to_string());
+    let zcash_network = std::env::var(format!("ZEC_NETWORK_{postfix}"))
+        .ok()
+        .or_else(|| vars.get("ZEC_NETWORK").cloned())
+        .unwrap_or_else(|| "mainnet".to_string());
 
     Ok(ServerConfig {
         label,
@@ -281,6 +300,8 @@ fn server_from_dotenv(
         public_url,
         evm_rpc_url,
         evm_network,
+        zcash_lightwalletd,
+        zcash_network,
     })
 }
 

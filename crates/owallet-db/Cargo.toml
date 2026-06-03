@@ -16,7 +16,7 @@ hex = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
 thiserror = { workspace = true }
-time = { version = "0.3.41", default-features = false, features = ["parsing"] }
+time = { version = "=0.3.37", default-features = false, features = ["parsing"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

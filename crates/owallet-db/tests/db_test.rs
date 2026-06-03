@@ -148,6 +148,24 @@ fn read_seed_returns_none_for_missing() {
 }
 
 #[test]
+fn zcash_address_roundtrip() {
+    let t = fresh("pw");
+    t.db.write_wallet(NPUB, MNEMONIC, None).unwrap();
+    assert_eq!(t.db.read_zcash_address(NPUB).unwrap(), None);
+    let ua = "u1exampleorchardunifiedaddress";
+    t.db.write_zcash_address(NPUB, ua).unwrap();
+    assert_eq!(t.db.read_zcash_address(NPUB).unwrap(), Some(ua.into()));
+    // Surfaced on the wallet row too.
+    let row =
+        t.db.list_wallets()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.npub == NPUB)
+            .unwrap();
+    assert_eq!(row.zcash_address.as_deref(), Some(ua));
+}
+
+#[test]
 fn write_wallet_overwrites_existing() {
     let t = fresh("pw");
     t.db.write_wallet(NPUB, MNEMONIC, None).unwrap();

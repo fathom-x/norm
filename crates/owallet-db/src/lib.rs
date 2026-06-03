@@ -320,6 +320,17 @@ impl Database {
         wallets::set_username(&self.conn, npub, username)
     }
 
+    /// Store the wallet's Orchard Unified Address (Zcash receive address).
+    /// Plaintext, non-secret metadata — no unlock required.
+    pub fn write_zcash_address(&self, npub: &str, address: &str) -> Result<()> {
+        wallets::set_zcash_address(&self.conn, npub, address)
+    }
+
+    /// Read the wallet's stored Orchard Unified Address, if one was derived.
+    pub fn read_zcash_address(&self, npub: &str) -> Result<Option<String>> {
+        wallets::read_zcash_address(&self.conn, npub)
+    }
+
     pub fn touch_wallet(&self, npub: &str) -> Result<()> {
         wallets::touch(&self.conn, npub, now_secs())
     }
