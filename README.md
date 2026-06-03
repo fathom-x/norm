@@ -4,7 +4,9 @@
 endpoint AI agents can call, a password-protected web dashboard for
 day-to-day wallet management, an OAuth 2.0 Authorization Server so MCP
 clients can authenticate against it, and a thin CLI for everything else.
-Native USDC send on Base (and a handful of other EVM chains) is built in.
+Native USDC send on Base (and a handful of other EVM chains) is built in,
+plus shielded **Zcash (Orchard-only)** receive / sync / balance / send via
+librustzcash.
 
 This crate is a Rust port of the Python `owallet/` implementation that
 lives next to it in this repository. The on-disk wallet database is
@@ -25,6 +27,9 @@ owallet-rs/
     owallet-overpay/  Async REST client for the Overpay Rails API, plus
                       OAuth 2.0 PKCE helpers
     owallet-evm/      ERC-20 USDC transfer + balance via alloy
+    owallet-zcash/    Orchard-only Zcash wallet (receive/sync/balance/send)
+                      via librustzcash; data in the per-wallet state dir
+                      (<data dir>/<npub>/zcash/, 0700; plaintext, like zkv)
     owallet-mcp/      Hand-rolled JSON-RPC 2.0 MCP transport + tool registry
                       (the tools mirror wallet_mcp/server.py, incl. the
                       local purchase-cache tools list/get/sync_purchases)
@@ -106,11 +111,12 @@ server (owallet no longer calls a hosted Overpay MCP).
 | `import [--mnemonic\|--private-key]` | Bring an existing seed in |
 | `select [WALLET]` | Set the default wallet (interactive without arg) |
 | `export key [--format hex\|hex0x\|mnemonic] [--npub …]` | Print key material |
-| `account` | Show wallet metadata + linked Overpay account (live) |
+| `account` | Show wallet metadata + linked Overpay account (live; auto-syncs the Zcash wallet) |
 | `authorize` | Run OAuth PKCE against Overpay; store the bearer token |
 | `login` | Open a one-time Overpay web session using the stored token |
 | `list marketplace [--category --seller --cursor --limit]` | Browse listings |
-| `send --to ADDR --amount USDC` | Sign + broadcast an ERC-20 USDC transfer |
+| `send --to ADDR --amount N [--asset usdc\|zec]` | Sign + broadcast a USDC (EVM) or shielded ZEC (Orchard UA) transfer |
+| `sync` | Force-sync the default wallet's Zcash (Orchard) state; print height + balance (reads auto-sync, so this is for explicit/manual refresh) |
 | `install --{claude,opencode,codex}-{local,global}` | Register MCP entries |
 | `config [--mcp]` | Show env config (or print the `.mcp.json` blob) |
 
@@ -134,6 +140,9 @@ Every command accepts `--prod` (built-in production defaults) or
 | `OVERPAY_PUBLIC_URL[_<ENV>]` | = `OVERPAY_RAILS_URL` | browser-targeted URL rewriting |
 | `EVM_RPC_URL` | `https://mainnet.base.org` | `send`, MCP `send_usdc` |
 | `EVM_NETWORK` | `eip155:8453` (Base mainnet) | chain table lookup |
+| `ZEC_NETWORK` | `mainnet` | `sync`, `send --asset zec`, MCP `send_zcash`/`sync_zcash` |
+| `ZEC_LIGHTWALLETD_URL` | `zecrocks` | lightwalletd operator alias or `host:port` |
+| `ZEC_DATA_DIR` | `<data dir>/<npub>/zcash` | override base for librustzcash's per-wallet data (else the #310 per-wallet state dir) |
 
 ## Architecture notes
 
@@ -167,6 +176,15 @@ sync state is not wired yet.)
 fees. The supported chains are Ethereum, Base, Base Sepolia, Optimism,
 Polygon, and Arbitrum One — the USDC contract address and decimals per
 chain are hard-coded in `owallet-evm::chains`.
+
+**Zcash send.** `send_zcash` (CLI `send --asset zec` + MCP tool) derives the
+Orchard spending key from the same BIP-39 seed, syncs against lightwalletd,
+then builds a ZIP-321 / ZIP-317 Orchard transfer with bundled proving params
+(`owallet-zcash`). librustzcash keeps its own sqlite wallet DB in the wallet's
+per-`npub` state directory (`<data dir>/<npub>/zcash/`, `0700`), stored
+unencrypted like the zkv reference — it holds the Unified *viewing* key + note
+metadata, which can't spend (the seed stays in owallet's encrypted DB). The MCP
+`buy` flow pays with ZEC automatically when Overpay returns an Orchard UA + ZEC amount.
 
 ## Migrating from the Python implementation
 

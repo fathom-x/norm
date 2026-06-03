@@ -1,14 +1,18 @@
 //! `owallet account` — wallet identity + Overpay account + on-chain balances.
 //!
-//! If a Bearer token is stored we use it to fetch the Overpay account.
-//! Otherwise we fall back to NIP-98 signing via the wallet key.
+//! Renders one Field/Value table per wallet (the default wallet, or every
+//! stored wallet with `--all`). If a Bearer token is stored we use it to fetch
+//! the Overpay account; otherwise we fall back to NIP-98 signing via the wallet
+//! key. EVM balances are fetched live (best-effort). Zcash shows the Orchard
+//! receive address and the *local* balance — run `owallet sync` to refresh it
+//! from the network.
 
-use owallet_crypto::{derive_from_stored_seed, Address};
+use owallet_crypto::{bip39_seed_from_stored, derive_from_stored_seed, Address};
 use owallet_db::{default_db_path, Database, WalletRow};
 use owallet_overpay::Auth;
 
 use super::overpay::{block_on, client as overpay_client, host_key};
-use super::{open_unlock, CmdError, Result};
+use super::{open_unlock, zcash, CmdError, Result};
 
 pub fn run(all: bool) -> Result<()> {
     let db = open_unlock(&default_db_path())?;
@@ -130,6 +134,11 @@ fn print_wallet_table(db: &Database, w: &WalletRow) -> Result<()> {
         ("(no address)".into(), "(no address)".into())
     };
 
+    // Zcash: Orchard receive address (stored or derived offline) + the local
+    // balance. No network here — `owallet sync` refreshes from lightwalletd.
+    let zcash_addr = zcash_address_str(db, npub, w.zcash_address.as_deref(), seed.as_deref());
+    let zec_str = zec_balance_str(npub, seed.as_deref());
+
     let username = overpay_info
         .as_ref()
         .and_then(|i| i.username.as_deref())
@@ -148,6 +157,8 @@ fn print_wallet_table(db: &Database, w: &WalletRow) -> Result<()> {
         ("npub", npub),
         ("ETH Balance", &eth_str),
         ("USDC Balance", &usdc_str),
+        ("Zcash Address", &zcash_addr),
+        ("ZEC Balance", &zec_str),
         ("Username", &username),
         ("Account Number", account_number),
     ];
@@ -159,4 +170,53 @@ fn print_wallet_table(db: &Database, w: &WalletRow) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// The wallet's Orchard Unified Address: the stored value, or derived offline
+/// from the seed (and cached). `—` for hex-key wallets (no Zcash account).
+fn zcash_address_str(
+    db: &Database,
+    npub: &str,
+    stored: Option<&str>,
+    seed: Option<&str>,
+) -> String {
+    if let Some(z) = stored {
+        return z.to_string();
+    }
+    let Some(s) = seed else {
+        return "—".into();
+    };
+    let (Ok(bseed), Ok(network)) = (bip39_seed_from_stored(s), zcash::network()) else {
+        return "—".into();
+    };
+    match owallet_zcash::orchard_ua_from_seed(network, &bseed) {
+        Ok(ua) => {
+            let _ = db.write_zcash_address(npub, &ua);
+            ua
+        }
+        Err(_) => "—".into(),
+    }
+}
+
+/// Local (no-network) ZEC balance. `owallet sync` refreshes from lightwalletd;
+/// an unsynced wallet reads as zero. `—` for hex-key wallets.
+fn zec_balance_str(npub: &str, seed: Option<&str>) -> String {
+    let Some(s) = seed else {
+        return "—".into();
+    };
+    if bip39_seed_from_stored(s).is_err() {
+        return "—".into();
+    }
+    let (Ok(network), Ok(dir)) = (zcash::network(), zcash::data_dir(npub)) else {
+        return "—".into();
+    };
+    match owallet_zcash::zec_balance(&dir, network) {
+        Ok(b) => format!(
+            "{} {} (spendable {}; run `owallet sync` to refresh)",
+            owallet_zcash::format_zec(b.total_zat),
+            network.ticker(),
+            owallet_zcash::format_zec(b.spendable_zat),
+        ),
+        Err(e) => format!("(error: {e})"),
+    }
 }

@@ -72,6 +72,9 @@ pub fn render_error(e: &ToolError) -> String {
         ToolError::Evm(_) => {
             "Next: check the recipient address, chain, and that the wallet holds enough USDC + gas."
         }
+        ToolError::Zcash(_) => {
+            "Next: check the recipient UA, that ZEC_LIGHTWALLETD_URL is reachable, and that the wallet holds enough spendable ZEC (run sync_zcash)."
+        }
         ToolError::NotImplemented => "Next: this action isn't available in this build.",
         ToolError::Internal(_) => "Next: this is an internal error — retry; if it persists, report it.",
     };

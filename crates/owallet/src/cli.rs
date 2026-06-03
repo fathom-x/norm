@@ -75,6 +75,12 @@ pub enum Command {
         /// Optional inline hex private key (with or without 0x prefix).
         #[arg(long, conflicts_with = "mnemonic")]
         private_key: Option<String>,
+
+        /// Zcash wallet birthday (block height) to scan from. Defaults to the
+        /// current chain tip; set this lower to recover Orchard funds received
+        /// before the import (slower initial sync).
+        #[arg(long, value_name = "HEIGHT")]
+        zec_birthday: Option<u32>,
     },
 
     /// Pick which stored wallet is the default. With no argument, lists
@@ -113,17 +119,26 @@ pub enum Command {
         what: ListWhat,
     },
 
-    /// Sign and broadcast an ERC-20 USDC transfer on the configured EVM
-    /// chain (default Base mainnet). EVM_RPC_URL + EVM_NETWORK override
-    /// the defaults.
+    /// Sign and broadcast a payment. With `--asset usdc` (default) sends an
+    /// ERC-20 USDC transfer on the configured EVM chain; with `--asset zec`
+    /// sends a shielded Orchard payment to a Zcash Unified Address.
     Send {
-        /// Recipient EVM address (0x…).
+        /// Recipient address: an EVM `0x…` address for USDC, or a Zcash
+        /// Unified Address (`u1…`) for ZEC.
         #[arg(long)]
         to: String,
-        /// Amount of USDC to send (e.g. 1.25).
+        /// Amount to send in the asset's units (USDC or ZEC).
         #[arg(long)]
         amount: f64,
+        /// Which asset to send.
+        #[arg(long, value_enum, default_value_t = Asset::Usdc)]
+        asset: Asset,
     },
+
+    /// Sync the default wallet's Zcash (Orchard) state from lightwalletd and
+    /// print the synced height + balance. ZEC_NETWORK / ZEC_LIGHTWALLETD_URL
+    /// override the defaults.
+    Sync,
 
     /// Show resolved URL/port configuration (or, with `--mcp`, the MCP
     /// install JSON blob).
@@ -187,6 +202,15 @@ pub enum ExportWhat {
         #[arg(long)]
         npub: Option<String>,
     },
+}
+
+/// Payment asset for the `send` command.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum Asset {
+    /// ERC-20 USDC on the configured EVM chain (default).
+    Usdc,
+    /// Shielded Zcash (Orchard) to a Unified Address.
+    Zec,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]

@@ -21,6 +21,7 @@ crates/
   owallet-config/   .owallet dotenv resolution, --prod/--dev/--staging
   owallet-overpay/  reqwest client for the Rails API + PKCE helper
   owallet-evm/      alloy 0.7 wrapper (ERC-20 USDC + chain table)
+  owallet-zcash/    librustzcash wrapper (Orchard-only: receive/sync/balance/send)
   owallet-mcp/      JSON-RPC 2.0 MCP transport + tool registry
   owallet-http/     axum router: dashboard + OAuth AS + /mcp mount
   owallet/          binary crate (clap CLI)
@@ -110,6 +111,54 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   ISO-8601 → unix) uses the `time` crate (parsing feature) in
   owallet-db; owallet-http uses `time` (formatting) for the
   `YYYY-MM-DD HH:MM UTC` display.
+
+## Zcash (owallet-zcash)
+
+- **Orchard-only, librustzcash.** Adapted from `zecrocks/zkv`
+  (`/home/user/zkv`). Receive = an Orchard-only Unified Address derived
+  from the same BIP-39 seed (`owallet_crypto::bip39_seed_from_stored` →
+  `UnifiedSpendingKey::from_seed` → `default_address(UnifiedAddressRequest::ORCHARD)`).
+  Send = ZIP-321 propose/create with `StandardFeeRule::Zip317`,
+  `ShieldedProtocol::Orchard`, `LocalTxProver::bundled()`.
+
+- **Data files live in the wallet's #310 per-`npub` state dir.**
+  `owallet_zcash::data_dir_for(npub)` → `<data dir>/<npub>/zcash/` (`0700`),
+  rooted at `owallet_db::wallet_state_dir(npub)` (owallet-zcash depends on
+  owallet-db for this). `OWALLET_HOME` relocates the whole data dir;
+  `ZEC_DATA_DIR` overrides just the Zcash base (`<ZEC_DATA_DIR>/<npub>/`). So a
+  backup of the owallet data dir captures the wallet DB + order cache + Zcash
+  state together. The wallet
+  DB (`data.sqlite`) is stored **unencrypted** (rusqlite `bundled`, no
+  SQLCipher/OpenSSL — keeps the static-musl release binary clean; matches
+  zkv's posture). It holds the account's Unified *Full Viewing* Key + note
+  metadata — privacy-sensitive but not spend-capable (the spending key is
+  derived on demand from the seed in owallet's encrypted DB), and it sits in
+  a `0700` dir. So `sync`/`zec_balance`/`open_wallet_db` take no seed — only
+  `send_zcash` and account init need it (spending key / `create_account`).
+  Proving params are bundled (`zcash_proofs/bundled-prover`) — nothing
+  downloaded, but the binary + build time grow noticeably.
+
+- **Non-Send futures behind axum.** librustzcash futures hold non-`Send`
+  state (the rusqlite `WalletDb`, gRPC client, prover) across awaits, so
+  they can't be awaited directly inside an axum (`Send`-future) handler.
+  The MCP tools and the HTTP dashboard run them via `spawn_blocking` + a
+  per-call current-thread runtime (`tools::blocking_zcash`,
+  `dashboard/send::send_zec`). The CLI uses `block_on` (current-thread,
+  `enable_all`) so it's fine directly.
+
+- **Version pins.** The `zcash_*` set is a lockstep release train pinned
+  to zkv's versions (do not mix minors). `zcash_client_backend 0.22` pins
+  `time-core =0.1.2`, so the whole workspace pins `time =0.3.37`. And
+  `zcash_client_sqlite` needs `rusqlite 0.37`, so the workspace bumped off
+  0.31 — there can be only one `libsqlite3-sys` (`links = "sqlite3"`).
+  owallet-zcash's rusqlite enables `bundled-sqlcipher` (links system
+  OpenSSL); features unify across the shared `libsqlite3-sys`.
+
+- **Sandbox can't reach lightwalletd.** gRPC-over-TLS to `zec.rocks:443`
+  fails under the egress-inspection CA exactly like reqwest (see below), so
+  live `sync`/`send` only work outside the sandbox or against a local
+  plaintext lightwalletd. Offline paths (UA derivation, balance read,
+  data-dir layout, amount formatting) are unit-tested and do work in-sandbox.
 
 ## API quirks that cost me time
 

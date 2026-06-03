@@ -11,6 +11,7 @@ description = "axum-based HTTP dashboard for owallet (Rust port of the /wallet r
 owallet-crypto = { workspace = true }
 owallet-db = { workspace = true }
 owallet-evm = { workspace = true }
+owallet-zcash = { workspace = true }
 owallet-overpay = { workspace = true }
 owallet-mcp = { workspace = true }
 
@@ -32,7 +33,7 @@ url = "2"
 tracing = "0.1"
 rand = { workspace = true }
 hex = { workspace = true }
-time = { version = "0.3.41", default-features = false, features = ["formatting", "macros"] }
+time = { version = "=0.3.37", default-features = false, features = ["formatting", "macros"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

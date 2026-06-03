@@ -94,6 +94,29 @@ pub fn derive_from_stored_seed(seed: &str) -> Result<PrivateKey, HdError> {
     }
 }
 
+/// Recover the raw 64-byte BIP-39 seed from a seed string stored by
+/// `owallet-db`. This is the seed that ZIP-32 (Zcash) key derivation
+/// consumes via `UnifiedSpendingKey::from_seed` — distinct from the leaf
+/// secp256k1 key that [`derive_from_stored_seed`] returns.
+///
+/// Only mnemonic-backed wallets (12+ words) have a BIP-39 seed; wallets
+/// stored as a bare hex private key cannot derive a Zcash account and yield
+/// [`HdError::BadSeed`]. The empty passphrase matches the EVM derivation
+/// path so both chains share one seed.
+///
+/// The returned array is sensitive key material; callers should
+/// [`zeroize::Zeroize::zeroize`] it once the spending key is derived.
+pub fn bip39_seed_from_stored(seed: &str) -> Result<[u8; 64], HdError> {
+    if seed.split_whitespace().count() >= 12 {
+        let m = crate::bip39::Mnemonic::parse(seed).map_err(|e| HdError::BadSeed(e.to_string()))?;
+        Ok(m.to_seed(""))
+    } else {
+        Err(HdError::BadSeed(
+            "hex-key wallets have no BIP-39 seed and cannot derive a Zcash account".into(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +172,23 @@ mod tests {
     #[test]
     fn from_hex_rejects_wrong_length() {
         assert!(PrivateKey::from_hex("ab".repeat(31).as_str()).is_err());
+    }
+
+    /// Well-known BIP-39 seed for the "abandon ... about" mnemonic with an
+    /// empty passphrase (Trezor/BIP-39 reference vectors). This is the seed
+    /// ZIP-32 Zcash derivation consumes.
+    #[test]
+    fn bip39_seed_from_stored_matches_known_vector() {
+        let seed = bip39_seed_from_stored(ABANDON_12).unwrap();
+        assert_eq!(
+            hex::encode(seed),
+            "5eb00bbddcf069084889a8ab9155568165f5c453ccb85e70811aaed6f6da5fc1\
+             9a5ac40b389cd370d086206dec8aa6c43daea6690f20ad3d8d48b2d2ce9e38e4"
+        );
+    }
+
+    #[test]
+    fn bip39_seed_from_stored_rejects_hex_key() {
+        assert!(bip39_seed_from_stored("ab".repeat(32).as_str()).is_err());
     }
 }

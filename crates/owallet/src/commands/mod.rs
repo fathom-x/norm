@@ -14,6 +14,8 @@ mod overpay;
 mod select;
 mod send;
 mod serve;
+mod sync;
+mod zcash;
 
 use thiserror::Error;
 
@@ -35,6 +37,8 @@ pub enum CmdError {
     Overpay(#[from] owallet_overpay::OverpayError),
     #[error("{0}")]
     Evm(#[from] owallet_evm::EvmError),
+    #[error("{0}")]
+    Zcash(#[from] owallet_zcash::ZcashError),
     #[error("{0}")]
     Password(#[from] crate::password::PasswordError),
     #[error("{0}")]
@@ -104,13 +108,15 @@ pub fn dispatch(args: Cli) -> Result<()> {
         Command::Import {
             mnemonic,
             private_key,
-        } => import::run(mnemonic, private_key),
+            zec_birthday,
+        } => import::run(mnemonic, private_key, zec_birthday),
         Command::Select { identifier } => select::run(identifier),
         Command::Export { what } => export::run(what),
         Command::Authorize => authorize::run(),
         Command::Login => login::run(),
         Command::List { what } => list::run(what),
-        Command::Send { to, amount } => send::run(&to, amount),
+        Command::Send { to, amount, asset } => send::run(&to, amount, asset),
+        Command::Sync => sync::run(),
         Command::Config { mcp } => config::run(mcp),
     }
 }

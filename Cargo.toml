@@ -6,6 +6,7 @@ members = [
     "crates/owallet-config",
     "crates/owallet-overpay",
     "crates/owallet-evm",
+    "crates/owallet-zcash",
     "crates/owallet-mcp",
     "crates/owallet-http",
     "crates/owallet",
@@ -14,7 +15,7 @@ members = [
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.81"
 license = "MIT"
 repository = "https://github.com/fathom-x/overpay"
 authors = ["fathom-x"]
@@ -26,6 +27,7 @@ owallet-db = { path = "crates/owallet-db", version = "0.0.1" }
 owallet-config = { path = "crates/owallet-config", version = "0.0.1" }
 owallet-overpay = { path = "crates/owallet-overpay", version = "0.0.1" }
 owallet-evm = { path = "crates/owallet-evm", version = "0.0.1" }
+owallet-zcash = { path = "crates/owallet-zcash", version = "0.0.1" }
 owallet-mcp = { path = "crates/owallet-mcp", version = "0.0.1" }
 owallet-http = { path = "crates/owallet-http", version = "0.0.1" }
 
@@ -40,7 +42,7 @@ hex = "0.4"
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # Dev / test
 tempfile = "3"

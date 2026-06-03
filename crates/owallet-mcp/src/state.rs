@@ -25,6 +25,10 @@ pub struct McpState {
     /// CAIP-2 chain id (e.g. eip155:8453). Determines the USDC contract +
     /// decimals used by the USDC-send tool.
     pub evm_network: String,
+    /// lightwalletd server (operator alias or host:port) for Zcash.
+    pub zcash_lightwalletd: String,
+    /// Zcash network name (`mainnet`/`testnet`).
+    pub zcash_network: String,
 }
 
 /// An owned auth strategy with its data living long enough for one tool
@@ -66,6 +70,8 @@ impl McpState {
             host_key,
             evm_rpc_url: "https://mainnet.base.org".to_string(),
             evm_network: "eip155:8453".to_string(),
+            zcash_lightwalletd: "zecrocks".to_string(),
+            zcash_network: "mainnet".to_string(),
         }
     }
 
@@ -73,6 +79,25 @@ impl McpState {
         self.evm_rpc_url = rpc_url;
         self.evm_network = network;
         self
+    }
+
+    pub fn with_zcash(mut self, lightwalletd: String, network: String) -> Self {
+        self.zcash_lightwalletd = lightwalletd;
+        self.zcash_network = network;
+        self
+    }
+
+    /// Parse the configured Zcash network.
+    pub fn zcash_net(&self) -> Result<owallet_zcash::Network, owallet_zcash::ZcashError> {
+        owallet_zcash::Network::parse(&self.zcash_network)
+    }
+
+    /// Per-wallet Zcash data directory (`<data dir>/<npub>/zcash/`).
+    pub fn zcash_data_dir(
+        &self,
+        npub: &str,
+    ) -> Result<std::path::PathBuf, owallet_zcash::ZcashError> {
+        owallet_zcash::data_dir_for(npub)
     }
 
     /// Returns a clone of this state with `active_npub` set to `npub`.
@@ -84,6 +109,8 @@ impl McpState {
             host_key: self.host_key.clone(),
             evm_rpc_url: self.evm_rpc_url.clone(),
             evm_network: self.evm_network.clone(),
+            zcash_lightwalletd: self.zcash_lightwalletd.clone(),
+            zcash_network: self.zcash_network.clone(),
         }
     }
 
