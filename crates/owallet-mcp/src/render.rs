@@ -14,6 +14,8 @@
 
 use std::fmt::Write as _;
 
+use qrcode::render::unicode;
+use qrcode::{EcLevel, QrCode};
 use serde_json::Value;
 
 use crate::tools::ToolError;
@@ -35,9 +37,9 @@ pub fn render(tool: &str, data: &Value) -> String {
         "create_order" => render_order(tool, data),
         "get_order_status" => render_order(tool, data),
         "wait_for_order" => render_order(tool, data),
-        "get_merchant_credits" => render_credits(data),
         "redeem_merchant_credits" => render_redeem(data),
         "buy" => render_buy(data),
+        "load_core_credits" => render_load_credits(data),
         "send_usdc" => render_send(data),
         "list_purchases" => render_purchases(data),
         "get_purchase" => render_purchase(data),
@@ -163,6 +165,10 @@ fn render_account(data: &Value) -> String {
     let _ = writeln!(md, "| USDC Balance | {} |", bal("usdc_balance", "USDC"));
     let _ = writeln!(md, "| Username | {username} |");
     let _ = write!(md, "| Account Number | {account_number} |");
+    if let Some(credits) = data.get("merchant_credits") {
+        md.push('\n');
+        md.push_str(&render_credits(credits));
+    }
     md
 }
 
@@ -482,6 +488,58 @@ fn render_sync(data: &Value) -> String {
     out
 }
 
+/// `load_core_credits`: Lightning invoice with ASCII QR code.
+fn render_load_credits(data: &Value) -> String {
+    let order_id = field_str(data, &["order_id"]);
+    let sats = data.get("sats").and_then(Value::as_i64).unwrap_or(0);
+    let cents = data
+        .get("amount_cents")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let usd = cents as f64 / 100.0;
+    let bolt11 = data.get("bolt11").and_then(Value::as_str).unwrap_or("");
+
+    let mut out = format!("⚡ Lightning invoice — ${usd:.2} ({sats} sats) · order {order_id}\n");
+
+    if let Some(exp) = data.get("expires_at").and_then(Value::as_str) {
+        let _ = writeln!(out, "Expires: {exp}");
+    }
+
+    // QR code — uppercase so the encoder uses compact alphanumeric mode.
+    let uri = format!("LIGHTNING:{}", bolt11.to_uppercase());
+    match QrCode::with_error_correction_level(uri.as_bytes(), EcLevel::L) {
+        Ok(code) => {
+            let image = code
+                .render::<unicode::Dense1x2>()
+                .dark_color(unicode::Dense1x2::Dark)
+                .light_color(unicode::Dense1x2::Light)
+                .build();
+            let _ = writeln!(out, "\n{image}");
+        }
+        Err(e) => {
+            let _ = writeln!(out, "(QR unavailable: {e})");
+        }
+    }
+
+    // Truncated bolt11 for copy-paste reference.
+    let short = if bolt11.len() > 64 {
+        format!("{}…", &bolt11[..64])
+    } else {
+        bolt11.to_string()
+    };
+    let _ = writeln!(out, "BOLT11: {short}");
+
+    if let Some(url) = data.get("order_url").and_then(Value::as_str) {
+        let _ = writeln!(out, "Order:  {url}");
+    }
+
+    out.push_str(
+        "Next: scan the QR code with any Lightning wallet, \
+         then call wait_for_order(order_id, until_status=\"paid\") to confirm payment.",
+    );
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -689,14 +747,19 @@ mod tests {
     }
 
     #[test]
-    fn credits_list_and_single() {
-        let list = json!({"data": [{"seller_slug": "alice", "balance_cents": 1234, "formatted_balance": "$12.34"}]});
-        let out = render("get_merchant_credits", &list);
+    fn credits_rendered_in_account_info() {
+        let data = json!({
+            "address": "0xabc",
+            "network": "eip155:8453",
+            "npub": "npub1test",
+            "pubkey": "deadbeef",
+            "merchant_credits": {
+                "data": [{"seller_slug": "alice", "balance_cents": 1234, "formatted_balance": "$12.34"}]
+            }
+        });
+        let out = render("get_account_info", &data);
         assert!(out.contains("@alice") && out.contains("$12.34"), "{out}");
         assert!(out.contains("redeem_merchant_credits"), "{out}");
-        let single = json!({"seller_slug": "bob", "balance_cents": 5000});
-        let out2 = render("get_merchant_credits", &single);
-        assert!(out2.contains("@bob") && out2.contains("$50.00"), "{out2}");
     }
 
     #[test]

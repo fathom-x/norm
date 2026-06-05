@@ -31,6 +31,7 @@ owallet-zcash = { path = "crates/owallet-zcash", version = "0.0.1" }
 owallet-mcp = { path = "crates/owallet-mcp", version = "0.0.1" }
 owallet-http = { path = "crates/owallet-http", version = "0.0.1" }
 
+qrcode = "0.14"
 aes-gcm = "0.10"
 pbkdf2 = "0.12"
 sha2 = "0.10"

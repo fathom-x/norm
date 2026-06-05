@@ -135,7 +135,6 @@ async fn mcp_tools_list_returns_full_catalog() {
         "create_order",
         "get_order_status",
         "wait_for_order",
-        "get_merchant_credits",
         "buy",
         "send_usdc",
         "redeem_merchant_credits",
@@ -596,6 +595,15 @@ async fn mcp_get_account_info_includes_onchain_balances() {
         })))
         .mount(&overpay)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/merchant_credits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"seller_slug": "core", "balance_cents": 500, "formatted_balance": "$5.00"},
+            ],
+        })))
+        .mount(&overpay)
+        .await;
     let rpc = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(JsonRpcMock)
@@ -643,75 +651,11 @@ async fn mcp_get_account_info_includes_onchain_balances() {
     assert_eq!(dump["usdc_balance"]["symbol"], "USDC");
     // `account` keeps the full Rails `{data: {...}}` envelope.
     assert_eq!(dump["account"]["data"]["username"], "alice");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_get_merchant_credits_lists_all_when_no_slug() {
-    let overpay = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/merchant_credits"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [
-                {"seller_slug": "alice", "balance_cents": 1234, "formatted_balance": "$12.34"},
-            ],
-        })))
-        .mount(&overpay)
-        .await;
-    let tmp = TempDir::new().unwrap();
-    let s = router_with_overpay_and_rpc(&tmp, &overpay.uri(), "http://127.0.0.1:1").await;
-
-    let res = s
-        .post("/mcp")
-        .json(&json!({
-            "jsonrpc": "2.0", "id": 1,
-            "method": "tools/call",
-            "params": {"name": "get_merchant_credits", "arguments": {}}
-        }))
-        .await;
-    res.assert_status_ok();
-    let body: Value = res.json();
-    assert_eq!(body["result"]["isError"], false);
-    let text = body["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("@alice"), "rendered text: {text}");
-    assert!(text.contains("$12.34"), "rendered text: {text}");
-    assert_eq!(
-        body["result"]["structuredContent"]["data"][0]["seller_slug"],
-        "alice"
-    );
-    assert_eq!(
-        body["result"]["structuredContent"]["data"][0]["balance_cents"],
-        1234
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_get_merchant_credits_one_seller() {
-    let overpay = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path_regex(r"^/api/v1/merchant_credits/[A-Za-z0-9_-]+$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "seller_slug": "alice",
-            "balance_cents": 5000,
-            "formatted_balance": "$50.00",
-        })))
-        .mount(&overpay)
-        .await;
-    let tmp = TempDir::new().unwrap();
-    let s = router_with_overpay_and_rpc(&tmp, &overpay.uri(), "http://127.0.0.1:1").await;
-
-    let res = s
-        .post("/mcp")
-        .json(&json!({
-            "jsonrpc": "2.0", "id": 1,
-            "method": "tools/call",
-            "params": {"name": "get_merchant_credits", "arguments": {"seller_slug": "alice"}}
-        }))
-        .await;
-    res.assert_status_ok();
-    let body: Value = res.json();
-    assert_eq!(body["result"]["isError"], false);
-    assert_eq!(body["result"]["structuredContent"]["seller_slug"], "alice");
-    assert_eq!(body["result"]["structuredContent"]["balance_cents"], 5000);
+    // merchant_credits are now included inline in get_account_info.
+    assert_eq!(dump["merchant_credits"]["data"][0]["seller_slug"], "core");
+    assert_eq!(dump["merchant_credits"]["data"][0]["balance_cents"], 500);
+    assert!(md.contains("@core"), "credits in markdown: {md}");
+    assert!(md.contains("$5.00"), "credits in markdown: {md}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

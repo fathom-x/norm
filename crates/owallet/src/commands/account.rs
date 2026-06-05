@@ -82,21 +82,29 @@ fn print_wallet_table(db: &Database, w: &WalletRow) -> Result<()> {
         std::env::var("EVM_RPC_URL").unwrap_or_else(|_| "https://mainnet.base.org".into());
     let network = std::env::var("EVM_NETWORK").unwrap_or_else(|_| "eip155:8453".into());
 
-    // Fetch Overpay account info (best-effort).
+    // Fetch Overpay account info + merchant credits (best-effort).
     let stored_token = db.read_token(npub, &host_key())?;
     let seed = db.read_seed(npub)?;
-    let overpay_info = if let Ok(client) = overpay_client() {
+    let (overpay_info, credits_list) = if let Ok(client) = overpay_client() {
         if let Some(t) = stored_token.as_deref() {
-            block_on(async { client.account(Auth::Bearer(t)).await }).ok()
+            let info = block_on(async { client.account(Auth::Bearer(t)).await }).ok();
+            let credits =
+                block_on(async { client.list_merchant_credits(Auth::Bearer(t)).await }).ok();
+            (info, credits)
         } else if let Some(s) = seed.as_deref() {
-            derive_from_stored_seed(s)
-                .ok()
-                .and_then(|sk| block_on(async { client.account(Auth::Nip98(&sk)).await }).ok())
+            let maybe_sk = derive_from_stored_seed(s).ok();
+            let info = maybe_sk
+                .as_ref()
+                .and_then(|sk| block_on(async { client.account(Auth::Nip98(sk)).await }).ok());
+            let credits = maybe_sk.as_ref().and_then(|sk| {
+                block_on(async { client.list_merchant_credits(Auth::Nip98(sk)).await }).ok()
+            });
+            (info, credits)
         } else {
-            None
+            (None, None)
         }
     } else {
-        None
+        (None, None)
     };
 
     if let Some(info) = &overpay_info {
@@ -151,21 +159,34 @@ fn print_wallet_table(db: &Database, w: &WalletRow) -> Result<()> {
         .and_then(|i| i.account_number.as_deref())
         .unwrap_or("—");
 
-    let rows: &[(&str, &str)] = &[
-        ("Address", address),
-        ("Network", &network),
-        ("npub", npub),
-        ("ETH Balance", &eth_str),
-        ("USDC Balance", &usdc_str),
-        ("Zcash Address", &zcash_addr),
-        ("ZEC Balance", &zec_str),
-        ("Username", &username),
-        ("Account Number", account_number),
+    let mut rows: Vec<(String, String)> = vec![
+        ("Address".into(), address.to_string()),
+        ("Network".into(), network.clone()),
+        ("npub".into(), npub.to_string()),
+        ("ETH Balance".into(), eth_str),
+        ("USDC Balance".into(), usdc_str),
+        ("Zcash Address".into(), zcash_addr),
+        ("ZEC Balance".into(), zec_str),
+        ("Username".into(), username),
+        ("Account Number".into(), account_number.to_string()),
     ];
+
+    if let Some(credits) = &credits_list {
+        for c in &credits.data {
+            let slug = c
+                .organization_slug
+                .as_deref()
+                .or(c.seller_slug.as_deref())
+                .unwrap_or("?");
+            let label = format!("Credits ({slug})");
+            let balance = c.formatted_balance.as_deref().unwrap_or("?").to_string();
+            rows.push((label, balance));
+        }
+    }
 
     println!("{:<14}  Value", "Field");
     println!("{:-<14}  {:-<72}", "", "");
-    for (k, v) in rows {
+    for (k, v) in &rows {
         println!("{:<14}  {}", k, v);
     }
 

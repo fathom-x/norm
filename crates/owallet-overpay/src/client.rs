@@ -11,10 +11,10 @@ use serde_json::Value;
 
 use crate::error::OverpayError;
 use crate::models::{
-    AccountInfo, ListingFilters, ListingsPage, MerchantCredits, MerchantCreditsList,
-    OAuthRegisterRequest, OAuthRegisterResponse, OAuthTokenResponse, Order, OrderFilters,
-    OrdersPage, PurchaseCreditsRequest, PurchaseCreditsResponse, RedeemCreditsRequest,
-    RedeemCreditsResponse, WebSessionResponse,
+    AccountInfo, LightningLoadResponse, ListingFilters, ListingsPage, LoadCoreCreditsRequest,
+    MerchantCredits, MerchantCreditsList, OAuthRegisterRequest, OAuthRegisterResponse,
+    OAuthTokenResponse, Order, OrderFilters, OrdersPage, PurchaseCreditsRequest,
+    PurchaseCreditsResponse, RedeemCreditsRequest, RedeemCreditsResponse, WebSessionResponse,
 };
 
 /// Authentication strategy for a single request.
@@ -304,6 +304,19 @@ impl OverpayClient {
             &body,
         )
         .await
+    }
+
+    /// Load core marketplace credits via Lightning. Calls
+    /// `POST /api/v1/merchant_credits/load` and returns a BOLT11 invoice
+    /// plus order metadata for polling.
+    pub async fn load_core_credits(
+        &self,
+        amount_cents: i64,
+        auth: Auth<'_>,
+    ) -> Result<LightningLoadResponse, OverpayError> {
+        let body = LoadCoreCreditsRequest { amount_cents };
+        self.post_json("/api/v1/merchant_credits/load", auth, &body)
+            .await
     }
 
     pub async fn redeem_merchant_credits(
