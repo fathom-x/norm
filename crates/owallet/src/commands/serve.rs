@@ -123,9 +123,17 @@ pub fn run_with_cli(
         wait_for_shutdown().await;
         println!("\nshutting down…");
         let _ = shutdown_tx.send(());
-        for t in tasks {
-            let _ = t.await;
-        }
+        // Give connections up to 3 s to drain, then exit. Without the
+        // timeout, keep-alive connections (e.g. Claude Code's MCP client)
+        // would hold the process open indefinitely.
+        let drain = async {
+            for t in tasks {
+                let _ = t.await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(3), drain)
+            .await
+            .ok();
         Ok::<(), CmdError>(())
     })?;
 

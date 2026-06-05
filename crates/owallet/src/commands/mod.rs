@@ -3,6 +3,7 @@
 mod account;
 mod authorize;
 mod config;
+mod credits;
 mod export;
 mod generate;
 mod import;
@@ -19,7 +20,7 @@ mod zcash;
 
 use thiserror::Error;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, CreditsWhat};
 
 #[derive(Debug, Error)]
 pub enum CmdError {
@@ -118,5 +119,8 @@ pub fn dispatch(args: Cli) -> Result<()> {
         Command::Send { to, amount, asset } => send::run(&to, amount, asset),
         Command::Sync => sync::run(),
         Command::Config { mcp } => config::run(mcp),
+        Command::Credits { what } => match what {
+            CreditsWhat::Load { amount_cents, wait } => credits::run(amount_cents, wait),
+        },
     }
 }

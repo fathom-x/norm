@@ -26,6 +26,7 @@ hex = { workspace = true }
 jsonschema = { version = "0.33.0", default-features = false }
 thiserror = { workspace = true }
 tracing = "0.1"
+qrcode = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

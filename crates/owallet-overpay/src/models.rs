@@ -479,6 +479,45 @@ impl<'de> Deserialize<'de> for RedeemCreditsResponse {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LoadCoreCreditsRequest {
+    pub amount_cents: i64,
+}
+
+/// Response from `POST /api/v1/merchant_credits/load`. The Rails controller
+/// returns bolt11, payment_hash, sats, amount_cents, expires_at, order_url.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct LightningLoadResponse {
+    pub order_id: String,
+    pub bolt11: String,
+    pub payment_hash: String,
+    pub sats: i64,
+    pub amount_cents: i64,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub order_url: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for LightningLoadResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(d)?;
+        let o = unwrap_data_envelope(&v);
+        Ok(LightningLoadResponse {
+            order_id: opt_string(o, "order_id")
+                .ok_or_else(|| D::Error::custom("missing `order_id`"))?,
+            bolt11: opt_string(o, "bolt11").ok_or_else(|| D::Error::custom("missing `bolt11`"))?,
+            payment_hash: opt_string(o, "payment_hash")
+                .ok_or_else(|| D::Error::custom("missing `payment_hash`"))?,
+            sats: opt_i64(o, "sats").unwrap_or(0),
+            amount_cents: opt_i64(o, "amount_cents").unwrap_or(0),
+            expires_at: opt_string(o, "expires_at"),
+            order_url: opt_string(o, "order_url"),
+        })
+    }
+}
+
 /// Filters for the marketplace listings query.
 #[derive(Debug, Clone, Default)]
 pub struct ListingFilters {

@@ -72,7 +72,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         ToolSpec {
             name: "get_account_info",
             description:
-                "Show the active wallet's EVM address, Nostr npub, and (when linked) the Overpay account info.",
+                "Show the active wallet's EVM address, Nostr npub, Overpay account, and merchant credit balances (when linked).",
             input_schema: schema_object(json!({})),
         },
         ToolSpec {
@@ -159,13 +159,6 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
-            name: "get_merchant_credits",
-            description: "List merchant credit balances. With `seller_slug`, returns just that seller's balance; without, returns every seller the buyer has credit with.",
-            input_schema: schema_object(json!({
-                "seller_slug": {"type": "string"},
-            })),
-        },
-        ToolSpec {
             name: "redeem_merchant_credits",
             description: "Apply previously-purchased merchant credits to settle an order. Returns the amount redeemed and the remaining credit balance.",
             input_schema: schema_with_required(
@@ -237,6 +230,16 @@ pub fn catalog() -> Vec<ToolSpec> {
                 "api_key": {"type": "string"},
             })),
         },
+        ToolSpec {
+            name: "load_core_credits",
+            description: "Create a Lightning invoice to load Overpay core credits. Returns a BOLT11 invoice with a scannable QR code. Pay from any Lightning wallet; credits are funded automatically once the invoice settles. Call wait_for_order(order_id, until_status=\"paid\") to confirm payment.",
+            input_schema: schema_with_required(
+                json!({
+                    "amount_usd": {"type": "number", "description": "Amount to load in USD (must meet the site minimum)"},
+                }),
+                &["amount_usd"],
+            ),
+        },
     ]
 }
 
@@ -271,7 +274,6 @@ pub async fn dispatch(state: &McpState, name: &str, args: Value) -> Result<ToolO
         "create_order" => create_order(state, args).await?,
         "get_order_status" => get_order_status(state, args).await?,
         "wait_for_order" => wait_for_order(state, args).await?,
-        "get_merchant_credits" => get_merchant_credits(state, args).await?,
         "redeem_merchant_credits" => redeem_merchant_credits(state, args).await?,
         "buy" => buy(state, args).await?,
         "send_usdc" => send_usdc(state, args).await?,
@@ -280,6 +282,7 @@ pub async fn dispatch(state: &McpState, name: &str, args: Value) -> Result<ToolO
         "list_purchases" => list_purchases(state, args).await?,
         "get_purchase" => get_purchase(state, args).await?,
         "sync_purchases" => sync_purchases(state, args).await?,
+        "load_core_credits" => load_core_credits(state, args).await?,
         other => {
             return Err(ToolError::InvalidArg {
                 arg: "name",
@@ -428,6 +431,17 @@ async fn get_account_info(state: &McpState) -> Result<Value, ToolError> {
                 "account_hint".into(),
                 json!(format!("Could not reach Overpay: {e}")),
             );
+        }
+    }
+
+    // Best-effort merchant credits — same auth as account; skip silently on any failure.
+    if let Ok((_, owned)) = state.resolve_owned_auth() {
+        if let Ok(credits) = state
+            .overpay
+            .list_merchant_credits_value(owned.as_auth())
+            .await
+        {
+            result.insert("merchant_credits".into(), credits);
         }
     }
 
@@ -1172,35 +1186,6 @@ async fn sync_purchases(state: &McpState, args: Value) -> Result<Value, ToolErro
     Ok(json!({ "synced": synced, "errors": errors }))
 }
 
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-struct MerchantCreditArgs {
-    seller_slug: Option<String>,
-}
-
-async fn get_merchant_credits(state: &McpState, args: Value) -> Result<Value, ToolError> {
-    let args: MerchantCreditArgs =
-        serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
-            arg: "arguments",
-            reason: e.to_string(),
-        })?;
-    let (_npub, auth) = state.resolve_owned_auth()?;
-
-    // Raw Rails passthrough — see fathom-x/overpay#288.
-    match args.seller_slug {
-        Some(slug) => state
-            .overpay
-            .get_merchant_credits_value(&slug, auth.as_auth())
-            .await
-            .map_err(Into::into),
-        None => state
-            .overpay
-            .list_merchant_credits_value(auth.as_auth())
-            .await
-            .map_err(Into::into),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // redeem_merchant_credits — apply stored credits to an existing order
 // ---------------------------------------------------------------------------
@@ -1517,6 +1502,44 @@ async fn sync_zcash(state: &McpState, _args: Value) -> Result<Value, ToolError> 
         "balance_zec": owallet_zcash::format_zec(balance.total_zat),
         "balance_zat": balance.total_zat,
         "spendable_zat": balance.spendable_zat,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// load_core_credits — Lightning invoice for Overpay core credits
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct LoadCoreCreditsArgs {
+    amount_usd: f64,
+}
+
+async fn load_core_credits(state: &McpState, args: Value) -> Result<Value, ToolError> {
+    let args: LoadCoreCreditsArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
+            arg: "arguments",
+            reason: e.to_string(),
+        })?;
+    if !(args.amount_usd.is_finite() && args.amount_usd > 0.0) {
+        return Err(ToolError::InvalidArg {
+            arg: "amount_usd",
+            reason: "must be a positive number".into(),
+        });
+    }
+    let amount_cents = (args.amount_usd * 100.0).round() as i64;
+    let (_, auth) = state.resolve_owned_auth()?;
+    let resp = state
+        .overpay
+        .load_core_credits(amount_cents, auth.as_auth())
+        .await?;
+    Ok(json!({
+        "order_id":     resp.order_id,
+        "bolt11":       resp.bolt11,
+        "payment_hash": resp.payment_hash,
+        "sats":         resp.sats,
+        "amount_cents": resp.amount_cents,
+        "expires_at":   resp.expires_at,
+        "order_url":    resp.order_url,
     }))
 }
 

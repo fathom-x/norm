@@ -148,6 +148,12 @@ pub enum Command {
         mcp: bool,
     },
 
+    /// Load core marketplace credits via a Lightning invoice QR code.
+    Credits {
+        #[command(subcommand)]
+        what: CreditsWhat,
+    },
+
     /// Register owallet (+ the hosted Overpay MCP) with an MCP client
     /// config file. Targets one or more of Claude Code, OpenCode, Codex,
     /// at either local-project or user-global scope.
@@ -168,6 +174,20 @@ pub enum Command {
         /// Override the owallet MCP port (default: OWALLET_PORT or 8765).
         #[arg(long)]
         port: Option<u16>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CreditsWhat {
+    /// Mint a Lightning invoice and display a QR code to scan from any
+    /// Lightning wallet. With `--wait`, polls until payment is confirmed.
+    Load {
+        /// Amount to load in US cents (e.g. 500 = $5.00).
+        #[arg(long)]
+        amount_cents: i64,
+        /// Poll the order until payment is confirmed, then exit.
+        #[arg(long)]
+        wait: bool,
     },
 }
 
