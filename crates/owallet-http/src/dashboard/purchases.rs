@@ -306,6 +306,13 @@ fn field(label: &str, body: &str) -> String {
 /// legacy `{description, image}` envelope, inline image content-types, and
 /// markdown / plain / `<pre>` fallback.
 fn render_delivered_content(record: &PurchaseRow) -> String {
+    if let Some(url) = record.delivered_content_url.as_deref() {
+        return format!(
+            "<a href=\"{}\" class=\"delivered-url\" target=\"_blank\" rel=\"noopener noreferrer\">{}</a>",
+            esc(url),
+            esc(url)
+        );
+    }
     let Some(content) = record.delivered_content.as_deref() else {
         return String::new();
     };
