@@ -801,6 +801,30 @@ fn maybe_cache_purchase(state: &McpState, payload: &Value) -> bool {
     db.upsert_purchase(&npub, order).ok().flatten().is_some()
 }
 
+/// When the Rails API returns a `delivered_content_url`, the raw blob is not
+/// included — but strip any stale `delivered_content` that may linger in the
+/// payload (e.g. from a cached snapshot) so the agent only sees the URL.
+fn strip_content_if_url_present(payload: &mut Value) {
+    let is_enveloped = payload.get("data").map(Value::is_object).unwrap_or(false);
+    let order = if is_enveloped {
+        payload.get_mut("data")
+    } else if payload.get("order_id").is_some() || payload.get("id").is_some() {
+        Some(&mut *payload)
+    } else {
+        None
+    };
+    let Some(order) = order else { return };
+    let has_url = order
+        .get("delivered_content_url")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+    if has_url {
+        if let Some(obj) = order.as_object_mut() {
+            obj.remove("delivered_content");
+        }
+    }
+}
+
 /// Drop bulky `delivered_content` from a response once it's been cached,
 /// replacing it with a small `delivered_content_cached` pointer. Mutates
 /// `payload` in place. Mirrors `_strip_large_delivered_content`.
@@ -881,6 +905,7 @@ async fn get_order_status(state: &McpState, args: Value) -> Result<Value, ToolEr
     // Cache terminal orders, then strip the bulky delivered_content unless
     // the caller explicitly asked to keep it inline.
     maybe_cache_purchase(state, &data);
+    strip_content_if_url_present(&mut data);
     if !args.include_delivered_content {
         strip_large_delivered_content(state, &mut data);
     }
@@ -956,6 +981,7 @@ async fn wait_for_order(state: &McpState, args: Value) -> Result<Value, ToolErro
         if target_hit || terminal_hit {
             maybe_cache_purchase(state, &snap);
             let mut snap = snap;
+            strip_content_if_url_present(&mut snap);
             if !args.include_delivered_content {
                 strip_large_delivered_content(state, &mut snap);
             }
@@ -964,6 +990,7 @@ async fn wait_for_order(state: &McpState, args: Value) -> Result<Value, ToolErro
         if elapsed + poll >= timeout {
             maybe_cache_purchase(state, &snap);
             let mut snap = snap;
+            strip_content_if_url_present(&mut snap);
             if !args.include_delivered_content {
                 strip_large_delivered_content(state, &mut snap);
             }
@@ -1078,7 +1105,25 @@ async fn get_purchase(state: &McpState, args: Value) -> Result<Value, ToolError>
             .map_err(|e| ToolError::Internal(e.to_string()))?
     };
     match record {
-        Some(r) => serde_json::to_value(r).map_err(|e| ToolError::Internal(e.to_string())),
+        Some(r) => {
+            let mut v =
+                serde_json::to_value(r).map_err(|e| ToolError::Internal(e.to_string()))?;
+            // When a download URL is available the raw blob adds no value and
+            // would blow up the MCP response. Drop it from both the top-level
+            // fields and the raw snapshot so the agent sees the URL instead.
+            if v.get("delivered_content_url")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+            {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.remove("delivered_content");
+                    if let Some(snapshot) = obj.get_mut("snapshot").and_then(Value::as_object_mut) {
+                        snapshot.remove("delivered_content");
+                    }
+                }
+            }
+            Ok(v)
+        }
         None => Ok(json!({ "error": "not_cached", "order_id": args.order_id })),
     }
 }

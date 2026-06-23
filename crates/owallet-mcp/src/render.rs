@@ -302,6 +302,10 @@ fn render_order(tool: &str, data: &Value) -> String {
             out,
             "\nDelivered content ({size} bytes) cached locally — fetch with get_purchase(order_id=\"{id}\")."
         );
+    } else if let Some(url) = order.get("delivered_content_url").and_then(Value::as_str) {
+        // S3-backed content: the server returns a signed download URL instead of
+        // the raw blob to keep this response lean.
+        let _ = write!(out, "\nDelivered content: {url}");
     } else if let Some(c) = order.get("delivered_content").and_then(Value::as_str) {
         // Small inline content: show it directly.
         let _ = write!(out, "\nDelivered content: {}", truncate(c, 500));
@@ -457,12 +461,18 @@ fn render_purchase(data: &Value) -> String {
     let title = field_str(data, &["title"]);
     let ful = field_str(data, &["fulfillment_status"]);
     let mut out = format!("Purchase {id}: {title} · {ful}");
-    match data.get("delivered_content").and_then(Value::as_str) {
-        Some(c) if !c.is_empty() => {
-            let _ = write!(out, "\nDelivered content:\n{}", truncate(c, 2000));
-        }
-        _ => {
-            out.push_str("\n(No delivered content stored. Full payload is in structuredContent.)");
+    if let Some(url) = data.get("delivered_content_url").and_then(Value::as_str) {
+        let _ = write!(out, "\nDelivered content: {url}");
+    } else {
+        match data.get("delivered_content").and_then(Value::as_str) {
+            Some(c) if !c.is_empty() => {
+                let _ = write!(out, "\nDelivered content:\n{}", truncate(c, 2000));
+            }
+            _ => {
+                out.push_str(
+                    "\n(No delivered content stored. Full payload is in structuredContent.)",
+                );
+            }
         }
     }
     out
