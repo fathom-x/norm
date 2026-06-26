@@ -44,6 +44,7 @@ zeroize = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2.186"
 
 [dev-dependencies]
 tempfile = { workspace = true }
