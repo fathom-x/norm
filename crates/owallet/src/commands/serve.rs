@@ -39,11 +39,66 @@ pub fn run_with_cli(
 
     let path = default_db_path();
     let mut db = Database::open(&path)?;
+
+    // rpassword opens /dev/tty and clears ISIG (so Ctrl-C can appear in
+    // passwords). It restores on Drop, but on macOS the Drop's tcsetattr
+    // silently fails (EINTR / mismatched fd), leaving ISIG cleared: the
+    // terminal then echoes ^C as raw 0x03 and never generates SIGINT.
+    // We save /dev/tty state ourselves and force ISIG back on after the
+    // prompt regardless of what rpassword left behind.
+    #[cfg(unix)]
+    let tty_save: Option<(libc::c_int, libc::termios)> = {
+        let fd = unsafe { libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        if fd >= 0 {
+            let mut t = unsafe { std::mem::zeroed::<libc::termios>() };
+            if unsafe { libc::tcgetattr(fd, &mut t) } == 0 {
+                Some((fd, t))
+            } else {
+                unsafe { libc::close(fd) };
+                None
+            }
+        } else {
+            None
+        }
+    };
+
     let pw = password::read("Database password")?;
     if !db.unlock(pw.as_str())? {
         return Err(CmdError::WrongPassword);
     }
     drop(pw);
+
+    // Restore /dev/tty with ISIG unconditionally set. Even if rpassword
+    // restored it correctly, an explicit force-set is a safe no-op.
+    #[cfg(unix)]
+    if let Some((fd, mut t)) = tty_save {
+        unsafe {
+            t.c_lflag |= libc::ISIG;
+            libc::tcsetattr(fd, libc::TCSANOW, &t);
+            libc::close(fd);
+        }
+    }
+
+    // POSIX-recommended pattern for Ctrl-C in a multi-threaded process:
+    // block SIGINT on this thread (worker threads inherit the mask), then
+    // park a dedicated thread on sigwait. When Ctrl-C arrives the kernel
+    // queues it as a pending signal; sigwait dequeues it and exits cleanly.
+    // This avoids the macOS pitfall where libc::signal() handlers installed
+    // before a tokio multi-thread runtime may never fire.
+    #[cfg(unix)]
+    {
+        let mut sigint_set = unsafe { std::mem::zeroed::<libc::sigset_t>() };
+        unsafe {
+            libc::sigemptyset(&mut sigint_set);
+            libc::sigaddset(&mut sigint_set, libc::SIGINT);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &sigint_set, std::ptr::null_mut());
+        }
+        std::thread::spawn(move || {
+            let mut sig = 0i32;
+            unsafe { libc::sigwait(&sigint_set, &mut sig) };
+            std::process::exit(0);
+        });
+    }
 
     // Build one AppState per server up front — each carries its own
     // Overpay client + EVM config + host_key, plus a fresh SessionStore
@@ -320,25 +375,22 @@ fn label_from_path(path: &std::path::Path) -> String {
 }
 
 async fn wait_for_shutdown() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("install Ctrl+C handler");
-    };
+    // SIGTERM → graceful drain (systemd / container orchestrators).
+    // ctrl_c (SIGINT via tokio kqueue) → fallback if the sigwait thread
+    // races or isn't scheduled yet.  The dedicated sigwait thread (spawned
+    // in run_with_cli) is the primary Ctrl-C handler on macOS.
     #[cfg(unix)]
-    let terminate = async {
+    {
         use tokio::signal::unix::{signal, SignalKind};
-        signal(SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-    };
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = sigterm.recv() => {}
+            result = tokio::signal::ctrl_c() => { let _ = result; }
+        }
+    }
     #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
+    {
+        tokio::signal::ctrl_c().await.ok();
     }
 }
 
