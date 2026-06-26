@@ -1106,8 +1106,7 @@ async fn get_purchase(state: &McpState, args: Value) -> Result<Value, ToolError>
     };
     match record {
         Some(r) => {
-            let mut v =
-                serde_json::to_value(r).map_err(|e| ToolError::Internal(e.to_string()))?;
+            let mut v = serde_json::to_value(r).map_err(|e| ToolError::Internal(e.to_string()))?;
             // When a download URL is available the raw blob adds no value and
             // would blow up the MCP response. Drop it from both the top-level
             // fields and the raw snapshot so the agent sees the URL instead.
