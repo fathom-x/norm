@@ -3627,6 +3627,7 @@ dependencies = [
  "clap",
  "dirs",
  "hex",
+ "libc",
  "open",
  "owallet-config",
  "owallet-crypto",
