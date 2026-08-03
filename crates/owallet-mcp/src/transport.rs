@@ -9,16 +9,19 @@
 //! that extracts the `Authorization` header and returns the wallet npub
 //! the call should run as).
 
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::extract::{Json, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use serde_json::{json, Value};
 
 use crate::jsonrpc::{codes, ErrorObject, Request, Response as RpcResponse};
+use crate::progress::ProgressSink;
 use crate::state::McpState;
 use crate::tools::{self, ToolError};
 
@@ -100,6 +103,17 @@ async fn handle(
     let id_for_response = req.id.clone().unwrap_or(Value::Null);
     let is_notification = req.id.is_none();
 
+    // Streamable-HTTP: when the client accepts an SSE stream, answer a
+    // `tools/call` over one so the tool can push `notifications/progress`
+    // frames ahead of its final result. Every other method — and any
+    // client that only accepts JSON — falls through to the single-body
+    // path below, so this is purely additive and backward-compatible.
+    if !is_notification && req.method == "tools/call" && accepts_event_stream(&headers) {
+        if let Some(params) = req.params.clone() {
+            return sse_tools_call(mcp_state, id_for_response, params);
+        }
+    }
+
     let resp = match req.method.as_str() {
         "initialize" => initialize_result(),
         "ping" => Ok(json!({})),
@@ -143,27 +157,43 @@ fn initialize_result() -> Result<Value, JrpcError> {
     }))
 }
 
-async fn tools_call(state: &McpState, params: Value) -> Result<Value, JrpcError> {
-    #[derive(serde::Deserialize)]
-    struct ToolCallParams {
-        name: String,
-        #[serde(default)]
-        arguments: Value,
-    }
+/// Parsed `tools/call` params. `_meta.progressToken` is the client's
+/// opt-in signal for streamed progress (ignored on the buffered path).
+#[derive(serde::Deserialize)]
+struct ToolCallParams {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+    #[serde(default, rename = "_meta")]
+    meta: Option<CallMeta>,
+}
 
+#[derive(serde::Deserialize)]
+struct CallMeta {
+    #[serde(default, rename = "progressToken")]
+    progress_token: Option<Value>,
+}
+
+async fn tools_call(state: &McpState, params: Value) -> Result<Value, JrpcError> {
     let params: ToolCallParams = serde_json::from_value(params).map_err(|e| JrpcError {
         code: codes::INVALID_PARAMS,
         message: format!("bad tools/call params: {e}"),
     })?;
 
-    let outcome = tools::dispatch(state, &params.name, params.arguments).await;
-    // MCP wraps tool output as `{ content: [...], isError: bool }`.
-    // The model only sees `content`, so we put the rendered, model-facing
-    // summary there (`out.text`, built by `crate::render`) and keep the
-    // raw payload in `structuredContent` for programmatic clients
-    // (fathom-x/overpay#295). Errors render to a friendly, actionable
-    // message via `render::render_error`.
-    Ok(match outcome {
+    let outcome = tools::dispatch(state, &params.name, params.arguments, None).await;
+    Ok(tool_result_value(outcome))
+}
+
+/// Wrap a tool outcome as the MCP `tools/call` result value:
+/// `{ content: [...], structuredContent, isError }`. The model only sees
+/// `content`, so the rendered, model-facing summary (`out.text`, built by
+/// `crate::render`) goes there while the raw payload stays in
+/// `structuredContent` for programmatic clients (fathom-x/overpay#295).
+/// Errors render to a friendly, actionable message via `render_error`.
+/// Shared by the buffered and streamed paths so both frame results
+/// identically.
+fn tool_result_value(outcome: Result<tools::ToolOutput, ToolError>) -> Value {
+    match outcome {
         Ok(out) => json!({
             "content": [{
                 "type": "text",
@@ -179,7 +209,81 @@ async fn tools_call(state: &McpState, params: Value) -> Result<Value, JrpcError>
             }],
             "isError": true,
         }),
-    })
+    }
+}
+
+/// Does the client accept an SSE stream? (`Accept: text/event-stream`,
+/// possibly alongside `application/json`.)
+fn accepts_event_stream(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|accept| {
+            accept
+                .split(',')
+                .any(|part| part.trim().starts_with("text/event-stream"))
+        })
+        .unwrap_or(false)
+}
+
+/// One SSE event carrying a single JSON-RPC message in its `data` field,
+/// per the MCP Streamable-HTTP transport. Serializing these small,
+/// controlled structs is infallible in practice; fall back to `{}` rather
+/// than panicking on the astronomically unlikely error.
+fn sse_data(value: &impl serde::Serialize) -> Event {
+    let body = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    Event::default().data(body)
+}
+
+/// Answer a `tools/call` over Server-Sent Events: forward every
+/// `notifications/progress` the tool emits, then close the stream with the
+/// tool's final JSON-RPC response as the last event. The tool runs inline
+/// in the stream (no spawn), so it borrows the moved-in `state` and sink
+/// for the duration.
+fn sse_tools_call(state: McpState, id: Value, params: Value) -> Response {
+    let stream = async_stream::stream! {
+        let ToolCallParams { name, arguments, meta } = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                let resp = RpcResponse::err(
+                    id.clone(),
+                    codes::INVALID_PARAMS,
+                    format!("bad tools/call params: {e}"),
+                );
+                yield Ok::<_, Infallible>(sse_data(&resp));
+                return;
+            }
+        };
+
+        let token = meta.and_then(|m| m.progress_token);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let sink = ProgressSink::new(tx, token);
+
+        // Drive the tool and the progress channel concurrently: yield each
+        // progress notification as it arrives, break out with the result
+        // once the tool completes.
+        let fut = tools::dispatch(&state, &name, arguments, Some(&sink));
+        tokio::pin!(fut);
+        let outcome = loop {
+            tokio::select! {
+                biased;
+                Some(note) = rx.recv() => {
+                    yield Ok(sse_data(&note));
+                }
+                out = &mut fut => break out,
+            }
+        };
+
+        // Flush anything emitted in the same tick the tool returned.
+        while let Ok(note) = rx.try_recv() {
+            yield Ok(sse_data(&note));
+        }
+
+        let resp = RpcResponse::ok(id, tool_result_value(outcome));
+        yield Ok(sse_data(&resp));
+    };
+
+    Sse::new(stream).into_response()
 }
 
 struct JrpcError {

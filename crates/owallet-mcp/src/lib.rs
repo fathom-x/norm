@@ -6,10 +6,12 @@
 //! direct: no SDK pull-in, no transport abstraction.
 
 pub mod jsonrpc;
+pub mod progress;
 pub mod render;
 pub mod state;
 pub mod tools;
 pub mod transport;
 
+pub use progress::ProgressSink;
 pub use state::McpState;
 pub use transport::{mcp_router, mcp_router_with_auth, BearerAuthCheck};

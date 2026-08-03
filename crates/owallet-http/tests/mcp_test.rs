@@ -1489,3 +1489,153 @@ async fn mcp_list_marketplace_flattens_delivery_eta() {
     // Listing without an eta gets a null delivery_eta_seconds.
     assert!(data[1]["delivery_eta_seconds"].is_null());
 }
+
+// ---------------------------------------------------------------------------
+// Streamable-HTTP: `tools/call` over Server-Sent Events
+// ---------------------------------------------------------------------------
+
+/// A `tools/call` from a client that accepts `text/event-stream` is
+/// answered as an SSE stream whose final event carries the JSON-RPC
+/// response. Proves content negotiation + final-event framing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_tools_call_streams_over_sse_when_accepted() {
+    let overpay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/listings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "L9", "title": "Streamed", "seller_slug": "alice", "price_usd": 1.0}
+            ],
+        })))
+        .mount(&overpay)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    let res = s
+        .post("/mcp")
+        .add_header("accept", "text/event-stream")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "method": "tools/call",
+            "params": { "name": "list_marketplace", "arguments": { "limit": 5 } }
+        }))
+        .await;
+
+    res.assert_status_ok();
+    let ct = res
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        ct.starts_with("text/event-stream"),
+        "expected an SSE response, got content-type {ct:?}"
+    );
+
+    // The stream's terminal event is the JSON-RPC response, framed as an
+    // SSE `data:` line. Pull it back out and assert on it.
+    let text = res.text();
+    let resp = parse_last_sse_json(&text);
+    assert_eq!(resp["jsonrpc"], "2.0");
+    assert_eq!(resp["id"], 42);
+    assert_eq!(resp["result"]["isError"], false);
+    assert_eq!(
+        resp["result"]["structuredContent"]["data"][0]["title"],
+        "Streamed"
+    );
+}
+
+/// A `tools/call` that keeps the order in flight for one poll streams a
+/// `notifications/progress` event before the final response. Exercises the
+/// full progress path end to end with `wait_for_order`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_wait_for_order_streams_progress_then_result() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // First poll: still shipping. Second poll: delivered → return.
+    struct SeqOrder {
+        calls: AtomicUsize,
+    }
+    impl Respond for SeqOrder {
+        fn respond(&self, _req: &Request) -> ResponseTemplate {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let status = if n == 0 { "shipping" } else { "delivered" };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "O9",
+                    "payment_status": "paid",
+                    "fulfillment_status": status,
+                }
+            }))
+        }
+    }
+
+    let overpay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/orders/O9"))
+        .respond_with(SeqOrder {
+            calls: AtomicUsize::new(0),
+        })
+        .mount(&overpay)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    seed_abandon_wallet(&tmp.path().join("test.db"));
+
+    let res = s
+        .post("/mcp")
+        .add_header("accept", "text/event-stream")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 43,
+            "method": "tools/call",
+            "params": {
+                "name": "wait_for_order",
+                "arguments": {
+                    "order_id": "O9",
+                    "until_status": "delivered",
+                    "timeout_seconds": 30,
+                    "poll_interval_seconds": 1
+                },
+                "_meta": { "progressToken": "p9" }
+            }
+        }))
+        .await;
+
+    res.assert_status_ok();
+    let text = res.text();
+
+    // At least one progress notification, tagged with our token.
+    assert!(
+        text.contains("notifications/progress"),
+        "expected a progress notification in the stream:\n{text}"
+    );
+    assert!(
+        text.contains("\"progressToken\":\"p9\""),
+        "progress notification should echo the client's token:\n{text}"
+    );
+
+    // Terminal event is the final result with the delivered order.
+    let resp = parse_last_sse_json(&text);
+    assert_eq!(resp["id"], 43);
+    assert_eq!(resp["result"]["isError"], false);
+    assert_eq!(
+        resp["result"]["structuredContent"]["data"]["fulfillment_status"],
+        "delivered"
+    );
+}
+
+/// Pull the JSON payload out of the last `data:` line of an SSE body.
+fn parse_last_sse_json(body: &str) -> Value {
+    let last = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .map(|l| l.trim())
+        .rfind(|l| !l.is_empty())
+        .unwrap_or_else(|| panic!("no SSE data line in body:\n{body}"));
+    serde_json::from_str(last).unwrap_or_else(|e| panic!("bad SSE json {last:?}: {e}"))
+}
