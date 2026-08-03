@@ -142,11 +142,11 @@ pub async fn sync_post(
     .with_evm(state.evm.rpc_url.clone(), state.evm.network.clone())
     .with_npub(Some(npub));
 
-    let result: Value = match owallet_mcp::tools::dispatch(&mcp, "sync_purchases", json!({})).await
-    {
-        Ok(out) => out.data,
-        Err(e) => json!({ "error": e.to_string() }),
-    };
+    let result: Value =
+        match owallet_mcp::tools::dispatch(&mcp, "sync_purchases", json!({}), None).await {
+            Ok(out) => out.data,
+            Err(e) => json!({ "error": e.to_string() }),
+        };
 
     if let Some(err) = result.get("error").and_then(Value::as_str) {
         let enc = urlencoding(err);

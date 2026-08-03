@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use owallet_crypto::derive_from_stored_seed;
 use owallet_crypto::evm::Address;
 
+use crate::progress::ProgressSink;
 use crate::state::{McpState, OwnedAuth, ResolveAuthError};
 
 /// One tool entry in the catalog returned by `tools/list`.
@@ -265,7 +266,17 @@ pub struct ToolOutput {
 /// into the model-facing summary. Returns both the rendered `text` and
 /// the raw `data` for the transport to place in `content` /
 /// `structuredContent` respectively.
-pub async fn dispatch(state: &McpState, name: &str, args: Value) -> Result<ToolOutput, ToolError> {
+///
+/// `progress` is the streaming sink for `tools/call`s answered over SSE.
+/// It's `Some` only when the client opted into progress and the transport
+/// is streaming; handlers that don't stream ignore it. Buffered (single
+/// JSON body) calls pass `None`.
+pub async fn dispatch(
+    state: &McpState,
+    name: &str,
+    args: Value,
+    progress: Option<&ProgressSink>,
+) -> Result<ToolOutput, ToolError> {
     let data: Value = match name {
         "get_account_info" => get_account_info(state).await?,
         "list_marketplace" => list_marketplace(state, args).await?,
@@ -273,7 +284,7 @@ pub async fn dispatch(state: &McpState, name: &str, args: Value) -> Result<ToolO
         "get_listing" => get_listing(state, args).await?,
         "create_order" => create_order(state, args).await?,
         "get_order_status" => get_order_status(state, args).await?,
-        "wait_for_order" => wait_for_order(state, args).await?,
+        "wait_for_order" => wait_for_order(state, args, progress).await?,
         "redeem_merchant_credits" => redeem_merchant_credits(state, args).await?,
         "buy" => buy(state, args).await?,
         "send_usdc" => send_usdc(state, args).await?,
@@ -946,7 +957,11 @@ fn default_poll() -> u64 {
 /// referenced by `server.py:2022`.
 const WAIT_TERMINAL_STATUSES: &[&str] = &["failed", "cancelled"];
 
-async fn wait_for_order(state: &McpState, args: Value) -> Result<Value, ToolError> {
+async fn wait_for_order(
+    state: &McpState,
+    args: Value,
+    progress: Option<&ProgressSink>,
+) -> Result<Value, ToolError> {
     let args: WaitForOrderArgs =
         serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
             arg: "arguments",
@@ -959,6 +974,9 @@ async fn wait_for_order(state: &McpState, args: Value) -> Result<Value, ToolErro
 
     let (_npub, auth) = state.resolve_owned_auth()?;
     let start = std::time::Instant::now();
+    // Counts polls that found the order still in flight — the `progress`
+    // value on each streamed `notifications/progress`.
+    let mut tick = 0u64;
     loop {
         // Raw Rails passthrough — `snap` is `{"data": {...}}` so the
         // tool output shape matches Python (fathom-x/overpay#288).
@@ -995,6 +1013,29 @@ async fn wait_for_order(state: &McpState, args: Value) -> Result<Value, ToolErro
                 strip_large_delivered_content(state, &mut snap);
             }
             return Ok(splice_wait_meta(snap, elapsed, true));
+        }
+
+        // Still in flight — stream a progress update to SSE clients that
+        // opted in, then wait out the poll interval. Inert (no allocation
+        // sent) when the call is buffered or no `progressToken` was given.
+        if let Some(sink) = progress {
+            if sink.wants_progress() {
+                tick += 1;
+                let status_label = status.unwrap_or("unknown");
+                sink.emit(
+                    tick,
+                    None,
+                    format!(
+                        "order {} still in flight (status: {status_label}) — waited {elapsed}s",
+                        args.order_id
+                    ),
+                    json!({
+                        "order_id": args.order_id,
+                        "fulfillment_status": status,
+                        "waited_seconds": elapsed,
+                    }),
+                );
+            }
         }
         tokio::time::sleep(Duration::from_secs(poll)).await;
     }

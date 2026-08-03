@@ -16,6 +16,10 @@ owallet-zcash = { workspace = true }
 
 axum = "0.8"
 tokio = { version = "1", features = ["sync", "time", "macros"] }
+# Ergonomic async generators for the SSE `tools/call` stream in
+# `transport.rs` — lets the tool run inline while progress notifications
+# are yielded as they arrive.
+async-stream = "0.3"
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
