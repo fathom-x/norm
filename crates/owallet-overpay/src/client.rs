@@ -394,7 +394,11 @@ impl OverpayClient {
                 q.append_pair("category", c);
             }
             if let Some(s) = &filters.seller_slug {
-                q.append_pair("seller_slug", s);
+                // Rails reads `params[:seller]`, not `params[:seller_slug]`
+                // (listings_controller.rb#index) — the field here is named
+                // `seller_slug` for clarity on our side, but the wire param
+                // must match Rails's name or this filters nothing.
+                q.append_pair("seller", s);
             }
             if let Some(c) = &filters.cursor {
                 q.append_pair("cursor", c);

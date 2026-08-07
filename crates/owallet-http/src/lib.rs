@@ -83,13 +83,19 @@ impl Default for ZcashConfig {
     }
 }
 
-/// Build the full router: dashboard + OAuth AS + `/mcp`. `issuer_url` is
-/// the externally-reachable base URL that goes into the OAuth metadata
+/// Build the full router: dashboard + OAuth AS + `/mcp` + `/v1`
+/// (OpenAI-compatible chat completions, fathom-x/overpay#381). `issuer_url`
+/// is the externally-reachable base URL that goes into the OAuth metadata
 /// document (e.g. `http://127.0.0.1:8765`). The Overpay client + EVM
 /// config + host key are read directly from [`AppState`] — they were
 /// threaded into the state at construction time so the dashboard
 /// handlers (send / overpay-login / authorize) share them with the
 /// MCP server.
+///
+/// `/v1` carries no bearer/API-key check of its own — same trust model as
+/// the dashboard (whoever can reach this port already has the wallet) —
+/// so it uses the default-wallet `McpState` directly rather than the
+/// `/mcp` mount's optional-bearer wrapping.
 pub fn build_full_router(state: AppState, issuer_url: String) -> Router {
     let oauth = OAuthAsState {
         app: state.clone(),
@@ -113,6 +119,7 @@ pub fn build_full_router(state: AppState, issuer_url: String) -> Router {
     dashboard_routes(state.clone())
         .with_state(state)
         .merge(oauth_as::router(oauth))
+        .nest("/v1", owallet_mcp::openai_compat::router(mcp.clone()))
         .nest("/mcp", mcp_router_with_auth(mcp, auth))
 }
 

@@ -243,6 +243,10 @@ async fn list_listings_passes_filters_as_query_params() {
         .and(path("/api/v1/listings"))
         .and(query_param("category", "books"))
         .and(query_param("limit", "5"))
+        // Regression: Rails reads `params[:seller]`, not `params[:seller_slug]`
+        // (listings_controller.rb#index) — sending the wrong name silently
+        // filters nothing server-side.
+        .and(query_param("seller", "acme"))
         // Shape mirrors the real Rails API: `price_usd` is a formatted
         // *string* (not a number) and `seller` is a nested object.
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -268,6 +272,7 @@ async fn list_listings_passes_filters_as_query_params() {
         .list_listings(&ListingFilters {
             category: Some("books".into()),
             limit: Some(5),
+            seller_slug: Some("acme".into()),
             ..Default::default()
         })
         .await

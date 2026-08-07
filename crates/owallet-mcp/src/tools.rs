@@ -954,8 +954,9 @@ fn default_poll() -> u64 {
 
 /// Terminal statuses that short-circuit the polling loop alongside the
 /// caller-supplied `until_status`. Matches `_WAIT_TERMINAL_STATUSES`
-/// referenced by `server.py:2022`.
-const WAIT_TERMINAL_STATUSES: &[&str] = &["failed", "cancelled"];
+/// referenced by `server.py:2022`. `pub(crate)`: also used by
+/// `openai_compat`'s own order-polling loop.
+pub(crate) const WAIT_TERMINAL_STATUSES: &[&str] = &["failed", "cancelled"];
 
 async fn wait_for_order(
     state: &McpState,
@@ -1059,8 +1060,9 @@ async fn wait_for_order(
 
 /// Read a seller's in-flight output out of an order snapshot: the
 /// accumulated text and the marketplace's sequence number for it. Both are
-/// absent until a seller streams something.
-fn partial_output(snap: &Value) -> (Option<&str>, Option<u64>) {
+/// absent until a seller streams something. `pub(crate)`: also used by
+/// `openai_compat`'s streaming chat-completions path.
+pub(crate) fn partial_output(snap: &Value) -> (Option<&str>, Option<u64>) {
     let data = snap.get("data").unwrap_or(snap);
     (
         data.get("partial_content").and_then(Value::as_str),
@@ -1075,7 +1077,10 @@ fn partial_output(snap: &Value) -> (Option<&str>, Option<u64>) {
 /// resynchronize rather than emitting garbage: the buffer shrinking (the
 /// marketplace clears it on delivery) and the offset landing mid-character
 /// (the buffer is capped on a character boundary, which can move it).
-fn new_output_since<'a>(partial: Option<&'a str>, streamed: &mut usize) -> Option<&'a str> {
+pub(crate) fn new_output_since<'a>(
+    partial: Option<&'a str>,
+    streamed: &mut usize,
+) -> Option<&'a str> {
     let partial = partial?;
     if partial.len() <= *streamed {
         *streamed = partial.len();
