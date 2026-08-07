@@ -610,3 +610,67 @@ fn purchase_table_added_to_existing_db_via_migrate() {
     );
     assert_eq!(db.count_purchases("n").unwrap(), 1);
 }
+
+#[test]
+fn read_token_migrating_refiles_from_a_legacy_host() {
+    let (_tmp, path) = fresh_path();
+    let mut db = Database::init(&path, "pw").unwrap();
+    assert!(db.unlock("pw").unwrap());
+    db.write_token("npub1", "http://legacy.test", "tok", "overpay-oauth")
+        .unwrap();
+
+    let legacy = vec!["http://legacy.test".to_string()];
+    assert_eq!(
+        db.read_token_migrating("npub1", "http://canonical.test", &legacy)
+            .unwrap()
+            .as_deref(),
+        Some("tok")
+    );
+    // Re-filed, not copied — a second read hits the canonical key directly.
+    assert_eq!(
+        db.read_token("npub1", "http://canonical.test")
+            .unwrap()
+            .as_deref(),
+        Some("tok")
+    );
+    assert_eq!(db.read_token("npub1", "http://legacy.test").unwrap(), None);
+}
+
+#[test]
+fn read_token_migrating_prefers_the_canonical_row() {
+    let (_tmp, path) = fresh_path();
+    let mut db = Database::init(&path, "pw").unwrap();
+    assert!(db.unlock("pw").unwrap());
+    db.write_token("npub1", "http://canonical.test", "fresh", "overpay-oauth")
+        .unwrap();
+    db.write_token("npub1", "http://legacy.test", "stale", "overpay-oauth")
+        .unwrap();
+
+    let legacy = vec!["http://legacy.test".to_string()];
+    assert_eq!(
+        db.read_token_migrating("npub1", "http://canonical.test", &legacy)
+            .unwrap()
+            .as_deref(),
+        Some("fresh")
+    );
+    // The stale row is left alone rather than clobbering the live one.
+    assert_eq!(
+        db.read_token("npub1", "http://legacy.test")
+            .unwrap()
+            .as_deref(),
+        Some("stale")
+    );
+}
+
+#[test]
+fn read_token_migrating_returns_none_when_nothing_is_stored() {
+    let (_tmp, path) = fresh_path();
+    let mut db = Database::init(&path, "pw").unwrap();
+    assert!(db.unlock("pw").unwrap());
+    let legacy = vec!["http://legacy.test".to_string()];
+    assert_eq!(
+        db.read_token_migrating("npub1", "http://canonical.test", &legacy)
+            .unwrap(),
+        None
+    );
+}

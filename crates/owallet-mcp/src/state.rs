@@ -16,9 +16,14 @@ pub struct McpState {
     /// Best-effort npub associated with the bearer token used for this
     /// request. `None` means anonymous (only public tools allowed).
     pub active_npub: Option<String>,
-    /// Stable identifier of the host the bearer token was issued by. Used
-    /// to look up the Overpay token in the `tokens` table.
+    /// Key the Overpay bearer is filed under in the `tokens` table. Derived
+    /// from the Overpay API base URL (see [`owallet_overpay::host_key`]), so
+    /// a wallet linked from the `owallet authorize` CLI and one linked from
+    /// the dashboard resolve to the same row.
     pub host_key: String,
+    /// Host keys an older build may have filed the bearer under. Read
+    /// through (and migrated forward) when [`Self::host_key`] misses.
+    pub legacy_host_keys: Vec<String>,
     /// EVM JSON-RPC URL (e.g. https://mainnet.base.org). Used by the
     /// USDC-send tool.
     pub evm_rpc_url: String,
@@ -62,17 +67,29 @@ pub enum ResolveAuthError {
 }
 
 impl McpState {
-    pub fn new(db: Arc<Mutex<Database>>, overpay: Arc<OverpayClient>, host_key: String) -> Self {
+    /// The token-store key is derived from `overpay` rather than passed in —
+    /// the bearer belongs to the Overpay host, not to whatever local server
+    /// happens to be hosting these tools.
+    pub fn new(db: Arc<Mutex<Database>>, overpay: Arc<OverpayClient>) -> Self {
+        let host_key = overpay.host_key();
         Self {
             db,
             overpay,
             active_npub: None,
             host_key,
+            legacy_host_keys: Vec::new(),
             evm_rpc_url: "https://mainnet.base.org".to_string(),
             evm_network: "eip155:8453".to_string(),
             zcash_lightwalletd: "zecrocks".to_string(),
             zcash_network: "mainnet".to_string(),
         }
+    }
+
+    /// Register host keys to read through when [`Self::host_key`] misses —
+    /// token layouts written by older builds.
+    pub fn with_legacy_host_keys(mut self, keys: Vec<String>) -> Self {
+        self.legacy_host_keys = keys.into_iter().filter(|k| *k != self.host_key).collect();
+        self
     }
 
     pub fn with_evm(mut self, rpc_url: String, network: String) -> Self {
@@ -107,6 +124,7 @@ impl McpState {
             overpay: self.overpay.clone(),
             active_npub: npub,
             host_key: self.host_key.clone(),
+            legacy_host_keys: self.legacy_host_keys.clone(),
             evm_rpc_url: self.evm_rpc_url.clone(),
             evm_network: self.evm_network.clone(),
             zcash_lightwalletd: self.zcash_lightwalletd.clone(),
@@ -124,10 +142,13 @@ impl McpState {
         db.read_default_npub().ok().flatten()
     }
 
-    /// Look up the stored Overpay bearer token for the given npub.
+    /// Look up the stored Overpay bearer token for the given npub, migrating
+    /// a token filed under a legacy host key forward on first hit.
     pub fn read_overpay_token(&self, npub: &str) -> Option<String> {
         let db = self.db.lock().ok()?;
-        db.read_token(npub, &self.host_key).ok().flatten()
+        db.read_token_migrating(npub, &self.host_key, &self.legacy_host_keys)
+            .ok()
+            .flatten()
     }
 
     /// Resolve the auth strategy for an Overpay request:

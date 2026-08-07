@@ -22,6 +22,6 @@ pub mod error;
 pub mod models;
 pub mod pkce;
 
-pub use client::{Auth, OverpayClient};
+pub use client::{host_key, Auth, OverpayClient};
 pub use error::OverpayError;
 pub use pkce::Pkce;

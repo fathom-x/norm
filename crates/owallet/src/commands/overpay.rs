@@ -19,13 +19,14 @@ pub(crate) fn client() -> Result<OverpayClient> {
     Ok(c)
 }
 
-/// Stable host key under which the OAuth bearer token is stored. Matches the
-/// Python `_host_key(rails_url)` shape from `server.py:804` — the URL origin
-/// without trailing slash.
+/// Stable host key under which the OAuth bearer token is stored — the
+/// Overpay API base URL, normalized. Matches the Python `_host_key(rails_url)`
+/// shape from `server.py:804`, and is the same key `owallet serve` derives
+/// from its Overpay client, so a wallet linked here is linked there too.
 pub(crate) fn host_key() -> String {
     let rails = std::env::var("OVERPAY_RAILS_URL")
         .unwrap_or_else(|_| defaults::OVERPAY_RAILS_URL.to_string());
-    rails.trim_end_matches('/').to_string()
+    owallet_overpay::host_key(&rails)
 }
 
 /// Build a single tokio runtime for sync CLI handlers that need to drive

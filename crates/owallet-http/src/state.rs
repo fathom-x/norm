@@ -50,10 +50,21 @@ pub struct AppState {
     /// lightwalletd + network used by the dashboard `POST /wallet/send` ZEC
     /// branch and propagated into the MCP `send_zcash`/`sync_zcash` tools.
     pub zcash: ZcashConfig,
-    /// Stable identifier of the host the dashboard's bearer tokens are
-    /// stored under (the OAuth issuer URL). Used by the dashboard handlers
-    /// that look up stored Overpay tokens.
+    /// Key the Overpay bearer tokens are filed under in the wallet DB.
+    /// Derived from the Overpay API base URL (see
+    /// [`owallet_overpay::host_key`]) so the dashboard, the MCP tools and
+    /// the `owallet authorize` CLI all read the same row.
     pub host_key: String,
+    /// Externally-reachable base URL of *this* dashboard — the OAuth issuer
+    /// (e.g. `http://127.0.0.1:8766`). Used to build the dashboard's own
+    /// OAuth redirect URI. Deliberately **not** a token-store key: two
+    /// `owallet serve` instances pointed at the same Overpay host share one
+    /// bearer, they don't each need their own authorization.
+    pub public_base_url: String,
+    /// Host keys an older build may have filed this wallet's Overpay bearer
+    /// under. Read through (and migrated forward) when [`Self::host_key`]
+    /// misses.
+    pub legacy_host_keys: Vec<String>,
     /// Short-lived map of dashboard → Overpay OAuth handshakes in flight.
     pub pending_auth: PendingDashboardAuthMap,
 }
@@ -64,17 +75,70 @@ impl AppState {
         db: Database,
         overpay: Arc<OverpayClient>,
         evm: EvmConfig,
-        host_key: String,
+        public_base_url: String,
     ) -> Self {
+        Self::new_shared(
+            Arc::new(Mutex::new(db)),
+            overpay,
+            evm,
+            ZcashConfig::default(),
+            public_base_url,
+        )
+    }
+
+    /// Build a state around an already-shared DB handle. `owallet serve`
+    /// uses this to run several servers over one unlocked `Database`.
+    ///
+    /// `public_base_url` is this dashboard's externally-reachable base URL.
+    /// The token-store key is derived from `overpay` rather than passed in,
+    /// so a caller can't accidentally file bearers under the local dashboard
+    /// URL the way `serve` once did.
+    #[must_use]
+    pub fn new_shared(
+        db: Arc<Mutex<Database>>,
+        overpay: Arc<OverpayClient>,
+        evm: EvmConfig,
+        zcash: ZcashConfig,
+        public_base_url: String,
+    ) -> Self {
+        let host_key = overpay.host_key();
+        let public_base_url = public_base_url.trim_end_matches('/').to_string();
+        let legacy_host_keys = if public_base_url == host_key {
+            Vec::new()
+        } else {
+            vec![public_base_url.clone()]
+        };
         Self {
-            db: Arc::new(Mutex::new(db)),
+            db,
             sessions: SessionStore::new(),
             overpay,
             evm,
-            zcash: ZcashConfig::default(),
+            zcash,
             host_key,
+            public_base_url,
+            legacy_host_keys,
             pending_auth: PendingDashboardAuthMap::default(),
         }
+    }
+
+    /// Register another host key to read through when [`Self::host_key`]
+    /// misses. Used for token layouts written by older builds.
+    #[must_use]
+    pub fn with_legacy_host_key(mut self, key: String) -> Self {
+        if key != self.host_key && !self.legacy_host_keys.contains(&key) {
+            self.legacy_host_keys.push(key);
+        }
+        self
+    }
+
+    /// Read the stored Overpay bearer for `npub`, migrating a token filed
+    /// under a legacy host key forward on first hit.
+    pub fn read_overpay_token(&self, npub: &str) -> Result<Option<String>, crate::error::AppError> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|e| crate::error::AppError::Internal(format!("db mutex poisoned: {e}")))?;
+        Ok(db.read_token_migrating(npub, &self.host_key, &self.legacy_host_keys)?)
     }
 
     /// Convenience constructor for tests that don't exercise the live
@@ -102,6 +166,8 @@ impl AppState {
             evm: self.evm.clone(),
             zcash: self.zcash.clone(),
             host_key: self.host_key.clone(),
+            public_base_url: self.public_base_url.clone(),
+            legacy_host_keys: self.legacy_host_keys.clone(),
             pending_auth: PendingDashboardAuthMap::default(),
         }
     }

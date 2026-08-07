@@ -122,16 +122,14 @@ pub fn run_with_cli(
             lightwalletd: cfg.zcash_lightwalletd.clone(),
             network: cfg.zcash_network.clone(),
         };
-        let host_key = cfg.issuer_url.trim_end_matches('/').to_string();
-        let state = AppState {
-            db: db.clone(),
-            sessions: owallet_http::SessionStore::new(),
-            overpay,
-            evm,
-            zcash,
-            host_key,
-            pending_auth: owallet_http::PendingDashboardAuthMap::default(),
-        };
+        // The bearer belongs to the Overpay host, so `AppState` derives the
+        // token key from the Overpay client. Builds before this keyed it by
+        // the local issuer URL instead, which is why a wallet linked with
+        // `owallet authorize` looked unlinked to the MCP tools — read those
+        // rows through and re-file them.
+        let state = AppState::new_shared(db.clone(), overpay, evm, zcash, cfg.issuer_url.clone())
+            // Pre-normalization CLI builds keyed by the raw configured URL.
+            .with_legacy_host_key(cfg.rails_url.trim_end_matches('/').to_string());
         per_server.push((cfg.clone(), state));
     }
 

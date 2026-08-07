@@ -447,7 +447,11 @@ async fn send_post_redirects_anonymous_to_login() {
 /// Build a dashboard pointed at a wiremock'd Overpay base URL. The
 /// abandon wallet is seeded as default so the OAuth handlers have an
 /// active npub to bind the token to.
-async fn dashboard_with_overpay(overpay_uri: &str, host_key: &str) -> (TestServer, TempDir) {
+///
+/// `issuer` is the dashboard's own externally-reachable base URL — it shapes
+/// the OAuth redirect URI, *not* the key bearers are filed under. That key is
+/// derived from `overpay_uri`.
+async fn dashboard_with_overpay(overpay_uri: &str, issuer: &str) -> (TestServer, TempDir) {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("test.db");
     let db = Database::init(&path, MASTER_PW).expect("init");
@@ -456,7 +460,7 @@ async fn dashboard_with_overpay(overpay_uri: &str, host_key: &str) -> (TestServe
         rpc_url: "http://127.0.0.1:1".to_string(),
         network: "eip155:8453".into(),
     };
-    let state = AppState::new(db, overpay, evm, host_key.to_string());
+    let state = AppState::new(db, overpay, evm, issuer.to_string());
     let app = build_router(state);
     let mut server = TestServer::new(app).unwrap();
     server.save_cookies();
@@ -486,8 +490,8 @@ async fn wallet_authorize_registers_client_and_redirects_with_cookie() {
         .mount(&overpay)
         .await;
 
-    let host_key = "http://owallet.test";
-    let (server, _tmp) = dashboard_with_overpay(&overpay.uri(), host_key).await;
+    let issuer = "http://owallet.test";
+    let (server, _tmp) = dashboard_with_overpay(&overpay.uri(), issuer).await;
     login_admin(&server).await;
 
     let res = server.get("/wallet/authorize").await;
@@ -508,9 +512,11 @@ async fn wallet_authorize_registers_client_and_redirects_with_cookie() {
         pairs.get("code_challenge_method").map(String::as_str),
         Some("S256")
     );
+    // The callback comes back to *this* dashboard, so the redirect URI is
+    // built from the issuer, never from the Overpay host.
     assert_eq!(
         pairs.get("redirect_uri").map(String::as_str),
-        Some(format!("{host_key}/wallet/authorize/callback").as_str())
+        Some(format!("{issuer}/wallet/authorize/callback").as_str())
     );
 
     // The pending-auth cookie should be set on the response.
@@ -553,8 +559,8 @@ async fn wallet_authorize_callback_exchanges_code_and_stores_token() {
         .mount(&overpay)
         .await;
 
-    let host_key = "http://owallet.test";
-    let (server, tmp) = dashboard_with_overpay(&overpay.uri(), host_key).await;
+    let issuer = "http://owallet.test";
+    let (server, tmp) = dashboard_with_overpay(&overpay.uri(), issuer).await;
     login_admin(&server).await;
 
     // 1) GET /wallet/authorize → captures state from the redirect Location.
@@ -578,13 +584,19 @@ async fn wallet_authorize_callback_exchanges_code_and_stores_token() {
         "/wallet?notice=authorized"
     );
 
-    // 3) Confirm the bearer landed in the DB under (npub, host_key).
+    // 3) The bearer is filed under the *Overpay* host, which is the key
+    //    `owallet authorize` and the MCP tools both look under — not under
+    //    this dashboard's issuer URL.
     let db_path = tmp.path().join("test.db");
     let mut db = Database::open(&db_path).unwrap();
     assert!(db.unlock(MASTER_PW).unwrap());
     let npub = db.read_default_npub().unwrap().unwrap();
-    let stored = db.read_token(&npub, host_key).unwrap();
-    assert_eq!(stored.as_deref(), Some("the_dashboard_bearer"));
+    let canonical = owallet_overpay::host_key(&overpay.uri());
+    assert_eq!(
+        db.read_token(&npub, &canonical).unwrap().as_deref(),
+        Some("the_dashboard_bearer")
+    );
+    assert_eq!(db.read_token(&npub, issuer).unwrap(), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -634,17 +646,22 @@ async fn wallet_overpay_login_redirects_to_session_url_when_token_stored() {
         .mount(&overpay)
         .await;
 
-    let host_key = "http://owallet.test";
-    let (server, tmp) = dashboard_with_overpay(&overpay.uri(), host_key).await;
+    let (server, tmp) = dashboard_with_overpay(&overpay.uri(), "http://owallet.test").await;
     login_admin(&server).await;
 
-    // Pre-seed a bearer under (npub, host_key).
+    // Pre-seed a bearer the way `owallet authorize` files it: under the
+    // Overpay host.
     let db_path = tmp.path().join("test.db");
     let mut db = Database::open(&db_path).unwrap();
     assert!(db.unlock(MASTER_PW).unwrap());
     let npub = db.read_default_npub().unwrap().unwrap();
-    db.write_token(&npub, host_key, "the_stored_bearer", "overpay-oauth")
-        .unwrap();
+    db.write_token(
+        &npub,
+        &owallet_overpay::host_key(&overpay.uri()),
+        "the_stored_bearer",
+        "overpay-oauth",
+    )
+    .unwrap();
     drop(db);
 
     let res = server.get("/wallet/overpay-login").await;
@@ -653,6 +670,50 @@ async fn wallet_overpay_login_redirects_to_session_url_when_token_stored() {
         res.header("location").to_str().unwrap(),
         "https://overpay.test/auto-login/abc123"
     );
+}
+
+/// The dashboard has to find bearers older builds filed under the issuer URL
+/// too, and re-file them so the next read is a direct hit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wallet_overpay_login_migrates_token_from_legacy_issuer_key() {
+    use wiremock::matchers::{header as wm_header, method as wm_method, path as wm_path};
+    let overpay = MockServer::start().await;
+    Mock::given(wm_method("POST"))
+        .and(wm_path("/api/v1/buyer/web_session"))
+        .and(wm_header("authorization", "Bearer legacy_bearer"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "url": "https://overpay.test/auto-login/legacy",
+        })))
+        .mount(&overpay)
+        .await;
+
+    let issuer = "http://owallet.test";
+    let (server, tmp) = dashboard_with_overpay(&overpay.uri(), issuer).await;
+    login_admin(&server).await;
+
+    let db_path = tmp.path().join("test.db");
+    let mut db = Database::open(&db_path).unwrap();
+    assert!(db.unlock(MASTER_PW).unwrap());
+    let npub = db.read_default_npub().unwrap().unwrap();
+    db.write_token(&npub, issuer, "legacy_bearer", "overpay-oauth")
+        .unwrap();
+    drop(db);
+
+    let res = server.get("/wallet/overpay-login").await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    assert_eq!(
+        res.header("location").to_str().unwrap(),
+        "https://overpay.test/auto-login/legacy"
+    );
+
+    let mut db = Database::open(&db_path).unwrap();
+    assert!(db.unlock(MASTER_PW).unwrap());
+    let canonical = owallet_overpay::host_key(&overpay.uri());
+    assert_eq!(
+        db.read_token(&npub, &canonical).unwrap().as_deref(),
+        Some("legacy_bearer")
+    );
+    assert_eq!(db.read_token(&npub, issuer).unwrap(), None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

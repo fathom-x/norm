@@ -69,14 +69,19 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   bearer-or-derive-key branch in `commands/account.rs` (for the CLI),
   so users without a stored token still authenticate via wallet key.
 
-- **OAuth AS host_key.** When a wallet runs `owallet authorize` the
-  bearer token is stored under `(npub, host)` where `host` is the
-  trimmed `OVERPAY_RAILS_URL`. When the local OAuth AS issues an MCP
-  token, `host_key` in the MCP state is the **issuer URL**, not the
-  Rails URL. The MCP tools look up the Overpay bearer under
-  `(active_npub, host_key)`, so when wiring tests make sure the
-  `write_token` host matches what `McpState::new` was given as
-  `host_key`.
+- **host_key vs public_base_url.** Overpay bearers live in `tokens`
+  under `(npub, host_key)`, where `host_key` is always the **Overpay
+  API** URL — `owallet_overpay::host_key(rails_url)`, or equivalently
+  `OverpayClient::host_key()`. `AppState`/`McpState` derive it from
+  their Overpay client rather than accepting it as an argument, so a
+  wallet linked with `owallet authorize` and one linked through the
+  dashboard resolve to the same row. `AppState::public_base_url` is a
+  separate field holding this dashboard's **issuer URL**, used only to
+  build the OAuth `redirect_uri`. Serve used to conflate the two and key
+  bearers by the issuer, so CLI-linked wallets 401'd from MCP tools;
+  `Database::read_token_migrating` reads through
+  `AppState::legacy_host_keys` and re-files those rows. When wiring
+  tests, `write_token` under the *Overpay mock's* URI, not the issuer.
 
 - **clap subcommand for serve / install.** Both consume the global
   `--prod/--dev/--staging` flags directly (multi-config support).
