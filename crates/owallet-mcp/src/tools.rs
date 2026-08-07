@@ -147,7 +147,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         ToolSpec {
             name: "wait_for_order",
             description:
-                "Poll until the order reaches `until_status` (default \"delivered\") or a terminal status (failed / cancelled), then return its final snapshot plus `waited_seconds` and `timed_out`. Caches terminal orders and strips large delivered_content unless `include_delivered_content` is true.",
+                "Poll until the order reaches `until_status` (default \"delivered\") or a terminal status (failed / cancelled), then return its final snapshot plus `waited_seconds` and `timed_out`. Caches terminal orders and strips large delivered_content unless `include_delivered_content` is true. When the call is streamed (Accept: text/event-stream plus a `_meta.progressToken`) and the seller publishes its work in progress, each progress notification carries the newly generated text in `data.delta`.",
             input_schema: schema_with_required(
                 json!({
                     "order_id":                  {"type": "string"},
@@ -977,6 +977,9 @@ async fn wait_for_order(
     // Counts polls that found the order still in flight — the `progress`
     // value on each streamed `notifications/progress`.
     let mut tick = 0u64;
+    // Bytes of the seller's in-flight output already forwarded to the
+    // client, so each poll emits only what is new.
+    let mut streamed = 0usize;
     loop {
         // Raw Rails passthrough — `snap` is `{"data": {...}}` so the
         // tool output shape matches Python (fathom-x/overpay#288).
@@ -1022,23 +1025,69 @@ async fn wait_for_order(
             if sink.wants_progress() {
                 tick += 1;
                 let status_label = status.unwrap_or("unknown");
-                sink.emit(
-                    tick,
-                    None,
-                    format!(
+                let (partial, seq) = partial_output(&snap);
+                let delta = new_output_since(partial, &mut streamed);
+
+                // When the seller is producing text, the delta *is* the
+                // news — send it as the message so a client rendering the
+                // progress feed watches the answer arrive. Otherwise fall
+                // back to the status line.
+                let message = match delta {
+                    Some(d) => d.to_string(),
+                    None => format!(
                         "order {} still in flight (status: {status_label}) — waited {elapsed}s",
                         args.order_id
                     ),
+                };
+                sink.emit(
+                    tick,
+                    None,
+                    message,
                     json!({
                         "order_id": args.order_id,
                         "fulfillment_status": status,
                         "waited_seconds": elapsed,
+                        "delta": delta,
+                        "partial_seq": seq,
                     }),
                 );
             }
         }
         tokio::time::sleep(Duration::from_secs(poll)).await;
     }
+}
+
+/// Read a seller's in-flight output out of an order snapshot: the
+/// accumulated text and the marketplace's sequence number for it. Both are
+/// absent until a seller streams something.
+fn partial_output(snap: &Value) -> (Option<&str>, Option<u64>) {
+    let data = snap.get("data").unwrap_or(snap);
+    (
+        data.get("partial_content").and_then(Value::as_str),
+        data.get("partial_seq").and_then(Value::as_u64),
+    )
+}
+
+/// The part of `partial` not yet forwarded, advancing `streamed` past it.
+///
+/// The buffer is an append-only prefix, so the new text is whatever sits
+/// past the offset we last sent. Two cases break that assumption and both
+/// resynchronize rather than emitting garbage: the buffer shrinking (the
+/// marketplace clears it on delivery) and the offset landing mid-character
+/// (the buffer is capped on a character boundary, which can move it).
+fn new_output_since<'a>(partial: Option<&'a str>, streamed: &mut usize) -> Option<&'a str> {
+    let partial = partial?;
+    if partial.len() <= *streamed {
+        *streamed = partial.len();
+        return None;
+    }
+    if !partial.is_char_boundary(*streamed) {
+        *streamed = partial.len();
+        return None;
+    }
+    let delta = &partial[*streamed..];
+    *streamed = partial.len();
+    Some(delta)
 }
 
 /// Splice Python's `waited_seconds` + `timed_out` extra fields onto the
@@ -1647,4 +1696,64 @@ fn schema_with_required(properties: Value, required: &[&str]) -> Value {
         "required": required,
         "additionalProperties": false,
     })
+}
+
+#[cfg(test)]
+mod partial_output_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_buffer_out_of_the_rails_envelope() {
+        let snap = json!({"data": {"partial_content": "abc", "partial_seq": 3}});
+        assert_eq!(partial_output(&snap), (Some("abc"), Some(3)));
+    }
+
+    #[test]
+    fn tolerates_a_flat_snapshot_and_a_missing_buffer() {
+        assert_eq!(
+            partial_output(&json!({"partial_content": "abc"})),
+            (Some("abc"), None)
+        );
+        assert_eq!(partial_output(&json!({"data": {}})), (None, None));
+    }
+
+    #[test]
+    fn emits_only_what_is_new_on_each_poll() {
+        let mut streamed = 0;
+        assert_eq!(
+            new_output_since(Some("Hello"), &mut streamed),
+            Some("Hello")
+        );
+        assert_eq!(
+            new_output_since(Some("Hello, world"), &mut streamed),
+            Some(", world")
+        );
+        // An unchanged buffer is not news.
+        assert_eq!(new_output_since(Some("Hello, world"), &mut streamed), None);
+    }
+
+    #[test]
+    fn resynchronizes_when_the_buffer_is_cleared_on_delivery() {
+        let mut streamed = 0;
+        new_output_since(Some("a long answer"), &mut streamed);
+        assert_eq!(new_output_since(Some(""), &mut streamed), None);
+        assert_eq!(streamed, 0);
+    }
+
+    #[test]
+    fn never_slices_a_character_in_half() {
+        let mut streamed = 0;
+        // Land the offset inside the 3-byte arrow, as a shifted cap could.
+        new_output_since(Some("→"), &mut streamed);
+        streamed = 1;
+        assert_eq!(new_output_since(Some("→→"), &mut streamed), None);
+        assert_eq!(new_output_since(Some("→→!"), &mut streamed), Some("!"));
+    }
+
+    #[test]
+    fn a_snapshot_without_a_buffer_yields_nothing() {
+        let mut streamed = 0;
+        assert_eq!(new_output_since(None, &mut streamed), None);
+        assert_eq!(streamed, 0);
+    }
 }

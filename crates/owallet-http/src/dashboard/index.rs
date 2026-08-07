@@ -34,7 +34,7 @@ pub async fn dashboard(
         return Ok(redirect_to_login().into_response());
     };
 
-    let (wallets, default_npub, stored_token) = {
+    let (wallets, default_npub, active_npub) = {
         let db = state
             .db
             .lock()
@@ -42,20 +42,19 @@ pub async fn dashboard(
 
         let wallets = db.list_wallets()?;
         let default_npub = db.read_default_npub()?;
-
-        // Determine the active wallet, then pull the stored bearer for it
-        // under the dashboard's host_key (used both as the linked-flag and
-        // for the live Overpay fetch below).
         let active_npub = match &session.role {
             SessionRole::Wallet { npub } => Some(npub.clone()),
             SessionRole::Admin => default_npub.clone(),
         };
-        let stored_token = match active_npub.as_deref() {
-            Some(n) => db.read_token(n, &state.host_key)?,
-            None => None,
-        };
 
-        (wallets, default_npub, stored_token)
+        (wallets, default_npub, active_npub)
+    };
+
+    // The stored bearer for the active wallet, used both as the linked-flag
+    // and for the live Overpay fetch below.
+    let stored_token = match active_npub.as_deref() {
+        Some(n) => state.read_overpay_token(n)?,
+        None => None,
     };
 
     let active = match &session.role {

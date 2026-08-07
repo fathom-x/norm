@@ -407,10 +407,16 @@ async fn mcp_bearer_known_token_unlocks_wallet_scoped_tools() {
     )
     .unwrap();
     db.write_default_npub("npub1alice").unwrap();
-    // Token stored under the issuer URL — that's the `host_key` McpState
-    // computes from the issuer arg passed to build_full_router.
-    db.write_token("npub1alice", ISSUER, "the_overpay_bearer", "overpay-oauth")
-        .unwrap();
+    // Filed under the Overpay host, exactly as `owallet authorize` files it.
+    // The MCP tools derive the same key from their Overpay client, so a
+    // CLI-linked wallet is usable here without re-authorizing.
+    db.write_token(
+        "npub1alice",
+        &owallet_overpay::host_key(&overpay.uri()),
+        "the_overpay_bearer",
+        "overpay-oauth",
+    )
+    .unwrap();
     // Issue a local MCP token via the access_tokens table directly.
     db.write_access_token(
         "mcp_tok",
@@ -447,6 +453,74 @@ async fn mcp_bearer_known_token_unlocks_wallet_scoped_tools() {
     assert_eq!(dump["account"]["data"]["username"], "alice");
     let md = body["result"]["content"][0]["text"].as_str().unwrap();
     assert!(md.contains("| Username | alice |"), "markdown: {md}");
+}
+
+/// Builds before the host-key fix filed the Overpay bearer under the local
+/// dashboard's issuer URL. Those rows have to keep working — read through to
+/// the legacy key and re-file, rather than 401 until the user re-authorizes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_bearer_finds_token_filed_under_legacy_issuer_key() {
+    let overpay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/account"))
+        .and(header("authorization", "Bearer legacy_bearer"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"username": "legacy-alice"},
+        })))
+        .mount(&overpay)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    let path = tmp.path().join("test.db");
+    let mut db = Database::open(&path).unwrap();
+    assert!(db.unlock("master-pw").unwrap());
+    db.write_wallet(
+        "npub1alice",
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        Some("0xabc"),
+    )
+    .unwrap();
+    db.write_default_npub("npub1alice").unwrap();
+    db.write_token("npub1alice", ISSUER, "legacy_bearer", "overpay-oauth")
+        .unwrap();
+    db.write_access_token(
+        "mcp_tok",
+        "mcp_client",
+        &["wallet".into()],
+        None,
+        Some("npub1alice"),
+    )
+    .unwrap();
+    drop(db);
+
+    let res = s
+        .post("/mcp")
+        .add_header("authorization", "Bearer mcp_tok")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 32,
+            "method": "tools/call",
+            "params": {"name": "get_account_info", "arguments": {}}
+        }))
+        .await;
+    res.assert_status_ok();
+    let body: Value = res.json();
+    assert_eq!(body["result"]["isError"], false);
+    assert_eq!(
+        body["result"]["structuredContent"]["account"]["data"]["username"],
+        "legacy-alice"
+    );
+
+    // The row moved to the canonical key, so the next lookup is a direct hit.
+    let mut db = Database::open(&path).unwrap();
+    assert!(db.unlock("master-pw").unwrap());
+    let canonical = owallet_overpay::host_key(&overpay.uri());
+    assert_eq!(
+        db.read_token("npub1alice", &canonical).unwrap().as_deref(),
+        Some("legacy_bearer")
+    );
+    assert_eq!(db.read_token("npub1alice", ISSUER).unwrap(), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -1626,6 +1700,103 @@ async fn mcp_wait_for_order_streams_progress_then_result() {
     assert_eq!(
         resp["result"]["structuredContent"]["data"]["fulfillment_status"],
         "delivered"
+    );
+}
+
+/// The end of the streaming path: a seller publishing its work in progress
+/// shows up as token deltas on the buyer's SSE stream, each carrying only
+/// what is new since the previous notification.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_wait_for_order_streams_seller_output_as_deltas() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // The seller's buffer grows across polls, then the order delivers.
+    struct GrowingBuffer {
+        calls: AtomicUsize,
+    }
+    impl Respond for GrowingBuffer {
+        fn respond(&self, _req: &Request) -> ResponseTemplate {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let body = match n {
+                0 => json!({"data": {
+                    "id": "O10", "payment_status": "paid",
+                    "fulfillment_status": "processing",
+                    "partial_content": "Four score", "partial_seq": 1,
+                }}),
+                1 => json!({"data": {
+                    "id": "O10", "payment_status": "paid",
+                    "fulfillment_status": "processing",
+                    "partial_content": "Four score and seven", "partial_seq": 2,
+                }}),
+                _ => json!({"data": {
+                    "id": "O10", "payment_status": "paid",
+                    "fulfillment_status": "delivered",
+                    "delivered_content": "Four score and seven years ago",
+                }}),
+            };
+            ResponseTemplate::new(200).set_body_json(body)
+        }
+    }
+
+    let overpay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/orders/O10"))
+        .respond_with(GrowingBuffer {
+            calls: AtomicUsize::new(0),
+        })
+        .mount(&overpay)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    seed_abandon_wallet(&tmp.path().join("test.db"));
+
+    let res = s
+        .post("/mcp")
+        .add_header("accept", "text/event-stream")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 44,
+            "method": "tools/call",
+            "params": {
+                "name": "wait_for_order",
+                "arguments": {
+                    "order_id": "O10",
+                    "timeout_seconds": 30,
+                    "poll_interval_seconds": 1
+                },
+                "_meta": { "progressToken": "p10" }
+            }
+        }))
+        .await;
+
+    res.assert_status_ok();
+    let text = res.text();
+
+    let deltas: Vec<String> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|l| serde_json::from_str::<Value>(l.trim()).ok())
+        .filter(|v| v["method"] == "notifications/progress")
+        .filter_map(|v| {
+            v["params"]["data"]["delta"]
+                .as_str()
+                .map(std::string::ToString::to_string)
+        })
+        .collect();
+
+    assert_eq!(
+        deltas,
+        vec!["Four score".to_string(), " and seven".to_string()],
+        "each notification should carry only the newly generated text:\n{text}"
+    );
+
+    // The delivered payload is still the whole answer, not just the tail.
+    let resp = parse_last_sse_json(&text);
+    assert_eq!(resp["id"], 44);
+    assert_eq!(
+        resp["result"]["structuredContent"]["data"]["delivered_content"],
+        "Four score and seven years ago"
     );
 }
 

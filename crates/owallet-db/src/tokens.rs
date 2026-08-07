@@ -50,6 +50,19 @@ pub(crate) fn read_blob(
     Ok(row)
 }
 
+/// Move a token row from one host key to another, leaving the ciphertext
+/// untouched. Returns `true` if a row moved.
+///
+/// The blob is never decrypted, so this works on a locked DB — the row is
+/// only being re-filed, not re-encrypted.
+pub(crate) fn rehost(conn: &Connection, npub: &str, from: &str, to: &str) -> Result<bool> {
+    let moved = conn.execute(
+        "UPDATE tokens SET host = ?3 WHERE npub = ?1 AND host = ?2",
+        params![npub, from, to],
+    )?;
+    Ok(moved > 0)
+}
+
 pub(crate) fn delete(conn: &Connection, npub: &str, host: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM tokens WHERE npub = ?1 AND host = ?2",

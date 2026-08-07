@@ -444,6 +444,34 @@ impl Database {
         })?))
     }
 
+    /// Read the token for `(npub, host)`, first re-filing a token stored
+    /// under one of `legacy_hosts` if the canonical key misses.
+    ///
+    /// `owallet serve` used to key Overpay bearers by the local dashboard's
+    /// OAuth issuer URL rather than the Overpay API URL, so a wallet linked
+    /// through the dashboard before that was fixed has its bearer filed
+    /// under the issuer. Reading through migrates it on first hit instead of
+    /// silently reporting the wallet as unlinked.
+    pub fn read_token_migrating(
+        &self,
+        npub: &str,
+        host: &str,
+        legacy_hosts: &[String],
+    ) -> Result<Option<String>> {
+        if let Some(token) = self.read_token(npub, host)? {
+            return Ok(Some(token));
+        }
+        for legacy in legacy_hosts {
+            if legacy == host {
+                continue;
+            }
+            if tokens::rehost(&self.conn, npub, legacy, host)? {
+                return self.read_token(npub, host);
+            }
+        }
+        Ok(None)
+    }
+
     pub fn delete_token(&self, npub: &str, host: &str) -> Result<()> {
         tokens::delete(&self.conn, npub, host)
     }

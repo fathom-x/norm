@@ -97,16 +97,13 @@ pub fn build_full_router(state: AppState, issuer_url: String) -> Router {
         pending: PendingMap::default(),
     };
 
-    let mcp = McpState::new(
-        state.db.clone(),
-        state.overpay.clone(),
-        state.host_key.clone(),
-    )
-    .with_evm(state.evm.rpc_url.clone(), state.evm.network.clone())
-    .with_zcash(
-        state.zcash.lightwalletd.clone(),
-        state.zcash.network.clone(),
-    );
+    let mcp = McpState::new(state.db.clone(), state.overpay.clone())
+        .with_legacy_host_keys(state.legacy_host_keys.clone())
+        .with_evm(state.evm.rpc_url.clone(), state.evm.network.clone())
+        .with_zcash(
+            state.zcash.lightwalletd.clone(),
+            state.zcash.network.clone(),
+        );
     let app_for_auth = state.clone();
     let auth: BearerAuthCheck = Arc::new(move |bearer: Option<&str>| match bearer {
         Some(b) => oauth_as::lookup_token(&app_for_auth, b),

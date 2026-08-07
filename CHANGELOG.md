@@ -4,6 +4,36 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### `wait_for_order` streams the seller's output as it is generated
+
+- When a seller publishes its work in progress (an LLM streaming tokens,
+  say), each `notifications/progress` frame now carries the newly generated
+  text in `data.delta` — only what is new since the previous frame — with
+  the text itself as the human-readable message. A streamed
+  `tools/call` therefore reads as the answer arriving rather than as a
+  sequence of "still in flight" ticks.
+- The buffer is read from `partial_content` on `GET /api/v1/orders/:id`.
+  Polls that find nothing new fall back to the old status line, so an order
+  from a seller that doesn't stream behaves exactly as before, and the final
+  result is still the complete `delivered_content`.
+
+### Fixed: CLI-authorized wallets got 401s from the MCP tools
+
+- **Overpay bearers are keyed by the Overpay host, everywhere.**
+  `owallet authorize` filed the bearer under the Overpay API URL, but
+  `owallet serve` built its state with the local OAuth **issuer** URL as the
+  token key — so a wallet linked from the CLI looked unlinked to the MCP
+  tools, which fell back to NIP-98 and 401'd, until the user re-authorized
+  through the dashboard. `AppState` and `McpState` now derive the key from
+  their Overpay client (`OverpayClient::host_key()`), so the two can't drift.
+- **`AppState::public_base_url`** carries the issuer URL that the dashboard's
+  OAuth `redirect_uri` is built from — the role `host_key` was doing double
+  duty for.
+- **Existing tokens migrate on first read.** `Database::read_token_migrating`
+  re-files a bearer stored under a legacy host key (the issuer URL, or a
+  pre-normalization raw URL) onto the canonical key, so wallets linked
+  through the dashboard before this fix keep working without re-authorizing.
+
 ### Zcash (Orchard-only) support
 
 - **New `owallet-zcash` crate** built on librustzcash (the `zecrocks/zkv`

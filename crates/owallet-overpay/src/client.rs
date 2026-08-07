@@ -17,6 +17,23 @@ use crate::models::{
     PurchaseCreditsResponse, RedeemCreditsRequest, RedeemCreditsResponse, WebSessionResponse,
 };
 
+/// Canonical key an Overpay bearer token is filed under in the wallet DB's
+/// `tokens` table: the Overpay API base URL, normalized and without a
+/// trailing slash.
+///
+/// Every entry point that stores or reads an Overpay bearer has to agree on
+/// this — `owallet authorize`, the dashboard OAuth callback, and the MCP
+/// tools all read the same row. Keying by anything local to one of those
+/// entry points (the dashboard's own issuer URL, say) makes a wallet linked
+/// through one path look unlinked to the others.
+#[must_use]
+pub fn host_key(overpay_base_url: &str) -> String {
+    match Url::parse(overpay_base_url) {
+        Ok(u) => u.as_str().trim_end_matches('/').to_string(),
+        Err(_) => overpay_base_url.trim_end_matches('/').to_string(),
+    }
+}
+
 /// Authentication strategy for a single request.
 pub enum Auth<'a> {
     /// No `Authorization` header (e.g. public marketplace endpoints).
@@ -80,6 +97,14 @@ impl OverpayClient {
 
     pub fn base_url(&self) -> &Url {
         &self.base_url
+    }
+
+    /// Token-store key for the Overpay host this client talks to. Deriving
+    /// it from the client means a caller can't file a bearer under one host
+    /// and look it up under another. See [`host_key`].
+    #[must_use]
+    pub fn host_key(&self) -> String {
+        host_key(self.base_url.as_str())
     }
 
     pub fn public_url(&self) -> &Url {
@@ -523,4 +548,37 @@ async fn decode_value(resp: Response) -> Result<Value, OverpayError> {
         });
     }
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+#[cfg(test)]
+mod host_key_tests {
+    use super::*;
+
+    #[test]
+    fn trailing_slash_does_not_change_the_key() {
+        assert_eq!(host_key("http://localhost:3001/"), "http://localhost:3001");
+        assert_eq!(host_key("http://localhost:3001"), "http://localhost:3001");
+    }
+
+    #[test]
+    fn client_and_free_fn_agree() {
+        // The CLI has the raw configured URL; `serve` only has the built
+        // client. Both have to land on the same row.
+        let raw = "http://localhost:3001/";
+        let client = OverpayClient::new(raw).unwrap();
+        assert_eq!(client.host_key(), host_key(raw));
+    }
+
+    #[test]
+    fn a_path_prefixed_host_keeps_its_path() {
+        assert_eq!(
+            host_key("https://gw.example/overpay/"),
+            "https://gw.example/overpay"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_url_falls_back_to_a_trim() {
+        assert_eq!(host_key("not a url/"), "not a url");
+    }
 }

@@ -11,7 +11,8 @@
 //!   `owallet_pending_auth` cookie, and 302-redirects to Overpay's
 //!   `/oauth/authorize`.
 //! - `GET /wallet/authorize/callback` — exchanges the PKCE code, stores
-//!   the resulting bearer under `(npub, host_key)`, best-effort refreshes
+//!   the resulting bearer under `(npub, host_key)` — keyed by the *Overpay*
+//!   host, so `owallet authorize` on the CLI finds it too — best-effort refreshes
 //!   the cached username, and redirects back to `/wallet?notice=authorized`.
 
 use std::time::{Duration, Instant};
@@ -48,14 +49,7 @@ pub async fn overpay_login_get(
         return Ok(Redirect::to("/wallet?notice=no-wallet").into_response());
     };
 
-    let stored = {
-        let db = state
-            .db
-            .lock()
-            .map_err(|e| AppError::Internal(format!("db mutex poisoned: {e}")))?;
-        db.read_token(&npub, &state.host_key)?
-    };
-    let Some(token) = stored else {
+    let Some(token) = state.read_overpay_token(&npub)? else {
         return Ok(Redirect::to("/wallet?notice=run-authorize").into_response());
     };
 
@@ -80,7 +74,7 @@ pub async fn authorize_get(
     };
 
     let pkce = Pkce::generate();
-    let redirect_uri = format!("{}/wallet/authorize/callback", state.host_key);
+    let redirect_uri = format!("{}/wallet/authorize/callback", state.public_base_url);
 
     let reg = state
         .overpay

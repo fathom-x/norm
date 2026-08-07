@@ -134,13 +134,10 @@ pub async fn sync_post(
     };
 
     // Reuse the `sync_purchases` MCP tool bound to the active wallet.
-    let mcp = owallet_mcp::McpState::new(
-        state.db.clone(),
-        state.overpay.clone(),
-        state.host_key.clone(),
-    )
-    .with_evm(state.evm.rpc_url.clone(), state.evm.network.clone())
-    .with_npub(Some(npub));
+    let mcp = owallet_mcp::McpState::new(state.db.clone(), state.overpay.clone())
+        .with_legacy_host_keys(state.legacy_host_keys.clone())
+        .with_evm(state.evm.rpc_url.clone(), state.evm.network.clone())
+        .with_npub(Some(npub));
 
     let result: Value =
         match owallet_mcp::tools::dispatch(&mcp, "sync_purchases", json!({}), None).await {
