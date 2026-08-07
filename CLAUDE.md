@@ -69,6 +69,82 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   bearer-or-derive-key branch in `commands/account.rs` (for the CLI),
   so users without a stored token still authenticate via wallet key.
 
+- **`/v1` OpenAI-compatible endpoint** (`owallet-mcp/src/openai_compat.rs`,
+  mounted by `owallet-http`). Currently hardcoded to exactly two listings
+  — "OpenRouter Inference" (seller `openrouter-bot`, chat) and "Run Python
+  Code" (seller `exec`, the one tool the model can call) — resolved the
+  same way via `resolve_listing_id_cached(state, seller_slug, title,
+  cache)`. **The tool side is expected to generalize**: more listings
+  (storage, compute, …) are planned, each of which is naturally a tool, so
+  treat the `PYTHON_*` / `RUN_PYTHON_TOOL_NAME` constants,
+  `run_python_tool_def`, `extract_python_delivered`, and
+  `execute_tool_call`'s name dispatch as the things a multi-tool router
+  replaces rather than as settled design. Everything a tool definition
+  needs is already on the listing — `preferred_slug` → `function.name`,
+  `description` → `function.description`, `buyer_note_schema` →
+  `function.parameters` (already used verbatim that way) — so the missing
+  piece is only *which* listings are tools; `Listing#metadata` is the
+  established behavior gate for that kind of marker (cf.
+  `metadata["service"]`, `metadata["delivery_eta"]`). See PR #383's
+  reviewer question for the design sketch and the caller-supplied-`tools`
+  tradeoff that goes with it. Both the model list (`GET /v1/models`) and
+  the `run_python` tool's JSON schema (`run_python_tool_def`) are read
+  live off their listing's own schema via `get_listing_value` rather than
+  duplicated in Rust — changing either listing's Ruby side
+  (`MODEL_OPTIONS`, `buyer_note_schema`) needs no Rust change to match,
+  and any general router should preserve that property.
+  `partial_output`/`new_output_since`/`WAIT_TERMINAL_STATUSES` in
+  `tools.rs` are `pub(crate)` specifically so this module can reuse
+  `wait_for_order`'s streaming-diff logic rather than reimplementing it.
+  **The tool loop is server-side and transparent**: a tool call never
+  reaches the HTTP caller — `run_agentic_loop` (buffered) / the streaming
+  generator's own copy of the same loop shape executes `run_python` as a
+  *second, real, separately-paid* order and feeds the result back for
+  another OpenRouter turn, capped at `MAX_TOOL_ITERATIONS` (real spend per
+  iteration, not just latency, is what bounds this — note this caps
+  *iterations*, and once more than one tool exists a single iteration can
+  call several separately-priced ones, so a per-request ceiling in dollars
+  is the right bound for a multi-tool router). A failed tool
+  execution becomes an `{"error": ...}` tool-result message fed back to
+  the model rather than aborting the request — see `execute_tool_call`'s
+  doc comment for why. The request timeout (120s) and poll cadence (1s)
+  are `const`s, not request parameters — real OpenAI clients have no way
+  to ask a server for a different timeout, so this doesn't either — but
+  tests need short values to avoid a 120s-real-time test, hence the
+  private `router_with_timing(state, timeout, poll)` construction-time
+  knob and the `Ctx` wrapper struct (kept separate from `McpState` on
+  purpose — these fields are HTTP-specific and don't belong on the struct
+  MCP tool calls share). `owallet install --opencode-*`
+  (`crates/owallet/src/commands/install.rs`) writes an OpenCode `provider`
+  entry pointed at this endpoint, fetching the model list the same
+  drift-avoidance way — `fetch_models` reads the OpenRouter listing's own
+  `buyer_note_schema` straight off Overpay, *not* a second hardcoded copy
+  and *not* the running server's `/v1/models`, so `owallet serve` does not
+  have to be up for `install` to work. An unreachable Overpay is a warning,
+  not a hard failure: `build_provider_entries` still writes a provider
+  entry, with just `DEFAULT_MODEL` in it. It deliberately writes **no**
+  `options.apiKey` — OpenCode prompts for the key and keeps it in its own
+  auth store (`~/.local/share/opencode/auth.json`), so a placeholder there
+  is at best inert and at worst overrides the real key; a key the user set
+  by hand is preserved. `--opencode-global` resolves
+  `$XDG_CONFIG_HOME/opencode` or `~/.config/opencode` — **not**
+  `dirs::config_dir()`, which on macOS is `~/Library/Application Support`
+  where OpenCode never looks. The file is edited through jsonc-parser's
+  CST (the JSON analogue of the Codex writer's `toml_edit`) because
+  OpenCode's config is JSONC and users comment blocks out by hand; a
+  strict `serde_json` read rejects a file OpenCode itself accepts, and a
+  `to_string_pretty` rewrite would silently delete every comment.
+  **`DEFAULT_MODEL` (`"default"`)** is a sentinel model id, always listed
+  first by `GET /v1/models` and always accepted by `validate_request`
+  without a live catalog fetch — no real OpenRouter id can collide with it
+  (those are always `vendor/model-name`). It's forwarded to the listing's
+  `buyer_note.model` unchanged; `OpenrouterInferenceListing#coerce_model`
+  (Ruby) is what actually resolves it to a concrete model, the same way it
+  already treats any string outside its own `MODEL_OPTIONS`. `install`'s
+  copy of this constant (`crates/owallet/src/commands/install.rs`) is a
+  plain literal, not a cross-crate import — keep the two in sync by hand
+  if this ever changes.
+
 - **host_key vs public_base_url.** Overpay bearers live in `tokens`
   under `(npub, host_key)`, where `host_key` is always the **Overpay
   API** URL — `owallet_overpay::host_key(rails_url)`, or equivalently

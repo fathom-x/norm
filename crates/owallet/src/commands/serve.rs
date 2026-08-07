@@ -148,6 +148,10 @@ pub fn run_with_cli(
                 cfg.label, cfg.bind
             );
             println!(
+                "[{}]   OpenAI-compatible provider = {}/v1",
+                cfg.label, cfg.issuer_url
+            );
+            println!(
                 "[{}]   Overpay = {} · EVM = {} ({})",
                 cfg.label, cfg.rails_url, cfg.evm_rpc_url, cfg.evm_network
             );

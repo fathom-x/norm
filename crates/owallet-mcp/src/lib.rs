@@ -6,6 +6,7 @@
 //! direct: no SDK pull-in, no transport abstraction.
 
 pub mod jsonrpc;
+pub mod openai_compat;
 pub mod progress;
 pub mod render;
 pub mod state;

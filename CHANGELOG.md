@@ -4,6 +4,73 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### OpenAI-compatible `/v1` endpoint (fathom-x/overpay#381)
+
+- **`GET /v1/models` and `POST /v1/chat/completions`**, mounted alongside
+  `/wallet`, `/mcp`, and `/oauth`. Lets a client that speaks the OpenAI Chat
+  Completions API — most immediately, [OpenCode](https://opencode.ai) as a
+  custom "provider" — use Overpay for inference with no Claude/OpenAI/etc
+  API key of its own: the wallet's own stored Overpay auth pays for each
+  request through the same merchant-credits flow as the `redeem_merchant_credits`
+  MCP tool.
+- **Hardcoded to the "OpenRouter Inference" listing**, per the issue. The
+  model catalog is read live off that listing's own
+  `buyer_note_schema.properties.model.enum` rather than duplicated in Rust,
+  so it can't drift from the curated list on the Ruby side. The listing id
+  itself can't be a literal constant (it's derived from the bot's private
+  key and differs per environment), so it's resolved once by seller slug +
+  title and cached for the process's lifetime.
+- **Streaming reuses the `wait_for_order` machinery** — the same
+  `partial_content` polling/diffing this release already added, reformatted
+  as OpenAI `chat.completion.chunk` SSE frames. Falls back to the full
+  delivered text as one catch-up chunk if an order finishes before the
+  first poll ever observes a partial chunk, or if the streamed prefix fell
+  short of what was ultimately delivered.
+- **Agentic tool-calling, run entirely server-side.** Every turn advertises
+  one tool — `run_python`, backed by the "Run Python Code" listing
+  (`code_executor` bot, seller slug `exec`). When the model calls it, this
+  endpoint executes it by placing and paying for a *second, real* Overpay
+  order, feeds stdout/stderr back to the model, and loops until a turn
+  produces no more tool calls — the HTTP caller never sees a `tool_call`,
+  just a normal chat completion that happens to have run code along the
+  way. The tool's JSON schema is the Python listing's own
+  `buyer_note_schema`, read live for the same drift-avoidance reason as the
+  model list. Caller-supplied `tools` are not accepted — this endpoint owns
+  tool selection, since it's the one actually executing them. Each
+  iteration that ends in a tool call is a real, separately-paid order on
+  top of the OpenRouter order itself, so a hard cap
+  (`MAX_TOOL_ITERATIONS = 4`) bounds a runaway conversation's real spend.
+- **No bearer/API-key check of its own** — same trust model as the
+  dashboard: whoever can reach the port already has the wallet.
+- **`owallet serve` prints the provider's own URL on startup**, alongside
+  the existing dashboard/MCP/OAuth line, and **`owallet install
+  --opencode-*` now also registers it as an OpenCode model provider** (not
+  just the MCP tool source it already wired up) — fetching the model
+  catalog live from the running server's `GET /v1/models` rather than
+  hardcoding it a second time in the CLI. A server that isn't reachable at
+  install time is a warning, not a hard failure: the MCP entry and any
+  other install targets still get written, and the provider entry falls
+  back to a single model, `"default"`, rather than being skipped.
+- **`"default"` is always a valid model**, listed first by `GET /v1/models`
+  and accepted by `/v1/chat/completions` without a live catalog check —
+  exactly what lets `install` write a working provider entry even when it
+  couldn't reach a server to fetch the real list. It's not a real
+  OpenRouter model id (those are always `vendor/model-name`); the listing's
+  own `coerce_model` resolves it to a concrete model the same way it
+  already handles any unrecognized or stale id, before ever calling
+  OpenRouter.
+
+### Fixed: `install --opencode-global` wrote where OpenCode never looks (macOS)
+
+- The global OpenCode target used `dirs::config_dir()`, which resolves to
+  `~/Library/Application Support` on macOS — so `owallet install
+  --opencode-global` silently wrote a config OpenCode never read, and left
+  the real `~/.config/opencode/opencode.json` untouched. OpenCode follows
+  the XDG layout on every platform, so this now resolves
+  `$XDG_CONFIG_HOME/opencode` (when absolute) or `~/.config/opencode`
+  directly. Linux was already correct — `dirs::config_dir()` agrees there;
+  macOS is where the two diverge.
+
 ### `wait_for_order` streams the seller's output as it is generated
 
 - When a seller publishes its work in progress (an LLM streaming tokens,

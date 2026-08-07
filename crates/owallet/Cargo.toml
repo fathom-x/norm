@@ -32,6 +32,10 @@ url = "2"
 serde = { workspace = true }
 serde_urlencoded = "0.7"
 toml_edit = "0.22"
+# `cst` is the JSON analogue of toml_edit: edit in place while preserving
+# comments/formatting. OpenCode's config is JSONC (its own docs use
+# `opencode.jsonc`), and users comment blocks out by hand.
+jsonc-parser = { version = "0.33", features = ["cst"] }
 dirs = "5"
 
 clap = { version = "4", features = ["derive"] }
@@ -41,6 +45,7 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
