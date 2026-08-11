@@ -976,6 +976,132 @@ async fn purchase_detail_renders_delivered_content() {
     assert!(body.contains("Delivered content"));
 }
 
+/// The buyer's own submitted input (code to run, a prompt, …) renders as an
+/// "Order input" section — schema-driven listings store it as a JSON object
+/// serialized to a string, one labeled block per field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn purchase_detail_renders_the_buyer_note() {
+    let (server, tmp) = dashboard_with_overpay("http://127.0.0.1:1", "http://owallet.test").await;
+    login_admin(&server).await;
+    seed_purchase(
+        &tmp,
+        &abandon_npub_str(),
+        json!({
+            "order_id": "o2", "product_title": "Run Python Code",
+            "fulfillment_status": "delivered",
+            "buyer_note": "{\"code\": \"print(1 +\\n2)\", \"stdin\": \"\"}",
+            "delivered_content": "3",
+            "delivered_content_type": "text/plain",
+        }),
+    );
+
+    let body = server.get("/wallet/purchases/o2").await.text();
+    assert!(body.contains("Order input"), "body: {body}");
+    assert!(body.contains("code"));
+    assert!(body.contains("print(1 +"));
+    // The deliverable leads the page; the input the buyer already knows
+    // trails it.
+    let content_pos = body.find("Delivered content").unwrap();
+    let input_pos = body.find("Order input").unwrap();
+    assert!(content_pos < input_pos, "output should render above input");
+
+    // A plain-text note renders too; an absent one hides the section.
+    seed_purchase(
+        &tmp,
+        &abandon_npub_str(),
+        json!({"order_id": "o3", "buyer_note": "leave at the door"}),
+    );
+    let body = server.get("/wallet/purchases/o3").await.text();
+    assert!(body.contains("Order input"));
+    assert!(body.contains("leave at the door"));
+
+    seed_purchase(&tmp, &abandon_npub_str(), json!({"order_id": "o4"}));
+    let body = server.get("/wallet/purchases/o4").await.text();
+    assert!(!body.contains("Order input"), "body: {body}");
+
+    // A /v1-provider order: `messages` renders as a role-labeled transcript
+    // (including assistant tool calls) and `tools` as a compact definition
+    // list with the JSON-schema parameters folded away — not raw JSON blobs.
+    let note = json!({
+        "messages": [
+            {"role": "user", "content": "add the numbers"},
+            {"role": "assistant", "tool_calls": [
+                {"type": "function", "function": {"name": "run_python", "arguments": "{\"code\": \"print(1+2)\"}"}}
+            ]},
+            {"role": "tool", "content": "3"}
+        ],
+        "model": "openai/gpt-5-mini",
+        "tools": [
+            {"type": "function", "function": {
+                "name": "run_python",
+                "description": "Run Python code",
+                "parameters": {"type": "object", "properties": {"code": {"type": "string"}}}
+            }}
+        ]
+    });
+    seed_purchase(
+        &tmp,
+        &abandon_npub_str(),
+        json!({"order_id": "o5", "buyer_note": note.to_string()}),
+    );
+    let body = server.get("/wallet/purchases/o5").await.text();
+    assert!(body.contains("add the numbers"), "body: {body}");
+    assert!(body.contains("assistant"));
+    assert!(body.contains("→ run_python("));
+    assert!(body.contains("<details"));
+    assert!(body.contains("Run Python code"));
+    // The transcript replaced the raw-JSON fallback for messages.
+    assert!(!body.contains("&quot;role&quot;"), "body: {body}");
+}
+
+/// `x-widget: markdown` delivered content renders as real HTML — formatting
+/// comes through, seller-authored markup does not: raw HTML is escaped and
+/// non-http(s) link destinations are neutralized.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn purchase_detail_renders_markdown_as_html() {
+    let (server, tmp) = dashboard_with_overpay("http://127.0.0.1:1", "http://owallet.test").await;
+    login_admin(&server).await;
+    let content = json!({
+        "credits_refunded": false,
+        "description": "## Result\n\nThe answer is **42**.\n\n<script>alert(1)</script>\n\n[click](javascript:alert(2))"
+    });
+    seed_purchase(
+        &tmp,
+        &abandon_npub_str(),
+        json!({
+            "order_id": "omd", "product_title": "Inference",
+            "fulfillment_status": "delivered",
+            "delivered_content": content.to_string(),
+            "delivered_content_type": "application/json",
+            "listing": {"delivered_content_schema": {
+                "properties": {
+                    "credits_refunded": {"type": "boolean"},
+                    "description": {"x-widget": "markdown"}
+                }
+            }},
+        }),
+    );
+
+    let body = server.get("/wallet/purchases/omd").await.text();
+    assert!(body.contains("<h2>Result</h2>"), "body: {body}");
+    assert!(body.contains("<strong>42</strong>"));
+    // The content-bearing markdown field renders above scalar metadata,
+    // even though "credits_refunded" sorts alphabetically before
+    // "description".
+    let answer = body.find("<h2>Result</h2>").unwrap();
+    let meta = body.find("Credits Refunded").unwrap();
+    assert!(answer < meta, "the answer should lead the metadata");
+    assert!(
+        !body.contains("<script>alert(1)</script>"),
+        "raw HTML must be escaped"
+    );
+    assert!(body.contains("&lt;script&gt;"));
+    assert!(
+        !body.contains("javascript:alert"),
+        "unsafe link scheme must be dropped"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn purchase_detail_404_for_uncached() {
     let (server, _tmp) = dashboard_with_overpay("http://127.0.0.1:1", "http://owallet.test").await;
@@ -1000,6 +1126,7 @@ async fn purchases_sync_backfills_and_redirects_with_notice() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": {"id": "o1", "fulfillment_status": "delivered", "delivered_content": "hi"}
         })))
+        .expect(1)
         .mount(&overpay)
         .await;
 
@@ -1016,6 +1143,15 @@ async fn purchases_sync_backfills_and_redirects_with_notice() {
     // The synced order is now visible in the list.
     let body = server.get("/wallet/purchases").await.text();
     assert!(body.contains("/wallet/purchases/o1"), "body: {body}");
+
+    // A second sync sees the order already cached in a terminal state and
+    // skips the per-order detail fetch — the `.expect(1)` on the detail
+    // mock (verified on drop) is what proves no second round-trip happened.
+    let res = server.post("/wallet/purchases/sync").await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    let loc = res.header("location");
+    let loc = loc.to_str().unwrap();
+    assert!(loc.contains("count=0"), "loc: {loc}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -40,6 +40,24 @@ pub struct DashboardTemplate {
     pub eth_balance: Option<String>,
     /// Pre-formatted USDC balance string. Same semantics as `eth_balance`.
     pub usdc_balance: Option<String>,
+    pub provider_keys: Vec<ProviderKeyListRow>,
+}
+
+pub struct ProviderKeyListRow {
+    pub id: String,
+    /// `owk_xxxxxxxx…` display prefix ("—" for rows predating the column).
+    pub key: String,
+    /// Who minted it: "dashboard" / "browser login" ("—" when unknown).
+    pub label: String,
+    /// Pre-formatted `YYYY-MM-DD HH:MM UTC`.
+    pub created: String,
+}
+
+#[derive(Template)]
+#[template(path = "provider_key_created.html")]
+pub struct ProviderKeyCreatedTemplate {
+    pub npub: String,
+    pub key: String,
 }
 
 #[derive(Template)]
@@ -114,6 +132,9 @@ pub struct PurchaseDetailTemplate {
     pub badge_class: String,
     pub status_label: String,
     pub meta: Vec<(String, String)>,
+    /// Pre-rendered, escaped buyer-note HTML (what the buyer submitted with
+    /// the order) — injected with `|safe`; empty when the snapshot has none.
+    pub buyer_input_html: String,
     /// Pre-rendered, escaped delivered-content HTML — injected with `|safe`.
     pub content_html: String,
 }

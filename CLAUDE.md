@@ -126,7 +126,20 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   `options.apiKey` — OpenCode prompts for the key and keeps it in its own
   auth store (`~/.local/share/opencode/auth.json`), so a placeholder there
   is at best inert and at worst overrides the real key; a key the user set
-  by hand is preserved. `--opencode-global` resolves
+  by hand is preserved. `/v1` requires a wallet-scoped `owk_` provider key
+  (hashed in the `provider_keys` table; dashboard card on `/wallet` creates
+  and revokes them, and requests are pinned to the key's wallet).
+  `install --opencode-*` also drops a **generated auth plugin**
+  (`plugin/owallet.js` beside the target `opencode.json`, template
+  `OPENCODE_AUTH_PLUGIN_RUNTIME` in `install.rs`; OpenCode auto-discovers
+  `{plugin,plugins}/*.{ts,js}`, every export must be a plugin function) so
+  `opencode auth login` offers "Browser login": PKCE against the local
+  OAuth AS with `scope=provider`, whose token exchange mints a provider key
+  instead of an `/mcp` access token (`oauth_as.rs`). The plugin's callback
+  must clear its race timer and close its localhost listener — either one
+  left live pins the one-shot `opencode auth login` process (found the
+  hard way; there's a node-driven E2E recipe in the session notes).
+  `--opencode-global` resolves
   `$XDG_CONFIG_HOME/opencode` or `~/.config/opencode` — **not**
   `dirs::config_dir()`, which on macOS is `~/Library/Application Support`
   where OpenCode never looks. The file is edited through jsonc-parser's

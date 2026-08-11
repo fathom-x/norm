@@ -12,6 +12,12 @@
 //! - `POST /oauth/token` — PKCE code exchange (S256 only)
 //! - `GET  /consent` — wallet-password gated approval form
 //! - `POST /consent` — verify password, issue auth code
+//!
+//! Scope selects the credential the code exchange yields: the default
+//! `wallet` scope issues an `at_` access token for `/mcp`, while the
+//! `provider` scope mints a wallet-scoped `owk_` provider key — the
+//! credential `/v1` (OpenAI-compatible endpoint) requires, revocable from
+//! the dashboard's provider-key list.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -79,7 +85,7 @@ async fn well_known_metadata(State(state): State<OAuthAsState>) -> Json<serde_js
         "authorization_endpoint": format!("{iss}/oauth/authorize"),
         "token_endpoint": format!("{iss}/oauth/token"),
         "registration_endpoint": format!("{iss}/oauth/register"),
-        "scopes_supported": ["wallet"],
+        "scopes_supported": ["wallet", "provider"],
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"],
@@ -265,6 +271,9 @@ struct ConsentTemplate {
     wallets: Vec<(String, String)>, // (npub, label)
     default_npub: Option<String>,
     error: Option<String>,
+    /// True when the pending request carries the `provider` scope, i.e.
+    /// approval mints a spendable provider API key rather than an MCP token.
+    provider_scope: bool,
 }
 
 async fn consent_get(
@@ -460,21 +469,35 @@ async fn token_exchange(
         return Err(AppError::BadInput("PKCE verifier mismatch".into()));
     }
 
-    let access_token = format!("at_{}", rand_url_safe(32));
-    {
+    // The `provider` scope short-circuits the local access-token pool: the
+    // exchange mints a wallet-scoped `owk_` provider key instead — the only
+    // credential `/v1` accepts (and `/mcp` does not). It shows up in the
+    // dashboard's provider-key list like a manually created one, so
+    // revocation lives in one place.
+    let wants_provider_key = row.scopes.iter().any(|s| s == "provider");
+    let access_token = {
         let db = state
             .app
             .db
             .lock()
             .map_err(|e| AppError::Internal(format!("db mutex: {e}")))?;
-        db.write_access_token(
-            &access_token,
-            &row.client_id,
-            &row.scopes,
-            None, // non-expiring; the in-memory copy is gone on restart
-            row.npub.as_deref(),
-        )?;
-    }
+        if wants_provider_key {
+            let npub = row.npub.as_deref().ok_or_else(|| {
+                AppError::BadInput("provider scope requires a wallet to bind".into())
+            })?;
+            db.create_provider_key(npub, "browser login")?.1
+        } else {
+            let token = format!("at_{}", rand_url_safe(32));
+            db.write_access_token(
+                &token,
+                &row.client_id,
+                &row.scopes,
+                None, // non-expiring; the in-memory copy is gone on restart
+                row.npub.as_deref(),
+            )?;
+            token
+        }
+    };
 
     Ok(Json(TokenResponse {
         access_token,
@@ -518,11 +541,18 @@ fn render_consent(
         };
         entries.push((w.npub.clone(), label));
     }
+    let provider_scope = state
+        .pending
+        .0
+        .get(session)
+        .map(|p| p.value().scopes.iter().any(|s| s == "provider"))
+        .unwrap_or(false);
     let tpl = ConsentTemplate {
         session: session.to_string(),
         wallets: entries,
         default_npub: default,
         error: error.map(str::to_string),
+        provider_scope,
     };
     Ok(tpl.render()?)
 }

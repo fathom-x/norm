@@ -5,8 +5,15 @@
 {% block body %}
 <div class="card">
   <h1>Authorize owallet</h1>
-  <p>An MCP client is asking for access to your wallet. Pick which wallet
-     it should sign as, and enter that wallet's password to approve.</p>
+  {% if provider_scope %}
+    <p>A client is asking for a <strong>provider API key</strong> — an
+       OpenAI-compatible credential that can spend the selected wallet's
+       merchant credits. Approving creates a key you can revoke any time
+       from the wallet dashboard.</p>
+  {% else %}
+    <p>An MCP client is asking for access to your wallet. Pick which wallet
+       it should sign as, and enter that wallet's password to approve.</p>
+  {% endif %}
 
   {% if let Some(msg) = error %}
     <div class="notice err">{{ msg }}</div>

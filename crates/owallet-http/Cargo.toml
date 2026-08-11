@@ -22,6 +22,9 @@ tower-http = { version = "0.6", features = ["trace"] }
 sha2 = { workspace = true }
 
 askama = "0.12"
+# Markdown → HTML for `x-widget: markdown` delivered content. html feature
+# only — no CLI/simd baggage.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 dashmap = "6"
 cookie = "0.18"

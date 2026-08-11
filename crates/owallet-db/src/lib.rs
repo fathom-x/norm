@@ -7,6 +7,7 @@
 mod access_tokens;
 mod auth_codes;
 mod oauth_clients;
+mod provider_keys;
 mod purchases;
 mod schema;
 mod settings;
@@ -21,12 +22,14 @@ use owallet_crypto::{
     decrypt, derive_key, encrypt, hashes_equal, verify_hash, AesKey, DecryptError,
 };
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroize;
 
 pub use access_tokens::AccessTokenRow;
 pub use auth_codes::AuthCodeRow;
 pub use oauth_clients::OAuthClientRow;
+pub use provider_keys::ProviderKeyRow;
 pub use purchases::PurchaseRow;
 pub use tokens::TokenRow;
 pub use wallet_state::{data_dir, wallet_state_dir, WalletStateDir};
@@ -362,6 +365,53 @@ impl Database {
         Ok(wallets::read_password_hash(&self.conn, npub)?.is_some())
     }
 
+    // ---- OpenAI-compatible provider keys ----
+
+    /// Generate a bearer key bound to one wallet. The raw key is returned
+    /// exactly once; only its SHA-256 verifier is persisted — plus a short
+    /// display prefix (`owk_` + 8 hex) and a creator `label` so the
+    /// dashboard list stays tellable-apart.
+    pub fn create_provider_key(&self, npub: &str, label: &str) -> Result<(ProviderKeyRow, String)> {
+        let mut token_bytes = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut token_bytes);
+        let token = format!("owk_{}", hex::encode(token_bytes));
+
+        let mut id_bytes = [0u8; 16];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id_bytes);
+        let token_prefix = &token[..12];
+        let row = ProviderKeyRow {
+            id: hex::encode(id_bytes),
+            npub: npub.to_string(),
+            created_at: now_secs(),
+            label: Some(label.to_string()),
+            token_prefix: Some(token_prefix.to_string()),
+        };
+        provider_keys::insert(
+            &self.conn,
+            &row.id,
+            &provider_key_hash(&token),
+            npub,
+            row.created_at,
+            label,
+            token_prefix,
+        )?;
+        Ok((row, token))
+    }
+
+    /// Return the wallet authorized by `token`, if it is an active provider
+    /// key. The raw key never enters SQLite; only its verifier is queried.
+    pub fn read_provider_key_npub(&self, token: &str) -> Result<Option<String>> {
+        provider_keys::read_npub(&self.conn, &provider_key_hash(token))
+    }
+
+    pub fn list_provider_keys(&self, npub: &str) -> Result<Vec<ProviderKeyRow>> {
+        provider_keys::list(&self.conn, npub)
+    }
+
+    pub fn delete_provider_key(&self, id: &str, npub: &str) -> Result<()> {
+        provider_keys::delete(&self.conn, id, npub)
+    }
+
     // ---- Per-wallet encrypted state directory (issue #310) ----
 
     /// Open the per-`npub` encrypted state directory (`<data dir>/<npub>/`).
@@ -558,6 +608,10 @@ impl Database {
     pub fn revoke_access_token(&self, token: &str) -> Result<()> {
         access_tokens::delete(&self.conn, token)
     }
+}
+
+fn provider_key_hash(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
 }
 
 impl Drop for Database {

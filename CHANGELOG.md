@@ -40,8 +40,21 @@ All notable changes to the Rust port of `owallet` are documented here.
   iteration that ends in a tool call is a real, separately-paid order on
   top of the OpenRouter order itself, so a hard cap
   (`MAX_TOOL_ITERATIONS = 4`) bounds a runaway conversation's real spend.
-- **No bearer/API-key check of its own** — same trust model as the
-  dashboard: whoever can reach the port already has the wallet.
+- **Requires a wallet-scoped provider API key** (`Authorization: Bearer
+  owk_…`). Keys are minted from the dashboard's "OpenCode provider" card
+  (create/list/revoke per wallet) and every request is pinned to the key's
+  wallet; only a SHA-256 verifier is stored, so a copied database yields no
+  spendable credential. Two ways to get one:
+  - **Dashboard**: create the key on `/wallet` and paste it into the
+    client (OpenCode keeps it in its own auth store).
+  - **Browser login**: the local OAuth AS now honors a `provider` scope —
+    the PKCE code exchange returns a freshly minted provider key instead of
+    an `/mcp` access token. `owallet install --opencode-*` writes a
+    generated auth plugin (`plugin/owallet.js` next to `opencode.json`)
+    that drives this: `opencode auth login` gains a "Browser login" method
+    that opens the consent page, catches the redirect on an ephemeral
+    localhost listener, and stores the minted key. Keys from either path
+    appear in the same dashboard list for revocation.
 - **`owallet serve` prints the provider's own URL on startup**, alongside
   the existing dashboard/MCP/OAuth line, and **`owallet install
   --opencode-*` now also registers it as an OpenCode model provider** (not

@@ -114,8 +114,8 @@ fn print_wallet_table(db: &Database, w: &WalletRow) -> Result<()> {
     }
 
     // Fetch on-chain balances (best-effort).
-    let rails_url =
-        std::env::var("OVERPAY_RAILS_URL").unwrap_or_else(|_| "https://overpay.com".into());
+    let rails_url = std::env::var("OVERPAY_RAILS_URL")
+        .unwrap_or_else(|_| owallet_config::defaults::OVERPAY_RAILS_URL.to_string());
     let (eth_str, usdc_str) = if !address.is_empty() {
         match owallet_evm::chains::from_caip2(&network) {
             Ok(chain) => {

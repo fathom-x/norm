@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}Provider Key{% endblock %}
+
+{% block body %}
+<div class="card">
+  <h1>Provider API key created</h1>
+  <p>This key is authorized to spend merchant credits from <code>{{ npub }}</code>.</p>
+  <p>Copy it now. owallet stores only a verifier and cannot show it again.</p>
+  <div class="field">
+    <label for="provider-key">API key</label>
+    <input id="provider-key" type="text" value="{{ key }}" readonly>
+  </div>
+  <p class="muted">Use this value as <code>provider.overpay.options.apiKey</code> in OpenCode.</p>
+  <p><a class="button" href="/wallet">Return to wallet</a></p>
+</div>
+{% endblock %}
