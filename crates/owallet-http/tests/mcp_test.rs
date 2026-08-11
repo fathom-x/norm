@@ -570,6 +570,157 @@ async fn authorize_redirects_to_consent_for_a_known_client() {
     assert!(loc.starts_with("/consent?session="), "got {loc}");
 }
 
+/// The whole browser-auth path for the OpenAI-compatible endpoint: an OAuth
+/// client requesting `scope=provider` gets an `owk_` provider key from the
+/// code exchange (not an `at_` MCP token), bound to the consented wallet,
+/// visible in the dashboard's revocation list, and accepted by `/v1`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_scope_flow_mints_a_revocable_provider_key() {
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, "http://127.0.0.1:1");
+
+    // Seed a wallet with a per-wallet password (consent verifies it).
+    let db_path = tmp.path().join("test.db");
+    {
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(db.unlock("master-pw").unwrap());
+        db.write_wallet(
+            "npub1evm",
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            None,
+        )
+        .unwrap();
+        db.write_default_npub("npub1evm").unwrap();
+        db.write_wallet_password("npub1evm", "wallet-pw").unwrap();
+    }
+
+    let reg = s
+        .post("/oauth/register")
+        .json(&json!({"redirect_uris": ["http://127.0.0.1:5555/cb"]}))
+        .await;
+    reg.assert_status_ok();
+    let client_id = reg.json::<Value>()["client_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let verifier = "provider-scope-test-verifier-0123456789abcdef";
+    let challenge = {
+        use sha2::{Digest, Sha256};
+        b64url(Sha256::digest(verifier.as_bytes()).as_slice())
+    };
+
+    let res = s
+        .get("/oauth/authorize")
+        .add_query_param("response_type", "code")
+        .add_query_param("client_id", client_id.as_str())
+        .add_query_param("redirect_uri", "http://127.0.0.1:5555/cb")
+        .add_query_param("code_challenge", challenge.as_str())
+        .add_query_param("code_challenge_method", "S256")
+        .add_query_param("scope", "provider")
+        .await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    let loc_hdr = res.header("location");
+    let session = loc_hdr
+        .to_str()
+        .unwrap()
+        .strip_prefix("/consent?session=")
+        .unwrap()
+        .to_string();
+
+    // The consent page says what a provider-scope approval creates.
+    let page = s.get("/consent").add_query_param("session", &session).await;
+    page.assert_status_ok();
+    assert!(page.text().contains("provider API key"));
+
+    let res = s
+        .post("/consent")
+        .form(&json!({
+            "session": session,
+            "npub": "npub1evm",
+            "password": "wallet-pw",
+            "action": "approve",
+        }))
+        .await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    let loc_hdr = res.header("location");
+    let loc = loc_hdr.to_str().unwrap();
+    let code = loc
+        .split(['?', '&'])
+        .find_map(|kv| kv.strip_prefix("code="))
+        .unwrap_or_else(|| panic!("no code in redirect '{loc}'"))
+        .to_string();
+
+    let res = s
+        .post("/oauth/token")
+        .form(&json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": "http://127.0.0.1:5555/cb",
+            "client_id": client_id,
+            "code_verifier": verifier,
+        }))
+        .await;
+    res.assert_status_ok();
+    let key = res.json::<Value>()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        key.starts_with("owk_"),
+        "expected provider key, got '{key}'"
+    );
+
+    // Bound to the consented wallet and listed for dashboard revocation.
+    {
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(db.unlock("master-pw").unwrap());
+        assert_eq!(
+            db.read_provider_key_npub(&key).unwrap().as_deref(),
+            Some("npub1evm")
+        );
+        let listed = db.list_provider_keys("npub1evm").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].label.as_deref(), Some("browser login"));
+        assert_eq!(listed[0].token_prefix.as_deref(), Some(&key[..12]));
+    }
+
+    // /v1 accepts the minted key (anything but 401 proves auth passed —
+    // the model list itself 500s here because Overpay is unreachable) and
+    // still rejects an unknown one.
+    let ok = s
+        .get("/v1/models")
+        .add_header("authorization", format!("Bearer {key}"))
+        .await;
+    assert_ne!(ok.status_code(), StatusCode::UNAUTHORIZED);
+    let bad = s
+        .get("/v1/models")
+        .add_header("authorization", "Bearer owk_bogus")
+        .await;
+    bad.assert_status(StatusCode::UNAUTHORIZED);
+}
+
+/// Tiny base64url(NO_PAD) encoder for the PKCE challenge — mirrors the
+/// private `base64_url` in `oauth_as.rs`.
+fn b64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 0x3f] as char);
+            }
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // MCP tools: merchant credits + buy (formerly stubbed, now wired)
 // ---------------------------------------------------------------------------

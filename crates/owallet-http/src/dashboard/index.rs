@@ -11,7 +11,7 @@ use super::{current_session, redirect_to_login};
 use crate::error::AppError;
 use crate::session::SessionRole;
 use crate::state::AppState;
-use crate::templates::DashboardTemplate;
+use crate::templates::{DashboardTemplate, ProviderKeyListRow};
 
 pub async fn redirect_to_wallet() -> Redirect {
     Redirect::permanent("/wallet")
@@ -34,7 +34,7 @@ pub async fn dashboard(
         return Ok(redirect_to_login().into_response());
     };
 
-    let (wallets, default_npub, active_npub) = {
+    let (wallets, default_npub, active_npub, provider_keys) = {
         let db = state
             .db
             .lock()
@@ -47,7 +47,24 @@ pub async fn dashboard(
             SessionRole::Admin => default_npub.clone(),
         };
 
-        (wallets, default_npub, active_npub)
+        let provider_keys = active_npub
+            .as_deref()
+            .map(|npub| db.list_provider_keys(npub))
+            .transpose()?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|key| ProviderKeyListRow {
+                id: key.id,
+                key: key
+                    .token_prefix
+                    .map(|p| format!("{p}…"))
+                    .unwrap_or_else(|| "—".to_string()),
+                label: key.label.unwrap_or_else(|| "—".to_string()),
+                created: format_timestamp(key.created_at),
+            })
+            .collect();
+
+        (wallets, default_npub, active_npub, provider_keys)
     };
 
     // The stored bearer for the active wallet, used both as the linked-flag
@@ -107,6 +124,7 @@ pub async fn dashboard(
         chain_name: balances.chain_name,
         eth_balance: balances.eth,
         usdc_balance: balances.usdc,
+        provider_keys,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -169,5 +187,17 @@ async fn fetch_balance_strings(evm: &crate::EvmConfig, address: &str) -> Balance
         chain_name: Some(chain.name.to_string()),
         eth: Some(eth),
         usdc: Some(usdc),
+    }
+}
+
+// Same rendering as the purchases page's timestamps.
+fn format_timestamp(ts: i64) -> String {
+    use time::macros::format_description;
+    match time::OffsetDateTime::from_unix_timestamp(ts).ok() {
+        Some(dt) => {
+            let fmt = format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
+            dt.format(&fmt).unwrap_or_else(|_| "—".to_string())
+        }
+        None => "—".to_string(),
     }
 }

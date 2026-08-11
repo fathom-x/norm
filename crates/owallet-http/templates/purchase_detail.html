@@ -18,6 +18,21 @@
                      white-space:pre-wrap; word-break:break-all; font-size:.85rem; }
   .delivered-text  { color:#374151; line-height:1.5; }
   .delivered-link a { color:#2563eb; }
+  .delivered-markdown { color:#374151; line-height:1.55; }
+  .delivered-markdown h1, .delivered-markdown h2, .delivered-markdown h3 {
+    margin:14px 0 6px; font-size:1.05rem; }
+  .delivered-markdown p { margin:8px 0; }
+  .delivered-markdown ul, .delivered-markdown ol { margin:8px 0 8px 22px; }
+  .delivered-markdown pre { background:#f3f4f6; padding:14px; border-radius:8px;
+    overflow-x:auto; white-space:pre-wrap; word-break:break-all; font-size:.85rem; margin:8px 0; }
+  .delivered-markdown code { background:#f3f4f6; padding:1px 5px; border-radius:4px; font-size:.85rem; }
+  .delivered-markdown pre code { background:none; padding:0; }
+  .delivered-markdown blockquote { border-left:3px solid #e5e7eb; margin:8px 0;
+    padding-left:12px; color:#6b7280; }
+  .delivered-markdown table { border-collapse:collapse; margin:8px 0; }
+  .delivered-markdown th, .delivered-markdown td { border:1px solid #e5e7eb; padding:4px 10px; }
+  .delivered-markdown img { max-width:100%; border-radius:8px; }
+  .delivered-markdown a { color:#2563eb; }
 </style>
 
 <nav class="card" style="padding:14px 24px; display:flex; justify-content:space-between; align-items:center;">
@@ -38,6 +53,13 @@
 <div class="card">
   <h2>Delivered content</h2>
   {{ content_html|safe }}
+</div>
+{% endif %}
+
+{% if !buyer_input_html.is_empty() %}
+<div class="card">
+  <h2>Order input</h2>
+  {{ buyer_input_html|safe }}
 </div>
 {% endif %}
 {% endblock %}

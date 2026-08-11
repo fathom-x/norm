@@ -28,17 +28,15 @@
 //! `tools` are not accepted — this endpoint owns tool selection, since it
 //! is the one actually executing them.
 //!
-//! This endpoint trusts whoever can reach it (same model as the
-//! dashboard) — no bearer/API-key check on the incoming request. The
-//! wallet's own [`McpState::resolve_owned_auth`] is what actually
-//! authenticates to Overpay to place and pay for every order (the
-//! OpenRouter turns and each tool execution alike).
+//! Requests require a wallet-scoped provider API key issued by the dashboard.
+//! It binds spending to that wallet; [`McpState::resolve_owned_auth`] then
+//! authenticates it to Overpay for every order.
 
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Json, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -225,8 +223,12 @@ struct ModelList {
     data: Vec<ModelObject>,
 }
 
-async fn list_models(State(ctx): State<Ctx>) -> Result<Json<ModelList>, OpenAiError> {
-    let mut models = resolve_models(&ctx.mcp).await?;
+async fn list_models(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+) -> Result<Json<ModelList>, OpenAiError> {
+    let mcp = authenticate_provider_key(&ctx.mcp, &headers)?;
+    let mut models = resolve_models(&mcp).await?;
     // Always offered, first — see `DEFAULT_MODEL`'s doc comment.
     models.insert(0, DEFAULT_MODEL.to_string());
     Ok(Json(ModelList {
@@ -437,8 +439,14 @@ fn normalize_messages(raw: &[Value]) -> Result<Vec<Value>, OpenAiError> {
 
 async fn chat_completions(
     State(ctx): State<Ctx>,
+    headers: HeaderMap,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Response {
+    let mcp = match authenticate_provider_key(&ctx.mcp, &headers) {
+        Ok(mcp) => mcp,
+        Err(e) => return e.into_response(),
+    };
+    let ctx = Ctx { mcp, ..ctx };
     if let Err(e) = validate_request(&ctx.mcp, &req).await {
         return e.into_response();
     }
@@ -451,6 +459,29 @@ async fn chat_completions(
             Err(e) => e.into_response(),
         }
     }
+}
+
+/// Check an OpenAI-compatible bearer credential and return state pinned to
+/// its wallet. Provider key verifiers live in SQLite, so a database copy does
+/// not reveal usable spending credentials.
+fn authenticate_provider_key(
+    state: &McpState,
+    headers: &HeaderMap,
+) -> Result<McpState, OpenAiError> {
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| OpenAiError::Unauthorized("missing provider API key".into()))?;
+    let npub = state
+        .db
+        .lock()
+        .map_err(|e| OpenAiError::internal(format!("db mutex: {e}")))?
+        .read_provider_key_npub(value)
+        .map_err(|e| OpenAiError::internal(format!("provider key lookup: {e}")))?
+        .ok_or_else(|| OpenAiError::Unauthorized("invalid provider API key".into()))?;
+    Ok(state.with_npub(Some(npub)))
 }
 
 async fn validate_request(
@@ -1286,19 +1317,59 @@ mod tests {
     }
 
     fn test_server(state: McpState) -> TestServer {
-        TestServer::new(router(state)).unwrap()
+        let key = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "test")
+            .unwrap()
+            .1;
+        let mut server = TestServer::new(router(state)).unwrap();
+        server.add_header(header::AUTHORIZATION, format!("Bearer {key}"));
+        server
     }
 
     fn fast_test_server(state: McpState) -> TestServer {
         // Real production timing (120s/1s) would make the timeout test
         // itself time out CI. This is the one router-construction knob
         // `router_with_timing` exists for.
-        TestServer::new(router_with_timing(
-            state,
-            Duration::from_millis(150),
-            Duration::from_millis(30),
-        ))
-        .unwrap()
+        let key = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "test")
+            .unwrap()
+            .1;
+        let app = router_with_timing(state, Duration::from_millis(150), Duration::from_millis(30));
+        let mut server = TestServer::new(app).unwrap();
+        server.add_header(header::AUTHORIZATION, format!("Bearer {key}"));
+        server
+    }
+
+    #[test]
+    fn provider_key_is_required_and_binds_the_wallet() {
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state("http://127.0.0.1:1", &tmp);
+        let key = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "test")
+            .unwrap()
+            .1;
+
+        assert!(authenticate_provider_key(&state, &HeaderMap::new()).is_err());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {key}").parse().unwrap(),
+        );
+        let authenticated = match authenticate_provider_key(&state, &headers) {
+            Ok(state) => state,
+            Err(_) => panic!("valid provider key should authenticate"),
+        };
+        assert_eq!(authenticated.active_npub.as_deref(), Some("npub1abandon"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

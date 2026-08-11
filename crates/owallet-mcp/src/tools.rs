@@ -1256,6 +1256,7 @@ async fn sync_purchases(state: &McpState, args: Value) -> Result<Value, ToolErro
     };
 
     let mut synced = 0u64;
+    let mut skipped = 0u64;
     let mut errors: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut cursor: Option<String> = None;
@@ -1300,6 +1301,22 @@ async fn sync_purchases(state: &McpState, args: Value) -> Result<Value, ToolErro
             if !seen.insert(oid.to_string()) {
                 continue;
             }
+            // The list is filtered to delivered orders, which are terminal —
+            // a cached copy can't change, and the cache always holds the full
+            // payload (stripping happens on the response, not the cache). So
+            // only the per-order detail fetch for *missing* rows is worth an
+            // HTTP round-trip; everything else is a skip.
+            let cached_terminal = state
+                .db
+                .lock()
+                .ok()
+                .and_then(|db| db.read_purchase(&npub, oid).ok().flatten())
+                .and_then(|p| p.fulfillment_status)
+                .is_some_and(|s| s == "delivered" || WAIT_TERMINAL_STATUSES.contains(&s.as_str()));
+            if cached_terminal {
+                skipped += 1;
+                continue;
+            }
             match state.overpay.get_order_value(oid, auth.as_auth()).await {
                 Ok(detail) => {
                     if let Some(order) = unwrap_order_payload(&detail) {
@@ -1322,7 +1339,7 @@ async fn sync_purchases(state: &McpState, args: Value) -> Result<Value, ToolErro
         }
     }
 
-    Ok(json!({ "synced": synced, "errors": errors }))
+    Ok(json!({ "synced": synced, "skipped": skipped, "errors": errors }))
 }
 
 // ---------------------------------------------------------------------------

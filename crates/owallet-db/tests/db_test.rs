@@ -10,7 +10,7 @@ const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon \
      abandon abandon abandon abandon abandon about";
 const NPUB: &str = "npub1testabcdef1234567890";
 const TOKEN: &str = "tok_test_abcdef123456";
-const HOST: &str = "overpay-eykm.onrender.com";
+const HOST: &str = "overpay.example.com";
 
 struct TestDb {
     db: Database,
@@ -673,4 +673,24 @@ fn read_token_migrating_returns_none_when_nothing_is_stored() {
             .unwrap(),
         None
     );
+}
+
+#[test]
+fn provider_keys_are_wallet_scoped_and_revocable() {
+    let t = fresh("pw");
+    let db = &t.db;
+    let (row, key) = db.create_provider_key(NPUB, "dashboard").unwrap();
+
+    assert!(key.starts_with("owk_"));
+    assert_eq!(row.label.as_deref(), Some("dashboard"));
+    assert_eq!(row.token_prefix.as_deref(), Some(&key[..12]));
+    assert_eq!(
+        db.read_provider_key_npub(&key).unwrap().as_deref(),
+        Some(NPUB)
+    );
+    assert_eq!(db.list_provider_keys(NPUB).unwrap(), vec![row.clone()]);
+
+    db.delete_provider_key(&row.id, NPUB).unwrap();
+    assert_eq!(db.read_provider_key_npub(&key).unwrap(), None);
+    assert!(db.list_provider_keys(NPUB).unwrap().is_empty());
 }

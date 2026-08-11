@@ -7,6 +7,7 @@ pub mod index;
 pub mod login;
 pub mod oauth;
 pub mod password;
+pub mod provider;
 pub mod purchases;
 pub mod select;
 pub mod send;

@@ -69,6 +69,39 @@
 </div>
 
 <div class="card">
+  <h2>OpenCode provider</h2>
+  <p class="muted">Provider keys allow an OpenAI-compatible client to spend this wallet's merchant credits. Each key is limited to this wallet and can be revoked here.</p>
+  {% if active.is_some() %}
+    {% if provider_keys.is_empty() %}
+      <p class="muted">No provider API keys yet.</p>
+    {% else %}
+      <table>
+        <thead><tr><th>Key</th><th>Source</th><th>Created</th><th></th></tr></thead>
+        <tbody>
+          {% for key in provider_keys %}
+            <tr>
+              <td><code>{{ key.key }}</code></td>
+              <td>{{ key.label }}</td>
+              <td>{{ key.created }}</td>
+              <td>
+                <form method="POST" action="/wallet/provider-keys/revoke" style="margin:0;"
+                      onsubmit="return confirm('Revoke this provider API key?');">
+                  <input type="hidden" name="id" value="{{ key.id }}">
+                  <button type="submit" class="button danger">Revoke</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+    <form method="POST" action="/wallet/provider-keys" style="margin-top:14px;">
+      <button type="submit">Create provider API key</button>
+    </form>
+  {% endif %}
+</div>
+
+<div class="card">
   <h2>Send</h2>
   <p class="muted" style="margin-bottom:14px;">
     Signs and broadcasts a payment from the active wallet — USDC on the

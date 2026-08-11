@@ -92,10 +92,9 @@ impl Default for ZcashConfig {
 /// handlers (send / overpay-login / authorize) share them with the
 /// MCP server.
 ///
-/// `/v1` carries no bearer/API-key check of its own — same trust model as
-/// the dashboard (whoever can reach this port already has the wallet) —
-/// so it uses the default-wallet `McpState` directly rather than the
-/// `/mcp` mount's optional-bearer wrapping.
+/// `/v1` validates its own wallet-scoped provider API key and pins each
+/// request to that key's wallet. It deliberately does not use the local OAuth
+/// access tokens accepted by `/mcp`.
 pub fn build_full_router(state: AppState, issuer_url: String) -> Router {
     let oauth = OAuthAsState {
         app: state.clone(),
@@ -133,6 +132,14 @@ fn dashboard_routes(state: AppState) -> Router<AppState> {
         )
         .route("/wallet/logout", post(dashboard::login::logout_post))
         .route("/wallet", get(dashboard::index::dashboard))
+        .route(
+            "/wallet/provider-keys",
+            post(dashboard::provider::create_post),
+        )
+        .route(
+            "/wallet/provider-keys/revoke",
+            post(dashboard::provider::revoke_post),
+        )
         .route(
             "/wallet/generate",
             get(dashboard::generate::generate_get).post(dashboard::generate::generate_post),

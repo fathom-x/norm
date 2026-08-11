@@ -77,6 +77,17 @@ CREATE TABLE IF NOT EXISTS purchases (
 );
 
 CREATE INDEX IF NOT EXISTS idx_purchases_npub_cached ON purchases(npub, cached_at DESC);
+
+CREATE TABLE IF NOT EXISTS provider_keys (
+    id           TEXT PRIMARY KEY,
+    token_hash   TEXT NOT NULL UNIQUE,
+    npub         TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    label        TEXT,
+    token_prefix TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_keys_npub ON provider_keys(npub, created_at DESC);
 "#;
 
 const MIGRATIONS: &[&str] = &[
@@ -114,6 +125,17 @@ const MIGRATIONS: &[&str] = &[
     // (like `address`); lets the dashboard/CLI/MCP show the receive address
     // without opening the librustzcash wallet DB. Absent in Python DBs.
     "ALTER TABLE wallets ADD COLUMN zcash_address TEXT",
+    "CREATE TABLE IF NOT EXISTS provider_keys (
+        id         TEXT PRIMARY KEY,
+        token_hash TEXT NOT NULL UNIQUE,
+        npub       TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS idx_provider_keys_npub ON provider_keys(npub, created_at DESC)",
+    // Who minted a provider key + a short display prefix, so the dashboard
+    // list is tellable-apart. Rows from before these columns stay NULL.
+    "ALTER TABLE provider_keys ADD COLUMN label TEXT",
+    "ALTER TABLE provider_keys ADD COLUMN token_prefix TEXT",
 ];
 
 pub(crate) fn create(conn: &Connection) -> rusqlite::Result<()> {

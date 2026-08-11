@@ -215,6 +215,7 @@ pub async fn detail_get(
         badge_class,
         status_label,
         meta,
+        buyer_input_html: render_buyer_note(&record.snapshot),
         content_html: render_delivered_content(&record),
     };
     Ok(Html(tpl.render()?).into_response())
@@ -298,6 +299,180 @@ fn field(label: &str, body: &str) -> String {
     )
 }
 
+/// Render the order's `buyer_note` (what the buyer submitted — a prompt,
+/// code to run, shipping notes, …) out of the cached snapshot. Schema-driven
+/// listings store it as a JSON object serialized to a string, so that case
+/// renders one labeled block per field; anything else renders as plain
+/// escaped text. Empty string when the snapshot carries no note.
+fn render_buyer_note(snapshot: &Value) -> String {
+    let note = snapshot.get("buyer_note");
+    let (obj, text) = match note {
+        None | Some(Value::Null) => return String::new(),
+        Some(Value::Object(map)) => (Some(map.clone()), None),
+        Some(Value::String(s)) if s.trim().is_empty() => return String::new(),
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Object(map)) => (Some(map), None),
+            _ => (None, Some(s.clone())),
+        },
+        Some(other) => (None, Some(other.to_string())),
+    };
+
+    if let Some(map) = obj {
+        let mut out = String::new();
+        for (key, value) in &map {
+            // Orders placed through the /v1 provider carry OpenAI-shaped
+            // fields; recognize them by shape (not key) so any listing whose
+            // note contains a chat history or tool definitions benefits.
+            if let Value::Array(items) = value {
+                if let Some(html) = render_chat_messages(items) {
+                    out.push_str(&field(key, &html));
+                    continue;
+                }
+                if let Some(html) = render_tool_defs(items) {
+                    out.push_str(&field(key, &html));
+                    continue;
+                }
+            }
+            let body = match value {
+                Value::String(s) if s.contains('\n') => {
+                    format!("<pre class=\"delivered-code\">{}</pre>", esc(s))
+                }
+                Value::String(s) => format!("<p class=\"delivered-text\">{}</p>", esc(s)),
+                other => format!(
+                    "<pre class=\"delivered-code\">{}</pre>",
+                    esc(&serde_json::to_string_pretty(other).unwrap_or_default())
+                ),
+            };
+            out.push_str(&field(key, &body));
+        }
+        return out;
+    }
+
+    let text = text.unwrap_or_default();
+    if text.contains('\n') {
+        format!("<pre class=\"delivered-code\">{}</pre>", esc(&text))
+    } else {
+        format!("<p class=\"delivered-text\">{}</p>", esc(&text))
+    }
+}
+
+/// An OpenAI-style chat history (`[{role, content}, …]`) rendered as a
+/// transcript: one block per message, labeled by role, with assistant
+/// `tool_calls` shown as `name(arguments)`. `None` unless every element has
+/// a string `role` — the caller then falls back to raw JSON.
+fn render_chat_messages(items: &[Value]) -> Option<String> {
+    if items.is_empty()
+        || !items
+            .iter()
+            .all(|m| m.get("role").and_then(Value::as_str).is_some())
+    {
+        return None;
+    }
+    let mut out = String::new();
+    for msg in items {
+        let role = msg.get("role").and_then(Value::as_str).unwrap_or("?");
+        let mut body = String::new();
+        match msg.get("content") {
+            Some(Value::String(s)) if !s.is_empty() => {
+                body.push_str(&format!(
+                    "<pre class=\"delivered-code\" style=\"margin:0;\">{}</pre>",
+                    esc(s)
+                ));
+            }
+            // Content-parts form: [{type: "text"|"input_text", text}, …] —
+            // join the text parts, fall back to JSON for exotic parts.
+            Some(Value::Array(parts)) => {
+                let text: Vec<&str> = parts
+                    .iter()
+                    .filter_map(|p| p.get("text").and_then(Value::as_str))
+                    .collect();
+                if text.is_empty() {
+                    body.push_str(&format!(
+                        "<pre class=\"delivered-code\" style=\"margin:0;\">{}</pre>",
+                        esc(&serde_json::to_string_pretty(parts).unwrap_or_default())
+                    ));
+                } else {
+                    body.push_str(&format!(
+                        "<pre class=\"delivered-code\" style=\"margin:0;\">{}</pre>",
+                        esc(&text.join("\n"))
+                    ));
+                }
+            }
+            _ => {}
+        }
+        if let Some(Value::Array(calls)) = msg.get("tool_calls") {
+            for call in calls {
+                let f = call.get("function");
+                let name = f
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool");
+                let args = f
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                body.push_str(&format!(
+                    "<pre class=\"delivered-code\" style=\"margin:0;\">→ {}({})</pre>",
+                    esc(name),
+                    esc(args)
+                ));
+            }
+        }
+        if body.is_empty() {
+            body.push_str("<p class=\"delivered-text\">—</p>");
+        }
+        out.push_str(&format!(
+            "<div style=\"margin-bottom:10px;\">\
+             <p class=\"delivered-field-label\" style=\"margin-bottom:2px;\">{}</p>{}</div>",
+            esc(role),
+            body
+        ));
+    }
+    Some(out)
+}
+
+/// OpenAI-style function-tool definitions rendered as a compact list —
+/// `name` + description up front, the JSON-schema `parameters` folded into a
+/// `<details>` block (native HTML, no JS). `None` unless every element is a
+/// function definition.
+fn render_tool_defs(items: &[Value]) -> Option<String> {
+    let defs: Vec<(&str, Option<&str>, Option<&Value>)> = items
+        .iter()
+        .map(|t| {
+            let f = t.get("function").unwrap_or(t);
+            (
+                f.get("name").and_then(Value::as_str),
+                f.get("description").and_then(Value::as_str),
+                f.get("parameters"),
+            )
+        })
+        .map(|(name, desc, params)| name.map(|n| (n, desc, params)))
+        .collect::<Option<_>>()?;
+    if defs.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for (name, desc, params) in defs {
+        out.push_str(&format!(
+            "<p class=\"delivered-text\" style=\"margin-bottom:4px;\"><code>{}</code>{}</p>",
+            esc(name),
+            match desc {
+                Some(d) => format!(" — {}", esc(d)),
+                None => String::new(),
+            }
+        ));
+        if let Some(p) = params {
+            out.push_str(&format!(
+                "<details style=\"margin-bottom:10px;\"><summary class=\"muted\" \
+                 style=\"cursor:pointer; font-size:.8rem;\">parameters</summary>\
+                 <pre class=\"delivered-code\">{}</pre></details>",
+                esc(&serde_json::to_string_pretty(p).unwrap_or_default())
+            ));
+        }
+    }
+    Some(out)
+}
+
 /// Render `delivered_content` as escaped HTML. Mirrors the 4-tier logic in
 /// `_render_delivered_content`: JSON+schema (per-property `x-widget`),
 /// legacy `{description, image}` envelope, inline image content-types, and
@@ -330,8 +505,23 @@ fn render_delivered_content(record: &PurchaseRow) -> String {
         if let Some(schema) = schema {
             if let Some(props) = schema.get("properties").and_then(Value::as_object) {
                 if let Ok(Value::Object(parsed)) = serde_json::from_str::<Value>(content) {
+                    // serde_json's map iterates alphabetically (the listing's
+                    // declared order is lost in the cache), which files
+                    // metadata like `credits_refunded` above the actual
+                    // deliverable. Render content-bearing widgets first so
+                    // the output leads and the scalars trail it.
+                    let is_primary = |prop: &Value| {
+                        matches!(
+                            prop.get("x-widget").and_then(Value::as_str),
+                            Some("markdown" | "image" | "code" | "textarea" | "html")
+                        )
+                    };
+                    let ordered = props
+                        .iter()
+                        .filter(|(_, prop)| is_primary(prop))
+                        .chain(props.iter().filter(|(_, prop)| !is_primary(prop)));
                     let mut parts = String::new();
-                    for (key, prop) in props {
+                    for (key, prop) in ordered {
                         let Some(value) = parsed.get(key) else {
                             continue;
                         };
@@ -396,6 +586,60 @@ fn render_delivered_content(record: &PurchaseRow) -> String {
     }
 }
 
+/// Markdown → sanitized HTML. The source is seller-authored, so raw
+/// HTML blocks/inlines are demoted to escaped text (pulldown-cmark's writer
+/// escapes `Text` events), and link/image destinations outside
+/// http(s)/mailto are dropped to `#` — markdown formatting comes through,
+/// markup injection does not.
+fn markdown_to_html(md: &str) -> String {
+    use pulldown_cmark::{html, CowStr, Event, Options, Parser, Tag};
+
+    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH;
+    let safe_url = |url: &str| {
+        let lower = url.trim().to_ascii_lowercase();
+        lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("mailto:")
+    };
+    let events = Parser::new_ext(md, options).map(|event| match event {
+        Event::Html(s) | Event::InlineHtml(s) => Event::Text(s),
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Link {
+            link_type,
+            dest_url: if safe_url(&dest_url) {
+                dest_url
+            } else {
+                CowStr::from("#")
+            },
+            title,
+            id,
+        }),
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Event::Start(Tag::Image {
+            link_type,
+            dest_url: if safe_url(&dest_url) {
+                dest_url
+            } else {
+                CowStr::from("#")
+            },
+            title,
+            id,
+        }),
+        other => other,
+    });
+    let mut out = String::new();
+    html::push_html(&mut out, events);
+    out
+}
+
 fn render_widget(widget: Option<&str>, prop: &Value, value: &Value) -> String {
     match widget {
         Some("image") => {
@@ -412,6 +656,12 @@ fn render_widget(widget: Option<&str>, prop: &Value, value: &Value) -> String {
             format!(
                 "<img src=\"{}\" class=\"delivered-image\" loading=\"lazy\" alt=\"image\">",
                 esc(&src)
+            )
+        }
+        Some("markdown") if value.is_string() => {
+            format!(
+                "<div class=\"delivered-markdown\">{}</div>",
+                markdown_to_html(value.as_str().unwrap_or(""))
             )
         }
         Some("code") | Some("json") | Some("textarea") | Some("html") => {

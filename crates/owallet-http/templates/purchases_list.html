@@ -15,7 +15,12 @@
 
 <nav class="card" style="padding:14px 24px; display:flex; justify-content:space-between; align-items:center;">
   <div><strong>owallet</strong> <span class="muted">— purchases</span></div>
-  <a class="button secondary" href="/wallet">Back to dashboard</a>
+  <div style="display:flex; gap:10px; align-items:center;">
+    <form method="POST" action="/wallet/purchases/sync" style="margin:0;">
+      <button type="submit" class="button secondary">Sync from Overpay</button>
+    </form>
+    <a class="button secondary" href="/wallet">Back to dashboard</a>
+  </div>
 </nav>
 
 {% if let Some(msg) = notice %}
@@ -29,7 +34,7 @@
   {% if rows.is_empty() %}
     <div class="empty">
       <p>No purchases cached yet.</p>
-      <p>Click “Sync from Overpay” below, or buy something — the wallet caches
+      <p>Click “Sync from Overpay” above, or buy something — the wallet caches
          delivered orders automatically.</p>
     </div>
   {% else %}
@@ -50,11 +55,5 @@
       </tbody>
     </table>
   {% endif %}
-
-  <p style="margin-top:18px;">
-    <form method="POST" action="/wallet/purchases/sync" style="margin:0; display:inline;">
-      <button type="submit" class="button secondary">Sync from Overpay</button>
-    </form>
-  </p>
 </div>
 {% endblock %}
