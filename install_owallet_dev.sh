@@ -18,5 +18,4 @@ else
   exit 1
 fi
 
-echo "Running owallet with config..."
-owallet --config "$HOME/dev.owallet" help
+owallet --version
