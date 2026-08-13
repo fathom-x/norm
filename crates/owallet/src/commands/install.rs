@@ -208,6 +208,28 @@ struct ActiveConfig {
     rails_url: Option<String>,
 }
 
+/// Resolve a config's Overpay URL the same way `serve` does: the
+/// per-environment `OVERPAY_RAILS_URL_<POSTFIX>` wins, then the unsuffixed
+/// `OVERPAY_RAILS_URL`, then whatever the config itself declares (a builtin's
+/// default or the dotenv's own value). Staging's builtin declares none, so
+/// without this chain `--staging install` sees no URL at all and silently
+/// falls back to the `DEFAULT_MODEL` sentinel even though `--staging serve`
+/// — which has always read the suffixed var — reaches Overpay fine.
+///
+/// Stays an `Option`: a config with nothing configured must still reach
+/// `build_provider_entries`' warning path rather than inheriting prod's URL.
+fn rails_url_for(postfix: &str, declared: Option<String>) -> Option<String> {
+    std::env::var(format!("OVERPAY_RAILS_URL_{postfix}"))
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("OVERPAY_RAILS_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or(declared)
+}
+
 fn active_configs(cli: &Cli, port_override: Option<u16>) -> Result<Vec<ActiveConfig>> {
     let configs = resolve(&config_selector(cli)).map_err(CmdError::Config)?;
     let mut out = Vec::new();
@@ -224,7 +246,7 @@ fn active_configs(cli: &Cli, port_override: Option<u16>) -> Result<Vec<ActiveCon
                 (
                     env.config().label.to_string(),
                     p,
-                    env.config().rails_url.map(str::to_string),
+                    rails_url_for(env.postfix(), env.config().rails_url.map(str::to_string)),
                 )
             }
             ResolvedConfig::File(path) => {
@@ -236,7 +258,12 @@ fn active_configs(cli: &Cli, port_override: Option<u16>) -> Result<Vec<ActiveCon
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_else(|| "default".to_string());
-                (label, p, vars.get("OVERPAY_RAILS_URL").cloned())
+                let postfix = owallet_config::env_postfix(path);
+                (
+                    label,
+                    p,
+                    rails_url_for(&postfix, vars.get("OVERPAY_RAILS_URL").cloned()),
+                )
             }
         };
         out.push(ActiveConfig {
@@ -866,6 +893,102 @@ mod tests {
         }
     }
 
+    /// Same shape as `XdgGuard`, for the `OVERPAY_RAILS_URL*` pair that
+    /// `rails_url_for` reads. Both vars are process-wide, so every test
+    /// touching them is `#[serial]`.
+    struct RailsUrlGuard {
+        suffixed_name: String,
+        prev_suffixed: Option<std::ffi::OsString>,
+        prev_plain: Option<std::ffi::OsString>,
+    }
+    impl RailsUrlGuard {
+        fn set(suffixed: Option<&str>, plain: Option<&str>) -> Self {
+            Self::set_for("STAGING", suffixed, plain)
+        }
+
+        fn set_for(postfix: &str, suffixed: Option<&str>, plain: Option<&str>) -> Self {
+            let suffixed_name = format!("OVERPAY_RAILS_URL_{postfix}");
+            let guard = Self {
+                prev_suffixed: std::env::var_os(&suffixed_name),
+                prev_plain: std::env::var_os("OVERPAY_RAILS_URL"),
+                suffixed_name,
+            };
+            set_or_clear(&guard.suffixed_name, suffixed.map(std::ffi::OsString::from));
+            set_or_clear("OVERPAY_RAILS_URL", plain.map(std::ffi::OsString::from));
+            guard
+        }
+    }
+    impl Drop for RailsUrlGuard {
+        fn drop(&mut self) {
+            set_or_clear(&self.suffixed_name, self.prev_suffixed.take());
+            set_or_clear("OVERPAY_RAILS_URL", self.prev_plain.take());
+        }
+    }
+
+    fn set_or_clear(name: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            Some(v) => std::env::set_var(name, v),
+            None => std::env::remove_var(name),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn install_reads_the_per_env_overpay_url_like_serve_does() {
+        // The bug this guards: staging's builtin declares no rails_url, and
+        // install used to consult *only* that, so `--staging install` wrote a
+        // provider with just the DEFAULT_MODEL sentinel while `--staging
+        // serve` — reading the suffixed var — talked to Overpay fine. The
+        // user saw a one-model dropdown with no hint the two commands
+        // disagreed about where Overpay lives.
+        let _g = RailsUrlGuard::set(Some("https://staging.example"), None);
+        assert_eq!(
+            rails_url_for("STAGING", None),
+            Some("https://staging.example".to_string())
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn the_suffixed_url_beats_the_plain_one_which_beats_the_declared_default() {
+        let declared = || Some("https://declared.example".to_string());
+        {
+            let _g = RailsUrlGuard::set(
+                Some("https://suffixed.example"),
+                Some("https://plain.example"),
+            );
+            assert_eq!(
+                rails_url_for("STAGING", declared()),
+                Some("https://suffixed.example".to_string())
+            );
+        }
+        {
+            let _g = RailsUrlGuard::set(None, Some("https://plain.example"));
+            assert_eq!(
+                rails_url_for("STAGING", declared()),
+                Some("https://plain.example".to_string())
+            );
+        }
+        {
+            let _g = RailsUrlGuard::set(None, None);
+            assert_eq!(
+                rails_url_for("STAGING", declared()),
+                declared(),
+                "the config's own value is the last resort, not the first"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn an_unconfigured_env_stays_none_rather_than_inheriting_prod() {
+        // build_provider_entries' warning path depends on this staying None:
+        // silently falling back to prod's URL would write a staging provider
+        // advertising prod's model catalog.
+        let _g = RailsUrlGuard::set(None, None);
+        assert_eq!(rails_url_for("STAGING", None), None);
+    }
+
     #[test]
     #[serial_test::serial]
     fn opencode_global_defaults_to_dot_config_not_the_platform_config_dir() {
@@ -1228,6 +1351,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn build_provider_entries_falls_back_to_the_default_sentinel_when_unreachable() {
         // Same "nothing listening" setup as the fetch_models test above,
         // but through the full build_provider_entries path -- this is what
@@ -1236,6 +1360,11 @@ mod tests {
         // silently dropping it. Uses a config file pointing OVERPAY_RAILS_URL
         // at the dead port, so the fallback is exercised without touching
         // the real prod endpoint.
+        //
+        // The guard matters since `rails_url_for` landed: an ambient
+        // OVERPAY_RAILS_URL in the developer's shell would now outrank the
+        // config file and point this at a live host.
+        let _g = RailsUrlGuard::set_for("DEV", None, None);
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);

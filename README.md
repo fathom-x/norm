@@ -96,10 +96,13 @@ server (owallet no longer calls a hosted Overpay MCP).
 > their built-in defaults are gated behind the `dev-envs` Cargo feature
 > (`cargo build --features dev-envs`) and are **not present in public
 > release builds**. In those internal builds, combining flags runs one
-> server per environment (`owallet --dev --staging serve`), and a URL
-> override from the shell must carry the env suffix
-> (`OVERPAY_RAILS_URL_DEV`, `OVERPAY_RAILS_URL_STAGING`); a bare,
-> unsuffixed `OVERPAY_RAILS_URL` is ignored while a config is active.
+> server per environment (`owallet --dev --staging serve`). A URL override
+> from the shell should carry the env suffix
+> (`OVERPAY_RAILS_URL_DEV`, `OVERPAY_RAILS_URL_STAGING`) — that form wins,
+> and it's the only one that can address a single env when several are
+> active at once. A bare, unsuffixed `OVERPAY_RAILS_URL` is the next
+> fallback, ahead of the built-in default. `staging` ships **no** built-in
+> URL, so the suffixed var is effectively required there.
 
 ## OpenCode as a custom provider
 
@@ -189,13 +192,71 @@ curated list instead. Merchant credits (`load_core_credits` MCP tool,
 or the dashboard) and `owallet authorize` still need to be in place before
 a completion request will actually settle.
 
+### Pointing OpenCode at staging (internal `dev-envs` builds)
+
+Each environment is a separate provider entry, a separate port, and a
+separate Overpay link — nothing carries over from prod or dev. Full
+sequence, from a clean machine:
+
+```bash
+# 1. Build with the internal selectors (`--staging` doesn't exist without this)
+cd owallet-rs && cargo install --path crates/owallet --features dev-envs
+
+# 2. staging declares no built-in Overpay URL, so name it (put this in your shell profile)
+export OVERPAY_RAILS_URL_STAGING=https://<staging-host>
+
+# 3. Start the server — staging binds :8767 (prod :8765, dev :8766)
+owallet --staging serve
+```
+
+The banner confirms both halves of the wiring before you go further:
+
+```
+[staging] http://127.0.0.1:8767 (dashboard /wallet · MCP /mcp · OAuth /oauth/*)
+[staging]   Overpay = https://<staging-host> · EVM = …
+```
+
+Then, in a second shell:
+
+```bash
+# 4. Write the opencode.json provider + MCP entries and the auth plugin
+owallet --staging install --opencode-global
+
+# 5. In OpenCode: `opencode auth login` → overpay-staging → "Browser login"
+```
+
+Two steps in the middle are easy to miss, and both fail in ways that don't
+name themselves:
+
+**Link the wallet to a staging Overpay account first.** Bearer tokens are
+keyed by the Overpay API URL, so a wallet linked on prod or dev has nothing
+for staging. Open **http://127.0.0.1:8767/wallet** and click *Link Overpay
+account* (it reads *Re-link* once a token is stored), or run `owallet
+--staging authorize`. Without it, owallet falls back to NIP-98, which can
+read the marketplace but cannot create orders — every completion fails with
+`HTTP 401: {"error":"API token required"}`, because order creation requires
+a real API-token user. Browse the dashboard at the **same host the banner
+prints**: the OAuth `redirect_uri` is built from that URL, and starting the
+flow on `localhost` while the callback returns to `127.0.0.1` drops both the
+session and pending-auth cookies, which looks like an endless login loop.
+
+**Run `install` after the OpenRouter listing exists on staging.** The model
+catalog is read from that listing at install time; if it isn't published yet
+you get a provider with only `"default"` in it and a `warning:` on stderr.
+That's a usable entry, not a broken one (see the sentinel note above) — but
+you can't pick a model until you rerun `install`. Staging is typically
+deployed separately from prod, so its bots and listings may lag.
+
+Merchant credits are per-environment too: load them on the staging wallet
+before expecting a completion to settle.
+
 **Code execution works too, transparently.** Every chat completion can run
 Python — the model can call a `run_python` tool backed by the "Run Python
 Code" listing, which owallet executes server-side (a second, real, paid
 Overpay order) and feeds the result back for another turn. OpenCode never
 sees the tool call; it just gets a normal answer that happens to have run
 code along the way. Each iteration that calls the tool is a separate paid
-order on top of the chat completion itself, capped at 4 iterations per
+order on top of the chat completion itself, capped at 10 iterations per
 request so a conversation that never converges can't spend without bound.
 
 ## CLI reference
