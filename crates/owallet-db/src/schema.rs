@@ -79,12 +79,16 @@ CREATE TABLE IF NOT EXISTS purchases (
 CREATE INDEX IF NOT EXISTS idx_purchases_npub_cached ON purchases(npub, cached_at DESC);
 
 CREATE TABLE IF NOT EXISTS provider_keys (
-    id           TEXT PRIMARY KEY,
-    token_hash   TEXT NOT NULL UNIQUE,
-    npub         TEXT NOT NULL,
-    created_at   INTEGER NOT NULL,
-    label        TEXT,
-    token_prefix TEXT
+    id                     TEXT PRIMARY KEY,
+    token_hash             TEXT NOT NULL UNIQUE,
+    npub                   TEXT NOT NULL,
+    created_at             INTEGER NOT NULL,
+    label                  TEXT,
+    token_prefix           TEXT,
+    scopes                 TEXT,
+    daily_budget_usd_cents INTEGER,
+    spent_usd_cents        INTEGER,
+    spent_day              INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_provider_keys_npub ON provider_keys(npub, created_at DESC);
@@ -136,6 +140,22 @@ const MIGRATIONS: &[&str] = &[
     // list is tellable-apart. Rows from before these columns stay NULL.
     "ALTER TABLE provider_keys ADD COLUMN label TEXT",
     "ALTER TABLE provider_keys ADD COLUMN token_prefix TEXT",
+    // Space-separated capability scopes for a provider key ("chat",
+    // "chat spend"). NULL — every row from before the column — means
+    // chat-only, so no pre-existing key silently gains spending power.
+    "ALTER TABLE provider_keys ADD COLUMN scopes TEXT",
+    // Per-key spending budget: a per-UTC-day USD allowance (in cents) for
+    // the wallet spending tools, with the day's spend and its window
+    // (`spent_day`, days since epoch) tracked next to it. NULL budget —
+    // every row from before the column, and any key minted "no limit" —
+    // means unbounded; NULL spent reads as 0. The window rolls over lazily
+    // inside the guarded reserve UPDATE, not via any sweeper job.
+    "ALTER TABLE provider_keys ADD COLUMN daily_budget_usd_cents INTEGER",
+    "ALTER TABLE provider_keys ADD COLUMN spent_usd_cents INTEGER",
+    "ALTER TABLE provider_keys ADD COLUMN spent_day INTEGER",
+    // Budget chosen on the consent page for a browser-login spend key —
+    // rides the auth code to token exchange, where the key is minted.
+    "ALTER TABLE auth_codes ADD COLUMN spend_budget_usd_cents INTEGER",
 ];
 
 pub(crate) fn create(conn: &Connection) -> rusqlite::Result<()> {

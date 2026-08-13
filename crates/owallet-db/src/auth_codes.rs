@@ -15,6 +15,10 @@ pub struct AuthCodeRow {
     pub redirect_uri_provided_explicitly: bool,
     pub expires_at: f64,
     pub npub: Option<String>,
+    /// Daily budget (cents per UTC day) the user chose on the consent page
+    /// for a spend key — carried to token exchange, where the provider key
+    /// is minted. `None` means no limit (or a non-spend grant).
+    pub spend_budget_usd_cents: Option<i64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -28,11 +32,12 @@ pub(crate) fn insert(
     redirect_uri_provided_explicitly: bool,
     expires_at: f64,
     npub: Option<&str>,
+    spend_budget_usd_cents: Option<i64>,
 ) -> Result<()> {
     let scopes_json = serde_json::to_string(scopes)?;
     conn.execute(
-        "INSERT INTO auth_codes(code, client_id, scopes, code_challenge, redirect_uri, redirect_uri_provided_explicitly, expires_at, npub)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        "INSERT INTO auth_codes(code, client_id, scopes, code_challenge, redirect_uri, redirect_uri_provided_explicitly, expires_at, npub, spend_budget_usd_cents)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
          ON CONFLICT(code) DO NOTHING",
         params![
             code,
@@ -42,7 +47,8 @@ pub(crate) fn insert(
             redirect_uri,
             redirect_uri_provided_explicitly as i64,
             expires_at,
-            npub
+            npub,
+            spend_budget_usd_cents
         ],
     )?;
     Ok(())
@@ -51,7 +57,7 @@ pub(crate) fn insert(
 pub(crate) fn read(conn: &Connection, code: &str) -> Result<Option<AuthCodeRow>> {
     let row = conn
         .query_row(
-            "SELECT code, client_id, scopes, code_challenge, redirect_uri, redirect_uri_provided_explicitly, expires_at, npub
+            "SELECT code, client_id, scopes, code_challenge, redirect_uri, redirect_uri_provided_explicitly, expires_at, npub, spend_budget_usd_cents
              FROM auth_codes WHERE code = ?1",
             params![code],
             |row| {
@@ -64,6 +70,7 @@ pub(crate) fn read(conn: &Connection, code: &str) -> Result<Option<AuthCodeRow>>
                     row.get::<_, i64>(5)?,
                     row.get::<_, f64>(6)?,
                     row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
                 ))
             },
         )
@@ -78,6 +85,7 @@ pub(crate) fn read(conn: &Connection, code: &str) -> Result<Option<AuthCodeRow>>
         explicit,
         expires_at,
         npub,
+        spend_budget_usd_cents,
     )) = row
     else {
         return Ok(None);
@@ -92,6 +100,7 @@ pub(crate) fn read(conn: &Connection, code: &str) -> Result<Option<AuthCodeRow>>
         redirect_uri_provided_explicitly: explicit != 0,
         expires_at,
         npub,
+        spend_budget_usd_cents,
     }))
 }
 

@@ -41,6 +41,13 @@ pub struct DashboardTemplate {
     /// Pre-formatted USDC balance string. Same semantics as `eth_balance`.
     pub usdc_balance: Option<String>,
     pub provider_keys: Vec<ProviderKeyListRow>,
+    /// Wallet-wide IANA timezone ("UTC" when unset). Governs when daily
+    /// key budgets reset.
+    pub timezone: String,
+    /// Wallet-level /v1 per-request spending cap in plain dollars
+    /// ("5.00"; empty when unset → server default). Prefills the
+    /// settings form input.
+    pub spend_cap_input: String,
 }
 
 pub struct ProviderKeyListRow {
@@ -51,6 +58,15 @@ pub struct ProviderKeyListRow {
     pub label: String,
     /// Pre-formatted `YYYY-MM-DD HH:MM UTC`.
     pub created: String,
+    /// Capability badge: "chat" or "chat + spend".
+    pub scopes: String,
+    /// Pre-formatted daily-budget summary: "no limit" or
+    /// "$X.XX left today of $Y.YY/day". Every key has one — chat turns
+    /// are paid orders, so chat-only keys spend too.
+    pub budget: String,
+    /// Current daily budget in plain dollars ("25.00", empty for no
+    /// limit) — prefills the edit form's input.
+    pub budget_input: String,
 }
 
 #[derive(Template)]
@@ -58,6 +74,11 @@ pub struct ProviderKeyListRow {
 pub struct ProviderKeyCreatedTemplate {
     pub npub: String,
     pub key: String,
+    /// True when the key was minted with the `spend` scope.
+    pub can_spend: bool,
+    /// Pre-formatted daily budget ("$25.00"); `None` when no limit was
+    /// set (or the key is chat-only).
+    pub budget: Option<String>,
 }
 
 #[derive(Template)]

@@ -6,6 +6,23 @@
 <div class="card">
   <h1>Provider API key created</h1>
   <p>This key is authorized to spend merchant credits from <code>{{ npub }}</code>.</p>
+  {% if can_spend %}
+    <p><strong>Wallet spending is enabled</strong> for this key: the model it
+       serves can buy merchant credits and pay orders with them (order-scoped,
+       capped per request). Revoke it from the wallet dashboard at any time.</p>
+  {% else %}
+    <p class="muted">Chat-only key: wallet spending tools are not available to it.</p>
+  {% endif %}
+  {% if let Some(b) = budget %}
+    <p>Daily budget: <strong>{{ b }}</strong> per day, covering everything
+       the key costs (each chat turn is a paid order). Once spent, the key
+       refuses requests until midnight in the wallet's time zone — or until
+       you raise the budget from the dashboard.</p>
+  {% else %}
+    <p class="muted">No daily budget set — the key's spending is bounded
+       only by the per-request cap and the wallet's funds. You can add a
+       budget from the dashboard at any time.</p>
+  {% endif %}
   <p>Copy it now. owallet stores only a verifier and cannot show it again.</p>
   <div class="field">
     <label for="provider-key">API key</label>

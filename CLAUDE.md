@@ -70,15 +70,15 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   so users without a stored token still authenticate via wallet key.
 
 - **`/v1` OpenAI-compatible endpoint** (`owallet-mcp/src/openai_compat.rs`,
-  mounted by `owallet-http`). Currently hardcoded to exactly two listings
+  mounted by `owallet-http`). Hardcoded to exactly two *listings*
   — "OpenRouter Inference" (seller `openrouter-bot`, chat) and "Run Python
-  Code" (seller `exec`, the one tool the model can call) — resolved the
-  same way via `resolve_listing_id_cached(state, seller_slug, title,
-  cache)`. **The tool side is expected to generalize**: more listings
+  Code" (seller `exec`, the one listing-backed tool) — resolved via
+  `resolve_listing_id_cached(state, seller_slug, title, cache)`.
+  **The listing-tool side is still expected to generalize**: more listings
   (storage, compute, …) are planned, each of which is naturally a tool, so
   treat the `PYTHON_*` / `RUN_PYTHON_TOOL_NAME` constants,
   `run_python_tool_def`, `extract_python_delivered`, and
-  `execute_tool_call`'s name dispatch as the things a multi-tool router
+  `execute_tool_call`'s name dispatch as the things a multi-listing router
   replaces rather than as settled design. Everything a tool definition
   needs is already on the listing — `preferred_slug` → `function.name`,
   `description` → `function.description`, `buyer_note_schema` →
@@ -87,7 +87,72 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   established behavior gate for that kind of marker (cf.
   `metadata["service"]`, `metadata["delivery_eta"]`). See PR #383's
   reviewer question for the design sketch and the caller-supplied-`tools`
-  tradeoff that goes with it. Both the model list (`GET /v1/models`) and
+  tradeoff that goes with it.
+  **Wallet tools** (`WALLET_TOOLS` in `openai_compat.rs`) sit alongside
+  the listing tool: `get_balances` / `browse_marketplace` / `get_listing`
+  / `list_orders` / `get_order_status` for any provider key;
+  `create_order` / `buy_credits` / `pay_order` only when the key's scopes
+  include `spend` — together the spend set is the full purchase loop
+  (find → order → settle with credits), all order-id-scoped. They're backed by `crate::tools::dispatch` but carry their own
+  model-facing definitions and **allowlist projections**
+  (`project_balances` & co.): every tool result lands in `messages` and
+  ships to the OpenRouter seller inside the next turn's `buyer_note`, so
+  no on-chain data (txid, tx hash, address) may ever appear in a wallet
+  tool result — order ids, amounts, statuses, and spending limits only.
+  When touching these, extend the projections field-by-field (never copy
+  whole payload objects) and keep raw-address sends (`send_usdc` /
+  `send_zcash`) off this surface entirely — they're MCP/dashboard-only by
+  design. Spending is bounded per request by `SpendLedger`. The cap
+  resolves per request via `effective_spend_cap`: the wallet-level
+  dashboard setting (`Database::read_spend_cap_usd_cents`, settings key
+  `v1_spend_cap_usd_cents`, edited from the OpenCode provider card —
+  wallet-level on purpose; keys are already bounded by their daily
+  budgets) → env `OWALLET_V1_SPEND_CAP_USD` → `DEFAULT_SPEND_CAP_USD`
+  ($20). For the tools it bounds:
+  `buy_credits` reserves up front, `pay_order` records the redeemed
+  amount after the fact. On top of that sits the **per-key daily
+  budget** (`provider_keys.daily_budget_usd_cents`, NULL = no limit —
+  every pre-existing key; `spent_usd_cents` is scoped by `spent_day`, the
+  julian day of the current date **in the wallet's timezone**). The daily
+  budget bounds **everything the key costs**, not just the spending
+  tools: `place_and_pay_order` records each chat turn's and `run_python`
+  execution's redemption against it, so it applies to (and is offered
+  for) chat-only keys too. An exhausted key 402s new requests up front
+  (`exhausted_key_budget`); exhaustion mid-request breaks the loop to the
+  landing turn — one accepted turn of overshoot. For the spending tools,
+  `buy_credits` reserves against today's window via
+  `Database::try_reserve_provider_key_spend` — one atomic guarded UPDATE
+  that also rolls a stale window over to the current day, so concurrent
+  requests on one key can't double-spend the last dollar and local
+  midnight needs no sweeper job — and `pay_order` gates on remaining
+  budget, then records the redemption after the fact (so it can overshoot
+  by one final redemption; same soft semantics as the ledger). The day
+  boundary follows the wallet-wide **timezone setting** (`settings` key
+  `timezone`, IANA name, default UTC; `time-tz` bundles the tz database
+  and is compatible with the workspace's `time =0.3.37` pin) — set from
+  the dashboard's "Time zone" card (`POST /wallet/settings/timezone`),
+  validated by `owallet_db::timezone_is_valid`; it currently governs only
+  the budget window, while timestamp display stays UTC. Rows are
+  normalized at read time (the SELECT zeroes spend from a past window),
+  so `spent_usd_cents` on a `ProviderKeyRow` is always *today's* spend —
+  but keep call sites on `spent_today_usd_cents()` /
+  `remaining_today_usd_cents()` anyway; the raw column (readable via SQL)
+  still holds the last-spend-day value. Budget refusals are tool-result
+  errors the model relays, not failed requests. The budget is set at mint
+  time (dashboard create form / consent page — the user's choice alone,
+  like the `spend` scope; `parse_budget_usd` in `dashboard/provider.rs`
+  is the one parser both use) and edited in place via
+  `POST /wallet/provider-keys/budget` with immediate effect; today's
+  spend is deliberately never reset by an edit. The wallet's on-chain
+  balance stays the outer bound shared by every key. Per-task/session
+  budget windows are an anticipated generalization (pending design input)
+  — extend the window keying rather than adding a parallel accounting
+  path.
+  The MCP `pay_order` tool (tools.rs) is the
+  underlying primitive — credits are the *only* API-side way to settle an
+  order (the Rails API exposes no crypto payment address for pending
+  orders), which is what makes the model-facing vocabulary naturally
+  chain-free. Both the model list (`GET /v1/models`) and
   the `run_python` tool's JSON schema (`run_python_tool_def`) are read
   live off their listing's own schema via `get_listing_value` rather than
   duplicated in Rust — changing either listing's Ruby side
@@ -100,11 +165,16 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   reaches the HTTP caller — `run_agentic_loop` (buffered) / the streaming
   generator's own copy of the same loop shape executes `run_python` as a
   *second, real, separately-paid* order and feeds the result back for
-  another OpenRouter turn, capped at `MAX_TOOL_ITERATIONS` (real spend per
-  iteration, not just latency, is what bounds this — note this caps
-  *iterations*, and once more than one tool exists a single iteration can
-  call several separately-priced ones, so a per-request ceiling in dollars
-  is the right bound for a multi-tool router). A failed tool
+  another OpenRouter turn, capped at `MAX_TOOL_ITERATIONS` iterations (10 —
+  the full purchase loop needs five-plus, so don't tighten it back to the
+  old 4 without re-checking that flow) and, for the wallet spending tools,
+  by the per-request `SpendLedger` dollar ceiling (the two are
+  complementary: iterations bound the endpoint's own chat/run_python
+  costs, dollars bound what the model can move). Reaching the cap does
+  **not** fail the request: real orders may already be created and paid by
+  then, so both loops land on one final `tool_choice: "none"` turn that
+  forces the model to report what it did; only a landing turn with no text
+  at all yields the safety-cap error. A failed tool
   execution becomes an `{"error": ...}` tool-result message fed back to
   the model rather than aborting the request — see `execute_tool_call`'s
   doc comment for why. The request timeout (120s) and poll cadence (1s)
@@ -128,7 +198,13 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   is at best inert and at worst overrides the real key; a key the user set
   by hand is preserved. `/v1` requires a wallet-scoped `owk_` provider key
   (hashed in the `provider_keys` table; dashboard card on `/wallet` creates
-  and revokes them, and requests are pinned to the key's wallet).
+  and revokes them, and requests are pinned to the key's wallet). Keys
+  carry `scopes` ("chat" / "chat spend"; NULL rows from before the column
+  are chat-only) — `spend` unlocks the wallet spending tools and is
+  granted only by an explicit user choice: the dashboard create form's
+  checkbox, or the consent page's checkbox in the browser-login flow
+  (`consent_post` strips any client-*requested* `spend` scope, so an
+  OAuth client can't pre-grant itself spending power).
   `install --opencode-*` also drops a **generated auth plugin**
   (`plugin/owallet.js` beside the target `opencode.json`, template
   `OPENCODE_AUTH_PLUGIN_RUNTIME` in `install.rs`; OpenCode auto-discovers

@@ -141,6 +141,18 @@ fn dashboard_routes(state: AppState) -> Router<AppState> {
             post(dashboard::provider::revoke_post),
         )
         .route(
+            "/wallet/provider-keys/budget",
+            post(dashboard::provider::update_budget_post),
+        )
+        .route(
+            "/wallet/settings/timezone",
+            post(dashboard::settings::timezone_post),
+        )
+        .route(
+            "/wallet/settings/spend-cap",
+            post(dashboard::settings::spend_cap_post),
+        )
+        .route(
             "/wallet/generate",
             get(dashboard::generate::generate_get).post(dashboard::generate::generate_post),
         )

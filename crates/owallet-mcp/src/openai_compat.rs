@@ -17,20 +17,52 @@
 //! always accepted on top of that live list — see [`DEFAULT_MODEL`].
 //!
 //! **Agentic tool-calling, run entirely server-side.** Every request
-//! advertises exactly one tool to the model — `run_python`, backed by the
-//! "Run Python Code" listing (`code_executor` bot, seller slug `exec`).
-//! When the model decides to call it, this module executes it by placing
-//! and paying for a *second, real* Overpay order, feeds stdout/stderr back
-//! to the model, and loops until a turn produces no more tool calls. The
-//! HTTP caller never sees a `tool_call` — just a normal chat completion
-//! that happens to have run code along the way. Each iteration is a real,
-//! separately-paid order (see [`MAX_TOOL_ITERATIONS`]); caller-supplied
-//! `tools` are not accepted — this endpoint owns tool selection, since it
-//! is the one actually executing them.
+//! advertises a small tool set to the model: `run_python`, backed by the
+//! "Run Python Code" listing (`code_executor` bot, seller slug `exec`),
+//! plus the wallet tools (see below). When the model calls `run_python`,
+//! this module executes it by placing and paying for a *second, real*
+//! Overpay order, feeds stdout/stderr back to the model, and loops until a
+//! turn produces no more tool calls. The HTTP caller never sees a
+//! `tool_call` — just a normal chat completion that happens to have run
+//! code along the way. Each iteration is a real, separately-paid order
+//! (see [`MAX_TOOL_ITERATIONS`]); caller-supplied `tools` are not accepted
+//! — this endpoint owns tool selection, since it is the one actually
+//! executing them.
+//!
+//! **Wallet tools, privacy-projected.** The model can also read balances
+//! (`get_balances`), browse the marketplace (`browse_marketplace` /
+//! `get_listing`), browse recent orders (`list_orders`), confirm payments
+//! (`get_order_status`), and — only when the provider key carries the
+//! `spend` scope — run the full purchase loop order-scoped:
+//! `create_order` (unpaid), `buy_credits` (top up a seller's merchant
+//! credits), and `pay_order` (settle a pending order with those credits). These are
+//! backed by the MCP tool handlers in [`crate::tools`], but their results
+//! pass through **allowlist projections** ([`project_balances`] & co.)
+//! before becoming tool messages: everything the model sees is appended to
+//! `messages` and shipped inside the next turn's `buyer_note` to the
+//! OpenRouter seller — a third party — so no on-chain data (txids,
+//! tx hashes, addresses) may ever appear in a wallet tool result, in
+//! either direction. Order ids, amounts, statuses, and spending limits
+//! only. Raw-address sends (`send_usdc` / `send_zcash`) are deliberately
+//! not offered here at all — they stay on the MCP/dashboard surfaces.
+//! Spending is additionally bounded per request by [`SpendLedger`]
+//! (default [`DEFAULT_SPEND_CAP_USD`], override via
+//! [`SPEND_CAP_ENV`]) — [`MAX_TOOL_ITERATIONS`] bounds turns, but only a
+//! dollar ceiling bounds what a turn can move — and, when the key carries
+//! one, by the key's **persistent daily budget**
+//! (`provider_keys.daily_budget_usd_cents`, a per-day allowance that
+//! resets at midnight in the wallet's configured IANA timezone — UTC by
+//! default): `buy_credits` reserves against it atomically in SQLite (so
+//! parallel requests can't double-spend it, and the day rolls over inside
+//! the same guarded UPDATE — no sweeper job) and
+//! `pay_order` records redemptions after the fact; an exhausted budget
+//! refuses further spending until midnight or until the wallet owner
+//! raises it from the dashboard.
 //!
 //! Requests require a wallet-scoped provider API key issued by the dashboard.
 //! It binds spending to that wallet; [`McpState::resolve_owned_auth`] then
-//! authenticates it to Overpay for every order.
+//! authenticates it to Overpay for every order. The key's scopes gate the
+//! spending tools: keys are chat-only unless minted with `spend`.
 
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
@@ -56,6 +88,30 @@ const PYTHON_SELLER_SLUG: &str = "exec";
 const PYTHON_LISTING_TITLE: &str = "Run Python Code";
 const RUN_PYTHON_TOOL_NAME: &str = "run_python";
 
+// Model-facing wallet tool names. `buy_credits` (not the MCP tool's `buy`)
+// because to the model it buys *merchant credits*, not products — the name
+// should say what it does without the MCP catalog description around it.
+const GET_BALANCES_TOOL: &str = "get_balances";
+const BROWSE_MARKETPLACE_TOOL: &str = "browse_marketplace";
+const GET_LISTING_TOOL: &str = "get_listing";
+const LIST_ORDERS_TOOL: &str = "list_orders";
+const GET_ORDER_STATUS_TOOL: &str = "get_order_status";
+const CREATE_ORDER_TOOL: &str = "create_order";
+const PAY_ORDER_TOOL: &str = "pay_order";
+const BUY_CREDITS_TOOL: &str = "buy_credits";
+
+/// Default per-request ceiling, in USD, on what the wallet spending tools
+/// may move (cumulative across every tool call in one chat completion).
+/// [`MAX_TOOL_ITERATIONS`] bounds how many turns a request gets; this
+/// bounds the dollars a prompt-injected or confused model can spend within
+/// them. Chat's own internal orders (the OpenRouter turn, `run_python`)
+/// are not counted *here* — per request they're bounded by the iteration
+/// cap — but they do count against the key's **daily budget**, which
+/// bounds everything the key costs per day.
+const DEFAULT_SPEND_CAP_USD: f64 = 20.0;
+/// Environment variable overriding [`DEFAULT_SPEND_CAP_USD`].
+const SPEND_CAP_ENV: &str = "OWALLET_V1_SPEND_CAP_USD";
+
 /// A model id that always works, without needing a live catalog fetch to
 /// validate it: `validate_request` accepts it unconditionally and
 /// `GET /v1/models` always lists it, first. No OpenRouter model id ever
@@ -71,14 +127,18 @@ const RUN_PYTHON_TOOL_NAME: &str = "run_python";
 /// `commands::install::build_provider_entries` in the `owallet` crate.
 const DEFAULT_MODEL: &str = "default";
 
-/// Hard cap on OpenRouter turns per chat completion request. Each
-/// iteration that ends in a tool call is a *real, separately-paid* order
-/// against the Python listing on top of the OpenRouter order itself — a
-/// model that keeps calling tools (retry loops, "let me check that again")
-/// would otherwise spend the wallet's credits without bound. Reached means
-/// the request fails rather than spending further; it does not mean
-/// something is broken.
-const MAX_TOOL_ITERATIONS: u32 = 4;
+/// Hard cap on OpenRouter turns per chat completion request. Was 4 when
+/// the only tool was `run_python` and every iteration implied a second
+/// paid order; most iterations are now cheap read-only wallet/marketplace
+/// calls, and the full purchase loop (browse → get_listing → create_order
+/// → pay_order → confirm) legitimately needs five or more. Each turn still
+/// redeems credits for the chat order itself, so this remains a real bound
+/// on the endpoint's own operating spend — the dollars the wallet tools
+/// can *move* are bounded separately by [`SpendLedger`]. Reaching the cap
+/// no longer fails the request outright: by then real orders may have been
+/// created and paid, so one final turn runs with `tool_choice: "none"`,
+/// forcing the model to report what it actually did.
+const MAX_TOOL_ITERATIONS: u32 = 10;
 
 /// How long a single order (an OpenRouter turn, or a run_python execution)
 /// waits to finish before giving up. OpenAI's own API has no
@@ -109,6 +169,20 @@ struct Ctx {
     mcp: McpState,
     timeout: Duration,
     poll: Duration,
+    /// Whether the authenticated provider key carries the `spend` scope.
+    /// `false` at construction; set per request from the key's stored
+    /// scopes in [`chat_completions`].
+    can_spend: bool,
+    /// The authenticated key's row id — the handle the daily budget is
+    /// accounted against. Every order the endpoint pays on the key's
+    /// behalf (chat turns, `run_python`, and the wallet spending tools)
+    /// records here. `None` at construction; set per request.
+    key_id: Option<String>,
+    /// Fallback per-request USD ceiling for the wallet spending tools —
+    /// see [`SpendLedger`]. Construction-time (env override or default);
+    /// a wallet-level dashboard setting takes precedence per request via
+    /// [`effective_spend_cap`].
+    spend_cap_usd: f64,
 }
 
 pub fn router(state: McpState) -> Router {
@@ -122,10 +196,25 @@ pub fn router(state: McpState) -> Router {
 /// (that's client-side in the real API too), so this is a construction-time
 /// knob only.
 fn router_with_timing(state: McpState, timeout: Duration, poll: Duration) -> Router {
+    let cap = std::env::var(SPEND_CAP_ENV)
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(DEFAULT_SPEND_CAP_USD);
+    router_with_config(state, timeout, poll, cap)
+}
+
+/// Innermost constructor: also fixes the spend cap, bypassing the env
+/// read — tests use this so a parallel test can't race another's
+/// process-global environment.
+fn router_with_config(state: McpState, timeout: Duration, poll: Duration, cap: f64) -> Router {
     let ctx = Ctx {
         mcp: state,
         timeout,
         poll,
+        can_spend: false,
+        key_id: None,
+        spend_cap_usd: cap,
     };
     Router::new()
         .route("/models", get(list_models))
@@ -227,7 +316,7 @@ async fn list_models(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
 ) -> Result<Json<ModelList>, OpenAiError> {
-    let mcp = authenticate_provider_key(&ctx.mcp, &headers)?;
+    let (mcp, _can_spend, _spend_key_id) = authenticate_provider_key(&ctx.mcp, &headers)?;
     let mut models = resolve_models(&mcp).await?;
     // Always offered, first — see `DEFAULT_MODEL`'s doc comment.
     models.insert(0, DEFAULT_MODEL.to_string());
@@ -352,6 +441,833 @@ async fn run_python_tool_def(state: &McpState) -> Result<Value, OpenAiError> {
 }
 
 // ---------------------------------------------------------------------------
+// Wallet tools — MCP handlers behind allowlist projections
+// ---------------------------------------------------------------------------
+//
+// Backed by `crate::tools::dispatch`, but with their own model-facing
+// definitions: the MCP catalog's descriptions promise txids and addresses
+// ("Returns `{tx_hash}`…"), which a model here can never see — a definition
+// that advertises them would just prompt the model to ask for data the
+// projections strip. Argument schemas are defined here for the same reason
+// (pay_order/buy take a subset of what MCP accepts). See the module doc for
+// why the projections are allowlists, not field-stripping.
+
+/// One model-facing wallet tool: its OpenAI function definition parts plus
+/// whether it needs the provider key's `spend` scope.
+struct WalletToolSpec {
+    name: &'static str,
+    description: &'static str,
+    spend: bool,
+    parameters: fn() -> Value,
+}
+
+const WALLET_TOOLS: &[WalletToolSpec] = &[
+    WalletToolSpec {
+        name: GET_BALANCES_TOOL,
+        description: "Check the wallet's balances: ETH / USDC / ZEC amounts, Overpay \
+                      merchant-credit balances per seller, this request's remaining \
+                      spending allowance, and this key's remaining daily budget \
+                      (if one is set; it resets at midnight in the wallet's configured \
+                      timezone).",
+        spend: false,
+        parameters: || json!({"type": "object", "properties": {}, "additionalProperties": false}),
+    },
+    WalletToolSpec {
+        name: BROWSE_MARKETPLACE_TOOL,
+        description: "Browse Overpay marketplace listings, with optional category / \
+                      seller_slug filters and cursor paging. Call get_listing on the one \
+                      you'd act on before create_order.",
+        spend: false,
+        parameters: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "category":    {"type": "string"},
+                    "seller_slug": {"type": "string"},
+                    "limit":       {"type": "integer", "minimum": 1, "maximum": 100},
+                    "cursor":      {"type": "string", "description": "next_cursor from a previous page"},
+                },
+                "additionalProperties": false,
+            })
+        },
+    },
+    WalletToolSpec {
+        name: GET_LISTING_TOOL,
+        description: "Fetch one listing's full description, price, and buyer_note_schema. \
+                      Call this before create_order when the listing declares a structured \
+                      buyer_note shape, so the note can be built to match.",
+        spend: false,
+        parameters: || {
+            json!({
+                "type": "object",
+                "properties": {"listing_id": {"type": "string"}},
+                "required": ["listing_id"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    WalletToolSpec {
+        name: LIST_ORDERS_TOOL,
+        description: "List the wallet's recent orders, newest first — use this to find an \
+                      order id when the user refers to an order without one (\"my pending \
+                      order\"). Optional payment_status / fulfillment_status filters; pass \
+                      the returned next_cursor to page further back.",
+        spend: false,
+        parameters: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "payment_status":     {"type": "string", "description": "e.g. pending, paid"},
+                    "fulfillment_status": {"type": "string", "description": "e.g. pending, awaiting_seller, delivered"},
+                    "limit":              {"type": "integer", "minimum": 1, "maximum": 20},
+                    "cursor":             {"type": "string", "description": "next_cursor from a previous page"},
+                },
+                "additionalProperties": false,
+            })
+        },
+    },
+    WalletToolSpec {
+        name: GET_ORDER_STATUS_TOOL,
+        description: "Check an order's payment and fulfillment status by order id — use \
+                      this to confirm a payment landed. Once the order is delivered, the \
+                      result includes the delivered content (the deliverable the buyer \
+                      paid for), truncated if very large. URLs inside delivered content \
+                      (images, downloads) are minted by the buyer's own marketplace host \
+                      and may point at localhost in a dev setup — they are reachable from \
+                      the user's machine, so present them as-is; do not declare them \
+                      broken, and do not try to fetch them yourself.",
+        spend: false,
+        parameters: || {
+            json!({
+                "type": "object",
+                "properties": {"order_id": {"type": "string"}},
+                "required": ["order_id"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    WalletToolSpec {
+        name: CREATE_ORDER_TOOL,
+        description: "Create a pending order for a marketplace listing. buyer_note may be \
+                      free-form text or a JSON object matching the listing's \
+                      buyer_note_schema (pre-validated locally — violations come back \
+                      spelled out). The order is created unpaid: settle it with pay_order. \
+                      Returns the order id and status.",
+        spend: true,
+        parameters: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "listing_id": {"type": "string"},
+                    "buyer_note": {"description": "Free-form string, or any JSON value matching the listing's buyer_note_schema."},
+                },
+                "required": ["listing_id"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    WalletToolSpec {
+        name: PAY_ORDER_TOOL,
+        description: "Pay a pending order with the wallet's prepaid merchant credits for \
+                      that seller. The seller is resolved from the order automatically. \
+                      Returns the redemption status and remaining credit balance; if \
+                      credits are short, buy_credits first.",
+        spend: true,
+        parameters: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "order_id":    {"type": "string"},
+                    "seller_slug": {"type": "string", "description": "Optional — resolved from the order when omitted."},
+                },
+                "required": ["order_id"],
+                "additionalProperties": false,
+            })
+        },
+    },
+    WalletToolSpec {
+        name: BUY_CREDITS_TOOL,
+        description: "Top up merchant credits with a seller, paid from the wallet. \
+                      Counts against this request's spending allowance and this key's \
+                      daily budget, if one is set. Returns the credit-purchase \
+                      order id and status.",
+        spend: true,
+        parameters: || {
+            json!({
+                "type": "object",
+                "properties": {
+                    "seller_slug": {"type": "string"},
+                    "amount_usd":  {"type": "number"},
+                },
+                "required": ["seller_slug", "amount_usd"],
+                "additionalProperties": false,
+            })
+        },
+    },
+];
+
+fn is_wallet_tool(name: &str) -> bool {
+    WALLET_TOOLS.iter().any(|t| t.name == name)
+}
+
+/// OpenAI function definitions for the wallet tools this key may use.
+/// Spend-gated tools simply don't exist for a chat-only key — not
+/// advertised, and (defense in depth) refused by [`execute_wallet_tool`]
+/// if a model hallucinates one anyway.
+fn wallet_tool_defs(can_spend: bool) -> Vec<Value> {
+    WALLET_TOOLS
+        .iter()
+        .filter(|t| can_spend || !t.spend)
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": (t.parameters)(),
+                }
+            })
+        })
+        .collect()
+}
+
+/// Every tool definition advertised to the model this turn: `run_python`
+/// (listing-backed, resolved live) plus the wallet tools the key's scopes
+/// allow.
+async fn tool_defs(state: &McpState, can_spend: bool) -> Result<Vec<Value>, OpenAiError> {
+    let mut defs = vec![run_python_tool_def(state).await?];
+    defs.extend(wallet_tool_defs(can_spend));
+    Ok(defs)
+}
+
+/// Cumulative per-request USD accounting for the wallet spending tools.
+/// `buy_credits` reserves its amount up front (it's in the arguments);
+/// `pay_order` records what the redemption actually applied after the
+/// fact (partial redemptions make the amount unknowable up front).
+struct SpendLedger {
+    cap_usd: f64,
+    spent_usd: f64,
+}
+
+impl SpendLedger {
+    fn new(cap_usd: f64) -> Self {
+        Self {
+            cap_usd,
+            spent_usd: 0.0,
+        }
+    }
+
+    fn remaining_usd(&self) -> f64 {
+        (self.cap_usd - self.spent_usd).max(0.0)
+    }
+
+    /// Reserve `amount_usd` against the cap, or say why not.
+    fn try_spend(&mut self, amount_usd: f64) -> Result<(), String> {
+        if !(amount_usd.is_finite() && amount_usd > 0.0) {
+            return Err("amount_usd must be a positive number".into());
+        }
+        if self.spent_usd + amount_usd > self.cap_usd {
+            return Err(format!(
+                "spend cap exceeded: ${:.2} requested but only ${:.2} of this request's \
+                 ${:.2} allowance remains",
+                amount_usd,
+                self.remaining_usd(),
+                self.cap_usd
+            ));
+        }
+        self.spent_usd += amount_usd;
+        Ok(())
+    }
+
+    /// Return a reservation that turned out not to spend (payment refused
+    /// before anything moved).
+    fn release(&mut self, amount_usd: f64) {
+        if amount_usd.is_finite() && amount_usd > 0.0 {
+            self.spent_usd = (self.spent_usd - amount_usd).max(0.0);
+        }
+    }
+
+    /// Record spend discovered after the fact (credit redemption amounts).
+    fn record(&mut self, amount_usd: f64) {
+        if amount_usd.is_finite() && amount_usd > 0.0 {
+            self.spent_usd += amount_usd;
+        }
+    }
+}
+
+fn usd_to_cents(usd: f64) -> i64 {
+    (usd * 100.0).round() as i64
+}
+
+fn cents_to_usd(cents: i64) -> f64 {
+    cents as f64 / 100.0
+}
+
+/// Read the authenticated key's row for budget display / gating. `None`
+/// when there is no key context (or the key was revoked mid-request).
+fn read_key(state: &McpState, key_id: Option<&str>) -> Option<owallet_db::ProviderKeyRow> {
+    let id = key_id?;
+    state.db.lock().ok()?.read_provider_key(id).ok()?
+}
+
+/// The per-request spend cap in effect for this request: the wallet's
+/// dashboard-set override when present (read per request, so an edit
+/// applies without restarting the server), else the construction-time
+/// fallback (`OWALLET_V1_SPEND_CAP_USD` env override or
+/// [`DEFAULT_SPEND_CAP_USD`]).
+fn effective_spend_cap(ctx: &Ctx) -> f64 {
+    ctx.mcp
+        .db
+        .lock()
+        .ok()
+        .and_then(|db| db.read_spend_cap_usd_cents().ok().flatten())
+        .map(|cents| cents as f64 / 100.0)
+        .unwrap_or(ctx.spend_cap_usd)
+}
+
+/// `Some(refusal)` when the key's daily budget is spent. Checked at
+/// request start (clean refusal before any order is placed) and before
+/// each loop turn (mid-request exhaustion breaks to the landing turn
+/// instead — see the loop docs).
+fn exhausted_key_budget(state: &McpState, key_id: Option<&str>) -> Option<OpenAiError> {
+    let key = read_key(state, key_id)?;
+    if key.remaining_today_usd_cents() != Some(0) {
+        return None;
+    }
+    Some(OpenAiError::PaymentRequired(format!(
+        "daily budget exhausted: this key's ${:.2} daily budget is spent — it resets at \
+         midnight in the wallet's timezone, and the wallet owner can raise it from the \
+         owallet dashboard",
+        key.daily_budget_usd_cents.unwrap_or(0) as f64 / 100.0
+    )))
+}
+
+/// Reserve `amount_usd` against the key's persistent budget, atomically.
+/// `Ok` when no key is being tracked (shouldn't happen for spend tools) or
+/// the amount fit; `Err` carries the model-facing refusal.
+fn reserve_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) -> ReserveResult {
+    let Some(id) = key_id else {
+        return Ok(());
+    };
+    let cents = usd_to_cents(amount_usd);
+    if cents <= 0 {
+        return Ok(());
+    }
+    let outcome = state
+        .db
+        .lock()
+        .map_err(|e| format!("db mutex: {e}"))?
+        .try_reserve_provider_key_spend(id, cents)
+        .map_err(|e| format!("budget check failed: {e}"))?;
+    match outcome {
+        owallet_db::BudgetReservation::Reserved => Ok(()),
+        owallet_db::BudgetReservation::OverBudget {
+            daily_budget_usd_cents,
+            remaining_today_usd_cents,
+        } => Err(format!(
+            "key budget exceeded: ${:.2} requested but only ${:.2} of this key's ${:.2} \
+             daily budget remains — it resets at the wallet's local midnight, and the \
+             wallet owner can raise it from the wallet dashboard",
+            amount_usd,
+            cents_to_usd(remaining_today_usd_cents),
+            cents_to_usd(daily_budget_usd_cents),
+        )),
+        owallet_db::BudgetReservation::KeyMissing => {
+            Err("this API key has been revoked".to_string())
+        }
+    }
+}
+
+type ReserveResult = std::result::Result<(), String>;
+
+/// Hand back a key-budget reservation whose payment never moved funds.
+/// Best-effort: a failure here strands allowance (safe direction).
+fn release_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) {
+    let Some(id) = key_id else { return };
+    let cents = usd_to_cents(amount_usd);
+    if cents <= 0 {
+        return;
+    }
+    if let Ok(db) = state.db.lock() {
+        let _ = db.release_provider_key_spend(id, cents);
+    }
+}
+
+/// Record key-budget spend knowable only after the fact (credit
+/// redemptions). Best-effort in the same direction as the in-memory
+/// ledger: an overshoot just makes the key refuse everything after.
+fn record_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) {
+    let Some(id) = key_id else { return };
+    let cents = usd_to_cents(amount_usd);
+    if cents <= 0 {
+        return;
+    }
+    if let Ok(db) = state.db.lock() {
+        let _ = db.record_provider_key_spend(id, cents);
+    }
+}
+
+/// Allowlist projection of `get_account_info`: balances, credits, and the
+/// spend allowance. Never copies whole sub-objects — every emitted field is
+/// named here, so a field added to the MCP handler later can't leak.
+fn project_balances(
+    data: &Value,
+    ledger: &SpendLedger,
+    key: Option<&owallet_db::ProviderKeyRow>,
+) -> Value {
+    let mut out = serde_json::Map::new();
+    if let Some(v) = data.pointer("/eth_balance/formatted") {
+        out.insert("eth_balance".into(), v.clone());
+    }
+    if let Some(v) = data.pointer("/usdc_balance/formatted") {
+        out.insert("usdc_balance".into(), v.clone());
+    }
+    if let Some(v) = data.pointer("/zec_balance/zec") {
+        out.insert("zec_balance".into(), v.clone());
+    }
+    if let Some(v) = data.get("balance_error") {
+        out.insert("balance_error".into(), v.clone());
+    }
+    // Merchant credits arrive as the raw Rails `{data: [...]}` list; keep
+    // only who holds them and how much.
+    let credits = data
+        .pointer("/merchant_credits/data")
+        .or_else(|| data.get("merchant_credits"))
+        .and_then(Value::as_array);
+    if let Some(rows) = credits {
+        let projected: Vec<Value> = rows
+            .iter()
+            .map(|c| {
+                let mut row = serde_json::Map::new();
+                for key in ["holder_type", "seller_slug", "organization_slug"] {
+                    if let Some(v) = c.get(key) {
+                        row.insert(key.into(), v.clone());
+                    }
+                }
+                if let Some(v) = c.get("balance_cents") {
+                    row.insert("balance_cents".into(), v.clone());
+                }
+                Value::Object(row)
+            })
+            .collect();
+        out.insert("merchant_credits".into(), json!(projected));
+    }
+    out.insert(
+        "spend_allowance".into(),
+        json!({
+            "cap_usd": ledger.cap_usd,
+            "spent_usd": ledger.spent_usd,
+            "remaining_usd": ledger.remaining_usd(),
+        }),
+    );
+    // The key's persistent daily budget (spend keys only; resets at
+    // midnight in the wallet's timezone). `null` budget/remaining means no
+    // limit was set.
+    if let Some(key) = key {
+        out.insert(
+            "key_budget".into(),
+            json!({
+                "daily_budget_usd": key.daily_budget_usd_cents.map(cents_to_usd),
+                "spent_today_usd": cents_to_usd(key.spent_today_usd_cents()),
+                "remaining_today_usd": key.remaining_today_usd_cents().map(cents_to_usd),
+            }),
+        );
+    }
+    Value::Object(out)
+}
+
+/// Shared allowlist for one marketplace listing. Listings are public data,
+/// so the projection is about consistency and context economy rather than
+/// secrecy: image/checkout URLs and non-decision fields stay out of the
+/// conversation that ships to the OpenRouter seller. `detail` adds the
+/// fields an ordering flow needs (full description arrives naturally —
+/// the detail endpoint returns it untruncated under the same key).
+fn project_listing(listing: &Value, detail: bool) -> Value {
+    let mut row = serde_json::Map::new();
+    if let Some(id) = listing.get("id").or_else(|| listing.get("listing_id")) {
+        row.insert("listing_id".into(), id.clone());
+    }
+    for key in [
+        "title",
+        "description",
+        "price_usd",
+        "free",
+        "currency",
+        "category",
+        "condition",
+        "quantity",
+        "delivery_eta_seconds",
+    ] {
+        if let Some(v) = listing.get(key) {
+            row.insert(key.into(), v.clone());
+        }
+    }
+    if let Some(slug) = listing.pointer("/seller/slug") {
+        row.insert("seller_slug".into(), slug.clone());
+    }
+    if let Some(name) = listing.pointer("/seller/name") {
+        row.insert("seller_name".into(), name.clone());
+    }
+    if detail {
+        for key in ["buyer_note_schema", "delivered_content_type"] {
+            if let Some(v) = listing.get(key).filter(|v| !v.is_null()) {
+                row.insert(key.into(), v.clone());
+            }
+        }
+    }
+    Value::Object(row)
+}
+
+/// Allowlist projection of `list_marketplace`: compact listing rows plus
+/// the pagination cursor.
+fn project_marketplace(data: &Value) -> Value {
+    let rows: Vec<Value> = data
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|listings| listings.iter().map(|l| project_listing(l, false)).collect())
+        .unwrap_or_default();
+    let mut out = serde_json::Map::new();
+    out.insert("listings".into(), json!(rows));
+    if let Some(cursor) = data.get("next_cursor").filter(|c| !c.is_null()) {
+        out.insert("next_cursor".into(), cursor.clone());
+    }
+    Value::Object(out)
+}
+
+/// Allowlist projection of `get_listing` (the `{data: {...}}` envelope or
+/// flat): the browse row plus the ordering-flow fields.
+fn project_listing_detail(data: &Value) -> Value {
+    project_listing(data.get("data").unwrap_or(data), true)
+}
+
+/// Allowlist projection of `get_wallet_orders`: one compact row per order,
+/// plus the pagination cursor. Each raw row carries `settlement_tx_hash`,
+/// `order_url`, tracking fields, and the `buyer_note` (an arbitrary
+/// seller-bound payload that should not be re-shipped to the OpenRouter
+/// seller) — none of that exists here.
+fn project_orders_list(data: &Value) -> Value {
+    let rows = data
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|orders| {
+            orders
+                .iter()
+                .map(|order| {
+                    let mut row = serde_json::Map::new();
+                    if let Some(id) = order.get("id").or_else(|| order.get("order_id")) {
+                        row.insert("order_id".into(), id.clone());
+                    }
+                    for key in [
+                        "product_title",
+                        "payment_status",
+                        "fulfillment_status",
+                        "total_usd",
+                        "created_at",
+                    ] {
+                        if let Some(v) = order.get(key) {
+                            row.insert(key.into(), v.clone());
+                        }
+                    }
+                    Value::Object(row)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut out = serde_json::Map::new();
+    out.insert("orders".into(), json!(rows));
+    if let Some(cursor) = data.get("next_cursor").filter(|c| !c.is_null()) {
+        out.insert("next_cursor".into(), cursor.clone());
+    }
+    Value::Object(out)
+}
+
+/// Ceiling on how much `delivered_content` the `get_order_status` wallet
+/// tool hands the model. The deliverable is exactly what the buyer paid
+/// for, so it belongs in the conversation — but everything in `messages`
+/// re-ships to the OpenRouter seller every turn, so an unbounded blob
+/// would blow the context (and the buyer's per-turn cost) for the rest of
+/// the chat.
+const DELIVERED_CONTENT_MODEL_CAP: usize = 8 * 1024;
+
+/// Allowlist projection of `get_order_status`: identity + statuses +
+/// price + (once delivered) the deliverable itself, capped at
+/// [`DELIVERED_CONTENT_MODEL_CAP`] on a character boundary. The raw order
+/// payload carries `settlement_tx_hash` (and, on some shapes, payment
+/// details) — none of that exists here.
+fn project_order_status(data: &Value) -> Value {
+    let order = data.get("data").unwrap_or(data);
+    let mut out = serde_json::Map::new();
+    if let Some(id) = order.get("id").or_else(|| order.get("order_id")) {
+        out.insert("order_id".into(), id.clone());
+    }
+    for key in [
+        "product_title",
+        "payment_status",
+        "fulfillment_status",
+        "total_usd",
+    ] {
+        if let Some(v) = order.get(key) {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    if let Some(url) = order
+        .get("delivered_content_url")
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty())
+    {
+        // File deliverable: the blob lives behind a marketplace download
+        // URL rather than inline (not on-chain data — it's the same link
+        // the web order page offers the buyer).
+        out.insert("delivered_content_url".into(), json!(url));
+    } else if let Some(content) = order.get("delivered_content").and_then(Value::as_str) {
+        if content.len() > DELIVERED_CONTENT_MODEL_CAP {
+            let mut end = DELIVERED_CONTENT_MODEL_CAP;
+            while !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.insert("delivered_content".into(), json!(&content[..end]));
+            out.insert("delivered_content_truncated".into(), json!(true));
+        } else {
+            out.insert("delivered_content".into(), json!(content));
+        }
+    }
+    if let Some(v) = order.get("delivered_content_type") {
+        out.insert("delivered_content_type".into(), v.clone());
+    }
+    Value::Object(out)
+}
+
+/// Allowlist projection of `pay_order`'s (already flat, credits-only)
+/// result, plus the updated spend allowance (and key budget, if bounded).
+fn project_pay_order(
+    data: &Value,
+    ledger: &SpendLedger,
+    key: Option<&owallet_db::ProviderKeyRow>,
+) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in [
+        "order_id",
+        "seller_slug",
+        "status",
+        "amount_redeemed_cents",
+        "credit_balance_cents",
+        "message",
+        "error",
+        "hint",
+    ] {
+        if let Some(v) = data.get(key) {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    out.insert("remaining_spend_usd".into(), json!(ledger.remaining_usd()));
+    insert_key_remaining(&mut out, key);
+    Value::Object(out)
+}
+
+/// Allowlist projection of `buy`: the MCP result carries `tx_hash`/`txid`,
+/// the payment address, and a web `order_url` — the model gets the order
+/// id, the status, and the amount it asked for.
+fn project_buy(
+    data: &Value,
+    amount_usd: f64,
+    ledger: &SpendLedger,
+    key: Option<&owallet_db::ProviderKeyRow>,
+) -> Value {
+    let mut out = serde_json::Map::new();
+    if let Some(err) = data.get("error") {
+        out.insert("error".into(), err.clone());
+    } else {
+        out.insert(
+            "status".into(),
+            data.get("status").cloned().unwrap_or(json!("payment_sent")),
+        );
+        out.insert("amount_usd".into(), json!(amount_usd));
+        if let Some(v) = data.get("note") {
+            out.insert("note".into(), v.clone());
+        }
+    }
+    if let Some(id) = data.get("order_id") {
+        out.insert("order_id".into(), id.clone());
+    }
+    out.insert("remaining_spend_usd".into(), json!(ledger.remaining_usd()));
+    insert_key_remaining(&mut out, key);
+    Value::Object(out)
+}
+
+/// Add the key's remaining daily budget to a spend-tool result — only
+/// when the key actually has a budget, so unlimited keys stay noise-free.
+fn insert_key_remaining(
+    out: &mut serde_json::Map<String, Value>,
+    key: Option<&owallet_db::ProviderKeyRow>,
+) {
+    if let Some(remaining) = key.and_then(|k| k.remaining_today_usd_cents()) {
+        out.insert(
+            "key_budget_remaining_today_usd".into(),
+            json!(cents_to_usd(remaining)),
+        );
+    }
+}
+
+/// Execute one wallet tool call and return its (projected) result as the
+/// `content` string for a `role: "tool"` message. Like
+/// [`execute_tool_call`], never `Err` — failures become `{"error": ...}`
+/// strings the model can react to.
+async fn execute_wallet_tool(
+    state: &McpState,
+    name: &str,
+    arguments: &Value,
+    can_spend: bool,
+    key_id: Option<&str>,
+    ledger: &mut SpendLedger,
+) -> String {
+    let Some(spec) = WALLET_TOOLS.iter().find(|t| t.name == name) else {
+        return json!({"error": format!("unknown tool '{name}'")}).to_string();
+    };
+    if spec.spend && !can_spend {
+        return json!({
+            "error": "this API key is chat-only — wallet spending tools require a key \
+                      minted with the spend scope (dashboard: create a provider key \
+                      with spending allowed)"
+        })
+        .to_string();
+    }
+
+    match name {
+        GET_BALANCES_TOOL => {
+            match crate::tools::dispatch(state, "get_account_info", json!({}), None).await {
+                Ok(out) => {
+                    let key = read_key(state, key_id);
+                    project_balances(&out.data, ledger, key.as_ref()).to_string()
+                }
+                Err(e) => json!({"error": e.to_string()}).to_string(),
+            }
+        }
+        BROWSE_MARKETPLACE_TOOL => {
+            match crate::tools::dispatch(state, "list_marketplace", arguments.clone(), None).await {
+                Ok(out) => project_marketplace(&out.data).to_string(),
+                Err(e) => json!({"error": e.to_string()}).to_string(),
+            }
+        }
+        GET_LISTING_TOOL => {
+            match crate::tools::dispatch(state, "get_listing", arguments.clone(), None).await {
+                Ok(out) => project_listing_detail(&out.data).to_string(),
+                Err(e) => json!({"error": e.to_string()}).to_string(),
+            }
+        }
+        LIST_ORDERS_TOOL => {
+            match crate::tools::dispatch(state, "get_wallet_orders", arguments.clone(), None).await
+            {
+                Ok(out) => project_orders_list(&out.data).to_string(),
+                Err(e) => json!({"error": e.to_string()}).to_string(),
+            }
+        }
+        GET_ORDER_STATUS_TOOL => {
+            // Ask the MCP handler to keep delivered_content inline (it
+            // otherwise strips large blobs to a local-cache pointer the
+            // model can't follow); the projection applies its own cap.
+            let mut dispatch_args = arguments.clone();
+            if let Some(obj) = dispatch_args.as_object_mut() {
+                obj.insert("include_delivered_content".into(), json!(true));
+            }
+            match crate::tools::dispatch(state, "get_order_status", dispatch_args, None).await {
+                Ok(out) => project_order_status(&out.data).to_string(),
+                Err(e) => json!({"error": e.to_string()}).to_string(),
+            }
+        }
+        CREATE_ORDER_TOOL => {
+            match crate::tools::dispatch(state, "create_order", arguments.clone(), None).await {
+                // Creation itself is unpaid, so nothing is recorded against
+                // the ledger — pay_order settles (and accounts for) it.
+                Ok(out) => project_order_status(&out.data).to_string(),
+                Err(e) => json!({"error": e.to_string()}).to_string(),
+            }
+        }
+        PAY_ORDER_TOOL => {
+            if ledger.remaining_usd() <= 0.0 {
+                return json!({
+                    "error": format!(
+                        "spend cap exhausted: this request's ${:.2} allowance is spent",
+                        ledger.cap_usd
+                    )
+                })
+                .to_string();
+            }
+            // Same soft gate against the key's persistent budget: a
+            // redemption's amount is knowable only after the fact, so an
+            // exhausted budget refuses up front and the actual amount is
+            // recorded after.
+            if let Some(key) = read_key(state, key_id) {
+                if key.remaining_today_usd_cents() == Some(0) {
+                    return json!({
+                        "error": format!(
+                            "key budget exhausted: this key's ${:.2} daily budget is \
+                             spent — it resets at the wallet's local midnight, and the \
+                             wallet owner can raise it from the wallet dashboard",
+                            cents_to_usd(key.daily_budget_usd_cents.unwrap_or(0))
+                        )
+                    })
+                    .to_string();
+                }
+            }
+            match crate::tools::dispatch(state, "pay_order", arguments.clone(), None).await {
+                Ok(out) => {
+                    // What the redemption actually applied counts against
+                    // the allowance — knowable only after the fact.
+                    if let Some(cents) = out
+                        .data
+                        .get("amount_redeemed_cents")
+                        .and_then(Value::as_f64)
+                    {
+                        ledger.record(cents / 100.0);
+                        record_key_budget(state, key_id, cents / 100.0);
+                    }
+                    let key = read_key(state, key_id);
+                    project_pay_order(&out.data, ledger, key.as_ref()).to_string()
+                }
+                Err(e) => json!({"error": e.to_string()}).to_string(),
+            }
+        }
+        BUY_CREDITS_TOOL => {
+            let amount_usd = arguments
+                .get("amount_usd")
+                .and_then(Value::as_f64)
+                .unwrap_or(f64::NAN);
+            if let Err(reason) = ledger.try_spend(amount_usd) {
+                return json!({"error": reason}).to_string();
+            }
+            // The amount is in the arguments, so the key budget reserves up
+            // front too — atomically, so parallel requests on the same key
+            // can't both squeeze through the last dollar.
+            if let Err(reason) = reserve_key_budget(state, key_id, amount_usd) {
+                ledger.release(amount_usd);
+                return json!({"error": reason}).to_string();
+            }
+            match crate::tools::dispatch(state, "buy", arguments.clone(), None).await {
+                Ok(out) => {
+                    // `buy`'s soft-error shapes mean the payment was NOT
+                    // sent (order created but unpaid) — nothing left the
+                    // wallet, so the reservation goes back.
+                    if out.data.get("error").is_some() {
+                        ledger.release(amount_usd);
+                        release_key_budget(state, key_id, amount_usd);
+                    }
+                    let key = read_key(state, key_id);
+                    project_buy(&out.data, amount_usd, ledger, key.as_ref()).to_string()
+                }
+                Err(e) => {
+                    // Hard errors fire before any payment is broadcast
+                    // (argument/order-creation failures) — release too.
+                    ledger.release(amount_usd);
+                    release_key_budget(state, key_id, amount_usd);
+                    json!({"error": e.to_string()}).to_string()
+                }
+            }
+        }
+        _ => json!({"error": format!("unknown tool '{name}'")}).to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /v1/chat/completions
 // ---------------------------------------------------------------------------
 
@@ -370,9 +1286,10 @@ struct ChatCompletionRequest {
     #[serde(default)]
     stream: bool,
     // Caller-supplied `tools`/`tool_choice` are deliberately not read: this
-    // endpoint always offers exactly one tool (`run_python`) and executes
-    // it itself — see the module doc. A caller's own tool definitions
-    // would produce tool_calls nothing here knows how to run.
+    // endpoint decides its own tool roster (`run_python` plus the wallet
+    // tools the key's scopes allow) and executes every call itself — see
+    // the module doc. A caller's own tool definitions would produce
+    // tool_calls nothing here knows how to run.
 }
 
 /// `content` is a bare string in the common case, but some OpenAI-compatible
@@ -442,11 +1359,22 @@ async fn chat_completions(
     headers: HeaderMap,
     Json(req): Json<ChatCompletionRequest>,
 ) -> Response {
-    let mcp = match authenticate_provider_key(&ctx.mcp, &headers) {
-        Ok(mcp) => mcp,
+    let (mcp, can_spend, key_id) = match authenticate_provider_key(&ctx.mcp, &headers) {
+        Ok(auth) => auth,
         Err(e) => return e.into_response(),
     };
-    let ctx = Ctx { mcp, ..ctx };
+    let ctx = Ctx {
+        mcp,
+        can_spend,
+        key_id,
+        ..ctx
+    };
+    // The daily budget bounds *everything* the key costs — each chat turn
+    // is itself a paid order — so an exhausted key refuses cleanly before
+    // any order is placed rather than erroring mid-conversation.
+    if let Some(exhausted) = exhausted_key_budget(&ctx.mcp, ctx.key_id.as_deref()) {
+        return exhausted.into_response();
+    }
     if let Err(e) = validate_request(&ctx.mcp, &req).await {
         return e.into_response();
     }
@@ -462,26 +1390,29 @@ async fn chat_completions(
 }
 
 /// Check an OpenAI-compatible bearer credential and return state pinned to
-/// its wallet. Provider key verifiers live in SQLite, so a database copy does
+/// its wallet, plus whether the key's scopes allow the wallet spending
+/// tools and (when they do) the key id the spending budget is accounted
+/// against. Provider key verifiers live in SQLite, so a database copy does
 /// not reveal usable spending credentials.
 fn authenticate_provider_key(
     state: &McpState,
     headers: &HeaderMap,
-) -> Result<McpState, OpenAiError> {
+) -> Result<(McpState, bool, Option<String>), OpenAiError> {
     let value = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .filter(|token| !token.is_empty())
         .ok_or_else(|| OpenAiError::Unauthorized("missing provider API key".into()))?;
-    let npub = state
+    let key = state
         .db
         .lock()
         .map_err(|e| OpenAiError::internal(format!("db mutex: {e}")))?
-        .read_provider_key_npub(value)
+        .read_provider_key_auth(value)
         .map_err(|e| OpenAiError::internal(format!("provider key lookup: {e}")))?
         .ok_or_else(|| OpenAiError::Unauthorized("invalid provider API key".into()))?;
-    Ok(state.with_npub(Some(npub)))
+    let can_spend = key.can_spend();
+    Ok((state.with_npub(Some(key.npub)), can_spend, Some(key.id)))
 }
 
 async fn validate_request(
@@ -522,6 +1453,7 @@ async fn place_and_pay_order(
     listing_id: &str,
     seller_slug: &str,
     buyer_note: &Value,
+    key_id: Option<&str>,
 ) -> Result<String, OpenAiError> {
     let note_str = serde_json::to_string(buyer_note)
         .map_err(|e| OpenAiError::internal(format!("could not encode buyer_note: {e}")))?;
@@ -555,6 +1487,18 @@ async fn place_and_pay_order(
         return Err(OpenAiError::PaymentRequired(format!(
             "{message} — load more with the wallet's `load_core_credits` MCP tool or the dashboard"
         )));
+    }
+
+    // The endpoint's own operating spend counts against the key's daily
+    // budget too — a budget is a bound on what the key costs per day, not
+    // just on what the wallet tools move. (The per-request SpendLedger
+    // deliberately still excludes it: iterations bound per-request
+    // operating spend.) Recorded after the fact like a redemption.
+    if let Some(cents) = redeem
+        .pointer("/data/amount_redeemed_cents")
+        .and_then(Value::as_f64)
+    {
+        record_key_budget(state, key_id, cents / 100.0);
     }
 
     Ok(order_id)
@@ -664,18 +1608,22 @@ fn is_terminal(status: Option<&str>) -> bool {
 /// can react to (retry differently, apologize, ask a clarifying question),
 /// same as how a real coding agent would surface a failed tool call rather
 /// than crashing the whole conversation over it.
+#[allow(clippy::too_many_arguments)]
 async fn execute_tool_call(
     state: &McpState,
     auth: &OwnedAuth,
     call: &Value,
     timeout: Duration,
     poll: Duration,
+    can_spend: bool,
+    key_id: Option<&str>,
+    ledger: &mut SpendLedger,
 ) -> String {
     let name = call
         .pointer("/function/name")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if name != RUN_PYTHON_TOOL_NAME {
+    if name != RUN_PYTHON_TOOL_NAME && !is_wallet_tool(name) {
         return json!({"error": format!("unknown tool '{name}'")}).to_string();
     }
 
@@ -691,7 +1639,11 @@ async fn execute_tool_call(
         }
     };
 
-    match run_python_tool(state, auth, &arguments, timeout, poll).await {
+    if is_wallet_tool(name) {
+        return execute_wallet_tool(state, name, &arguments, can_spend, key_id, ledger).await;
+    }
+
+    match run_python_tool(state, auth, &arguments, timeout, poll, key_id).await {
         Ok(result) => result.to_string(),
         Err(e) => json!({"error": e.message()}).to_string(),
     }
@@ -703,10 +1655,18 @@ async fn run_python_tool(
     arguments: &Value,
     timeout: Duration,
     poll: Duration,
+    key_id: Option<&str>,
 ) -> Result<Value, OpenAiError> {
     let listing_id = resolve_python_listing_id(state).await?;
-    let order_id =
-        place_and_pay_order(state, auth, &listing_id, PYTHON_SELLER_SLUG, arguments).await?;
+    let order_id = place_and_pay_order(
+        state,
+        auth,
+        &listing_id,
+        PYTHON_SELLER_SLUG,
+        arguments,
+        key_id,
+    )
+    .await?;
     let snap = wait_for_order_terminal(state, auth, &order_id, timeout, poll).await?;
     extract_python_delivered(&snap)
 }
@@ -757,14 +1717,21 @@ async fn run_agentic_loop(
     requested_model: &str,
 ) -> Result<AgentResult, OpenAiError> {
     let listing_id = resolve_openrouter_listing_id(&ctx.mcp).await?;
-    let tool_def = run_python_tool_def(&ctx.mcp).await?;
+    let defs = tool_defs(&ctx.mcp, ctx.can_spend).await?;
+    let mut ledger = SpendLedger::new(effective_spend_cap(ctx));
     let mut last_model = requested_model.to_string();
 
     for _ in 0..MAX_TOOL_ITERATIONS {
+        // Mid-request exhaustion of the daily budget breaks to the landing
+        // turn (which costs one more turn — accepted overshoot) so the
+        // model reports what it already did instead of a dropped request.
+        if exhausted_key_budget(&ctx.mcp, ctx.key_id.as_deref()).is_some() {
+            break;
+        }
         let buyer_note = json!({
             "model": requested_model,
             "messages": messages,
-            "tools": [tool_def],
+            "tools": defs,
             "tool_choice": "auto",
         });
         let order_id = place_and_pay_order(
@@ -773,6 +1740,7 @@ async fn run_agentic_loop(
             &listing_id,
             OPENROUTER_SELLER_SLUG,
             &buyer_note,
+            ctx.key_id.as_deref(),
         )
         .await?;
         let snap =
@@ -799,7 +1767,17 @@ async fn run_agentic_loop(
             "tool_calls": delivered.tool_calls,
         }));
         for call in &delivered.tool_calls {
-            let result_text = execute_tool_call(&ctx.mcp, auth, call, ctx.timeout, ctx.poll).await;
+            let result_text = execute_tool_call(
+                &ctx.mcp,
+                auth,
+                call,
+                ctx.timeout,
+                ctx.poll,
+                ctx.can_spend,
+                ctx.key_id.as_deref(),
+                &mut ledger,
+            )
+            .await;
             let tool_call_id = call.get("id").and_then(Value::as_str).unwrap_or_default();
             messages.push(
                 json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }),
@@ -807,10 +1785,45 @@ async fn run_agentic_loop(
         }
     }
 
-    Err(OpenAiError::UpstreamFailure(format!(
-        "the model kept calling tools past the {MAX_TOOL_ITERATIONS}-iteration safety cap \
-         (each call is a real, paid order) — stopping rather than spending further"
-    )))
+    // Cap reached. Real orders may have been created and paid along the
+    // way — an error now would throw that context away. One final turn
+    // with tools disabled forces the model to report what it actually did;
+    // only if it *still* yields no text does the request fail.
+    let buyer_note = json!({
+        "model": requested_model,
+        "messages": messages,
+        "tools": defs,
+        "tool_choice": "none",
+    });
+    let order_id = place_and_pay_order(
+        &ctx.mcp,
+        auth,
+        &listing_id,
+        OPENROUTER_SELLER_SLUG,
+        &buyer_note,
+        ctx.key_id.as_deref(),
+    )
+    .await?;
+    let snap = wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
+    let delivered = extract_openrouter_delivered(&snap)?;
+    if delivered.error {
+        return Err(OpenAiError::UpstreamFailure(delivered.text));
+    }
+    if !delivered.model.is_empty() {
+        last_model = delivered.model;
+    }
+    if delivered.text.is_empty() {
+        return Err(OpenAiError::UpstreamFailure(format!(
+            "the model kept calling tools past the {MAX_TOOL_ITERATIONS}-iteration safety cap \
+             and gave no final answer even with tools disabled — stopping rather than \
+             spending further"
+        )));
+    }
+    Ok(AgentResult {
+        text: delivered.text,
+        model: last_model,
+        order_id,
+    })
 }
 
 async fn buffered_chat_completion(
@@ -947,13 +1960,14 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 return;
             }
         };
-        let tool_def = match run_python_tool_def(&ctx.mcp).await {
+        let defs = match tool_defs(&ctx.mcp, ctx.can_spend).await {
             Ok(d) => d,
             Err(e) => {
                 for ev in error_events("error", &requested_model, e) { yield Ok(ev); }
                 return;
             }
         };
+        let mut ledger = SpendLedger::new(effective_spend_cap(&ctx));
 
         let mut last_model = requested_model.clone();
         // Filled in once the first order places; every chunk after that —
@@ -961,13 +1975,17 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
         let mut response_id = String::new();
 
         for _ in 0..MAX_TOOL_ITERATIONS {
+            // Same mid-request budget break as the buffered loop.
+            if exhausted_key_budget(&ctx.mcp, ctx.key_id.as_deref()).is_some() {
+                break;
+            }
             let buyer_note = json!({
                 "model": requested_model,
                 "messages": messages,
-                "tools": [tool_def.clone()],
+                "tools": defs.clone(),
                 "tool_choice": "auto",
             });
-            let order_id = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note).await {
+            let order_id = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
                 Ok(id) => id,
                 Err(e) => {
                     let id = if response_id.is_empty() { "error" } else { response_id.as_str() };
@@ -1046,7 +2064,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or_default();
                 let tool_call_id = call.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
 
-                if name != RUN_PYTHON_TOOL_NAME {
+                if name != RUN_PYTHON_TOOL_NAME && !is_wallet_tool(name) {
                     let result_text = json!({"error": format!("unknown tool '{name}'")}).to_string();
                     messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
                     continue 'tool_calls;
@@ -1061,7 +2079,18 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     }
                 };
 
-                let python_order_id = match place_and_pay_order(&ctx.mcp, &auth, &python_listing_id, PYTHON_SELLER_SLUG, &arguments).await {
+                // Wallet tools have no partial output to forward — execute,
+                // record the (projected) result, and move on. An SSE comment
+                // keeps idle-timeout intermediaries from hanging up while a
+                // slower one (a ZEC-paid buy syncs + proves) runs.
+                if is_wallet_tool(name) {
+                    yield Ok(Event::default().comment("owallet: running a wallet tool"));
+                    let result_text = execute_wallet_tool(&ctx.mcp, name, &arguments, ctx.can_spend, ctx.key_id.as_deref(), &mut ledger).await;
+                    messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
+                    continue 'tool_calls;
+                }
+
+                let python_order_id = match place_and_pay_order(&ctx.mcp, &auth, &python_listing_id, PYTHON_SELLER_SLUG, &arguments, ctx.key_id.as_deref()).await {
                     Ok(id) => id,
                     Err(e) => {
                         let result_text = json!({"error": e.message()}).to_string();
@@ -1121,12 +2150,83 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             }
         }
 
-        let id = if response_id.is_empty() { "error" } else { response_id.as_str() };
-        let err = OpenAiError::UpstreamFailure(format!(
-            "the model kept calling tools past the {MAX_TOOL_ITERATIONS}-iteration safety cap \
-             (each call is a real, paid order) — stopping rather than spending further"
-        ));
-        for ev in error_events(id, &last_model, err) { yield Ok(ev); }
+        // Cap reached — same landing as run_agentic_loop's: one final turn
+        // with tools disabled, streamed like any other, so the client still
+        // hears what actually happened (orders may already be paid).
+        let buyer_note = json!({
+            "model": requested_model,
+            "messages": messages,
+            "tools": defs.clone(),
+            "tool_choice": "none",
+        });
+        let order_id = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
+            Ok(id) => id,
+            Err(e) => {
+                let id = if response_id.is_empty() { "error" } else { response_id.as_str() };
+                for ev in error_events(id, &last_model, e) { yield Ok(ev); }
+                return;
+            }
+        };
+        if response_id.is_empty() {
+            response_id = order_id.clone();
+            yield Ok(chunk_event(&response_id, &last_model, json!({"role": "assistant"}), None));
+        }
+        let mut streamed = 0usize;
+        let start = Instant::now();
+        let snap = loop {
+            let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                Ok(s) => s,
+                Err(e) => {
+                    for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
+                    return;
+                }
+            };
+            let (partial, _seq) = partial_output(&snap);
+            match new_output_since(partial, &mut streamed) {
+                Some(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
+                None => yield Ok(Event::default().comment("owallet: waiting on the model")),
+            }
+            if is_terminal(order_status(&snap)) {
+                break snap;
+            }
+            if start.elapsed() >= ctx.timeout {
+                let err = OpenAiError::UpstreamFailure(format!(
+                    "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
+                ));
+                for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
+                return;
+            }
+            tokio::time::sleep(ctx.poll).await;
+        };
+        let delivered = match extract_openrouter_delivered(&snap) {
+            Ok(d) => d,
+            Err(e) => {
+                for ev in error_events(&response_id, &last_model, e) { yield Ok(ev); }
+                return;
+            }
+        };
+        if delivered.error {
+            let err = OpenAiError::UpstreamFailure(delivered.text);
+            for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
+            return;
+        }
+        if !delivered.model.is_empty() {
+            last_model = delivered.model.clone();
+        }
+        if let Some(tail) = catch_up(&delivered.text, streamed) {
+            yield Ok(chunk_event(&response_id, &last_model, json!({"content": tail}), None));
+        }
+        if delivered.text.is_empty() {
+            let err = OpenAiError::UpstreamFailure(format!(
+                "the model kept calling tools past the {MAX_TOOL_ITERATIONS}-iteration safety cap \
+                 and gave no final answer even with tools disabled — stopping rather than \
+                 spending further"
+            ));
+            for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
+            return;
+        }
+        yield Ok(chunk_event(&response_id, &last_model, json!({}), Some("stop")));
+        yield Ok(Event::default().data("[DONE]"));
     };
     Sse::new(stream).into_response()
 }
@@ -1285,6 +2385,16 @@ mod tests {
         })
     }
 
+    /// The full tools array a chat-scoped request advertises: run_python
+    /// (from the fixture listing) plus the read-only wallet tools. Spend
+    /// scope appends pay_order/buy_credits — same builder the production
+    /// code uses, so an exact buyer_note assertion can't silently drift.
+    fn expected_tool_defs(can_spend: bool) -> Vec<Value> {
+        let mut defs = vec![expected_run_python_tool_def()];
+        defs.extend(wallet_tool_defs(can_spend));
+        defs
+    }
+
     fn python_delivered_content(stdout: &str, exit_code: i64) -> String {
         serde_json::to_string(&json!({
             "stdout": stdout, "stderr": "", "exit_code": exit_code,
@@ -1317,11 +2427,26 @@ mod tests {
     }
 
     fn test_server(state: McpState) -> TestServer {
+        test_server_with_scopes(state, "chat")
+    }
+
+    /// Same, but the key carries the given scopes — "chat spend" unlocks
+    /// the wallet spending tools.
+    fn test_server_with_scopes(state: McpState, scopes: &str) -> TestServer {
+        test_server_with_key(state, scopes, None)
+    }
+
+    /// Same, with the key's daily budget (cents) also set.
+    fn test_server_with_key(
+        state: McpState,
+        scopes: &str,
+        daily_budget_usd_cents: Option<i64>,
+    ) -> TestServer {
         let key = state
             .db
             .lock()
             .unwrap()
-            .create_provider_key("npub1abandon", "test")
+            .create_provider_key("npub1abandon", "test", scopes, daily_budget_usd_cents)
             .unwrap()
             .1;
         let mut server = TestServer::new(router(state)).unwrap();
@@ -1337,7 +2462,7 @@ mod tests {
             .db
             .lock()
             .unwrap()
-            .create_provider_key("npub1abandon", "test")
+            .create_provider_key("npub1abandon", "test", "chat", None)
             .unwrap()
             .1;
         let app = router_with_timing(state, Duration::from_millis(150), Duration::from_millis(30));
@@ -1354,7 +2479,7 @@ mod tests {
             .db
             .lock()
             .unwrap()
-            .create_provider_key("npub1abandon", "test")
+            .create_provider_key("npub1abandon", "test", "chat", None)
             .unwrap()
             .1;
 
@@ -1365,11 +2490,34 @@ mod tests {
             header::AUTHORIZATION,
             format!("Bearer {key}").parse().unwrap(),
         );
-        let authenticated = match authenticate_provider_key(&state, &headers) {
-            Ok(state) => state,
+        let (authenticated, can_spend, key_id) = match authenticate_provider_key(&state, &headers) {
+            Ok(auth) => auth,
             Err(_) => panic!("valid provider key should authenticate"),
         };
         assert_eq!(authenticated.active_npub.as_deref(), Some("npub1abandon"));
+        assert!(!can_spend, "a chat-scoped key must not authorize spending");
+        assert!(
+            key_id.is_some(),
+            "every key carries the budget handle — operating spend is accounted too"
+        );
+
+        let spend_key = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "test", "chat spend", None)
+            .unwrap()
+            .1;
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {spend_key}").parse().unwrap(),
+        );
+        let Ok((_, can_spend, key_id)) = authenticate_provider_key(&state, &headers) else {
+            panic!("valid spend-scoped key should authenticate");
+        };
+        assert!(can_spend);
+        assert!(key_id.is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1428,7 +2576,7 @@ mod tests {
         let expected_note = serde_json::to_string(&json!({
             "model": DEFAULT_MODEL,
             "messages": [{"role": "user", "content": "hi"}],
-            "tools": [ expected_run_python_tool_def() ],
+            "tools": expected_tool_defs(false),
             "tool_choice": "auto"
         }))
         .unwrap();
@@ -1536,7 +2684,7 @@ mod tests {
                 {"role": "system", "content": "be terse"},
                 {"role": "user", "content": "say hi"}
             ],
-            "tools": [ expected_run_python_tool_def() ],
+            "tools": expected_tool_defs(false),
             "tool_choice": "auto"
         }))
         .unwrap();
@@ -1983,7 +3131,9 @@ mod tests {
         mount_order_router(&overpay).await;
 
         // Every OpenRouter turn calls the tool again -- the conversation
-        // never converges to a final answer.
+        // never converges to a final answer, and even the forced
+        // tool_choice:"none" landing turn yields tool calls with no text
+        // (this mock matches OR-10 too), so the cap error still fires.
         Mock::given(method("GET"))
             .and(path_regex(r"^/api/v1/orders/OR-\d+$"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -2027,6 +3177,71 @@ mod tests {
                 .contains("safety cap"),
             "body: {body}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hitting_the_cap_lands_on_a_final_no_tools_turn_instead_of_an_error() {
+        // The purchase-loop regression: real orders can be created and paid
+        // before the iteration cap trips, so the cap must end in a forced
+        // tool_choice:"none" turn that reports what happened — not a 502
+        // that throws the context away.
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        // Turns 0-9 (single-digit order ids only): the model keeps
+        // checking the same order instead of answering.
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v1/orders/OR-\d$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-x", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_x", "get_order_status", r#"{"order_id": "ORD-5"}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/ORD-5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "ORD-5", "payment_status": "paid", "fulfillment_status": "delivered"}
+            })))
+            .mount(&overpay)
+            .await;
+        // Turn 10 is the forced landing turn: tools disabled, text answer.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-10"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-10", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content(
+                        "Order ORD-5 is paid and delivered.", "openai/gpt-5-mini", false
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "is my order paid?"}],
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "Order ORD-5 is paid and delivered."
+        );
+        assert_eq!(body["id"], "chatcmpl-OR-10");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2416,5 +3631,762 @@ mod tests {
             content.ends_with("The answer is 4."),
             "the final OpenRouter turn's answer must still follow: {content:?}\n{text}"
         );
+    }
+
+    // ---- wallet tools: scope gating, projections, spend cap ----
+
+    #[test]
+    fn wallet_tool_defs_gate_spending_tools_on_scope() {
+        let names = |can_spend: bool| -> Vec<String> {
+            wallet_tool_defs(can_spend)
+                .iter()
+                .map(|d| d["function"]["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            names(false),
+            vec![
+                GET_BALANCES_TOOL,
+                BROWSE_MARKETPLACE_TOOL,
+                GET_LISTING_TOOL,
+                LIST_ORDERS_TOOL,
+                GET_ORDER_STATUS_TOOL
+            ]
+        );
+        assert_eq!(
+            names(true),
+            vec![
+                GET_BALANCES_TOOL,
+                BROWSE_MARKETPLACE_TOOL,
+                GET_LISTING_TOOL,
+                LIST_ORDERS_TOOL,
+                GET_ORDER_STATUS_TOOL,
+                CREATE_ORDER_TOOL,
+                PAY_ORDER_TOOL,
+                BUY_CREDITS_TOOL
+            ]
+        );
+    }
+
+    #[test]
+    fn projections_never_leak_on_chain_data() {
+        // Representative raw payloads deliberately stuffed with every
+        // on-chain field the underlying MCP handlers actually return.
+        let ledger = SpendLedger::new(20.0);
+
+        let account = json!({
+            "address": "0xdeadbeef00000000000000000000000000000000",
+            "pubkey": "02abcdef",
+            "npub": "npub1secret",
+            "zcash_address": "u1qqqsecret",
+            "eth_balance": {"raw": 5, "formatted": "0.005", "symbol": "ETH"},
+            "usdc_balance": {"raw": 12000000, "formatted": "12.0", "symbol": "USDC"},
+            "zec_balance": {"zec": "0.25", "total_zat": 25000000, "spendable_zat": 25000000},
+            "account": {"account_number": "1234567890123456"},
+            "merchant_credits": {"data": [{
+                "id": 7, "holder_type": "seller", "seller_slug": "acme",
+                "balance_cents": 500, "formatted_balance": "$5.00",
+                "updated_at": "2026-01-01"
+            }]},
+        });
+        let projected = project_balances(&account, &ledger, None).to_string();
+        for leak in [
+            "0xdeadbeef",
+            "02abcdef",
+            "npub1secret",
+            "u1qqqsecret",
+            "1234567890123456",
+        ] {
+            assert!(!projected.contains(leak), "leaked {leak}: {projected}");
+        }
+        assert!(projected.contains("12.0"), "balances survive: {projected}");
+        assert!(
+            projected.contains("acme"),
+            "credit holders survive: {projected}"
+        );
+        assert!(
+            projected.contains("remaining_usd"),
+            "allowance shown: {projected}"
+        );
+
+        let order = json!({"data": {
+            "id": "ORD-1", "payment_status": "paid", "fulfillment_status": "delivered",
+            "total_usd": "$1.00",
+            "settlement_tx_hash": "0xfeedface",
+            "order_url": "https://overpay.example/orders/ORD-1",
+        }});
+        let projected = project_order_status(&order).to_string();
+        assert!(!projected.contains("0xfeedface"), "{projected}");
+        assert!(!projected.contains("order_url"), "{projected}");
+        assert!(projected.contains("ORD-1") && projected.contains("paid"));
+
+        let orders = json!({
+            "data": [{
+                "id": "ORD-9", "product_title": "Widget", "payment_status": "pending",
+                "fulfillment_status": "pending", "total_usd": "$2.00",
+                "created_at": "2026-08-11T00:00:00Z",
+                "settlement_tx_hash": "0xcafebabe",
+                "order_url": "https://overpay.example/orders/ORD-9",
+                "tracking_number": "1Z999", "buyer_note": "{\"secret\":\"payload\"}",
+            }],
+            "next_cursor": "abc123",
+        });
+        let projected = project_orders_list(&orders).to_string();
+        for leak in ["0xcafebabe", "order_url", "1Z999", "secret"] {
+            assert!(!projected.contains(leak), "leaked {leak}: {projected}");
+        }
+        assert!(
+            projected.contains("ORD-9")
+                && projected.contains("Widget")
+                && projected.contains("abc123"),
+            "rows and cursor survive: {projected}"
+        );
+
+        let marketplace = json!({
+            "data": [{
+                "id": "L-9", "title": "Widget", "description": "A widget",
+                "price_usd": "$2.00", "free": false, "category": "tools",
+                "seller": {"name": "Acme", "slug": "acme"},
+                "main_image_url": "https://cdn.example/widget.png",
+                "checkout_url": "http://localhost:4030/checkout/L-9",
+                "delivery_eta_seconds": 30,
+            }],
+            "next_cursor": "cur1",
+        });
+        let projected = project_marketplace(&marketplace).to_string();
+        for leak in ["main_image_url", "checkout_url", "cdn.example"] {
+            assert!(!projected.contains(leak), "leaked {leak}: {projected}");
+        }
+        assert!(
+            projected.contains("L-9") && projected.contains("acme") && projected.contains("cur1"),
+            "rows and cursor survive: {projected}"
+        );
+
+        let listing_detail = json!({"data": {
+            "id": "L-9", "title": "Widget", "description": "The full description",
+            "price_usd": "$2.00",
+            "seller": {"name": "Acme", "slug": "acme"},
+            "checkout_url": "http://localhost:4030/checkout/L-9",
+            "buyer_note_schema": {"type": "object", "properties": {"color": {"type": "string"}}},
+            "checkout_schema": {"type": "object"},
+        }});
+        let projected = project_listing_detail(&listing_detail).to_string();
+        assert!(
+            !projected.contains("checkout"),
+            "checkout URL/schema stay out: {projected}"
+        );
+        assert!(
+            projected.contains("buyer_note_schema") && projected.contains("full description"),
+            "ordering-flow fields survive: {projected}"
+        );
+
+        let buy = json!({
+            "order_id": "ORD-2", "tx_hash": "0xbeef", "payment_amount_usdc": 5.0,
+            "order_url": "https://overpay.example/orders/ORD-2",
+            "status": "payment_sent", "note": "Credits will be funded automatically once the transfer is detected on-chain.",
+        });
+        let projected = project_buy(&buy, 5.0, &ledger, None).to_string();
+        assert!(!projected.contains("0xbeef") && !projected.contains("order_url"));
+        assert!(projected.contains("ORD-2") && projected.contains("payment_sent"));
+    }
+
+    #[test]
+    fn order_status_projection_returns_the_deliverable_capped() {
+        // Inline deliverable under the cap passes through whole.
+        let small = json!({"data": {
+            "id": "O1", "payment_status": "paid", "fulfillment_status": "delivered",
+            "delivered_content": "{\"description\":\"Sunny, 22C\",\"image_url\":\"https://img.example/w.png\"}",
+            "delivered_content_type": "application/json",
+        }});
+        let p = project_order_status(&small);
+        assert!(p["delivered_content"].as_str().unwrap().contains("Sunny"));
+        assert_eq!(p["delivered_content_type"], "application/json");
+        assert!(p.get("delivered_content_truncated").is_none());
+
+        // Oversized content is cut at the cap and flagged.
+        let big = json!({"data": {
+            "id": "O2",
+            "delivered_content": "y".repeat(DELIVERED_CONTENT_MODEL_CAP + 500),
+        }});
+        let p = project_order_status(&big);
+        assert_eq!(
+            p["delivered_content"].as_str().unwrap().len(),
+            DELIVERED_CONTENT_MODEL_CAP
+        );
+        assert_eq!(p["delivered_content_truncated"], json!(true));
+
+        // A download URL wins over any lingering inline blob.
+        let with_url = json!({"data": {
+            "id": "O3",
+            "delivered_content_url": "https://overpay.example/blob/abc",
+            "delivered_content": "stale inline copy",
+        }});
+        let p = project_order_status(&with_url);
+        assert_eq!(
+            p["delivered_content_url"],
+            "https://overpay.example/blob/abc"
+        );
+        assert!(p.get("delivered_content").is_none());
+    }
+
+    #[test]
+    fn spend_ledger_reserves_releases_and_records() {
+        let mut ledger = SpendLedger::new(10.0);
+        assert!(ledger.try_spend(4.0).is_ok());
+        assert!(
+            ledger.try_spend(7.0).is_err(),
+            "4 + 7 exceeds the 10 USD cap"
+        );
+        ledger.release(4.0);
+        assert!(ledger.try_spend(7.0).is_ok());
+        ledger.record(3.0);
+        assert_eq!(ledger.remaining_usd(), 0.0);
+        assert!(ledger.try_spend(0.01).is_err());
+        assert!(ledger.try_spend(f64::NAN).is_err());
+        assert!(ledger.try_spend(-1.0).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spend_scoped_key_executes_pay_order_and_confirms_via_redeem() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        // Turn 1: the model pays a pending order by id.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_1", "pay_order", r#"{"order_id": "ORD-77"}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        // The order pay_order resolves the seller from.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/ORD-77"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "ORD-77", "payment_status": "pending",
+                    "fulfillment_status": "pending",
+                    "listing": {"id": "L-ACME", "title": "Widget"},
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/listings/L-ACME"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "L-ACME", "title": "Widget", "seller": {"name": "Acme", "slug": "acme"}}
+            })))
+            .mount(&overpay)
+            .await;
+        // The actual settlement — exactly one redemption proves the tool ran.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/acme/redeem"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"status": "fully_paid", "amount_redeemed_cents": 100,
+                         "credit_balance_cents": 400}
+            })))
+            .expect(1)
+            .mount(&overpay)
+            .await;
+        // Turn 2: with the tool result in hand, the model answers.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-1", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content("Paid — order ORD-77 is settled.", "openai/gpt-5-mini", false),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server_with_scopes(seeded_state(&overpay.uri(), &tmp), "chat spend");
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "pay order ORD-77"}],
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "Paid — order ORD-77 is settled."
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_scoped_key_cannot_execute_a_spending_tool_the_model_hallucinates() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        // The model calls pay_order even though a chat-scoped request never
+        // advertised it. Zero marketplace mocks for the payment side: any
+        // attempt to actually execute would 404 the mock server; instead the
+        // refusal feeds back and the model recovers.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_1", "pay_order", r#"{"order_id": "ORD-1"}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-1", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content(
+                        "I don't have spending permission on this key.", "openai/gpt-5-mini", false
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "pay order ORD-1"}],
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "I don't have spending permission on this key."
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn buy_credits_beyond_the_spend_cap_is_refused_without_touching_the_wallet() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        // A purchase attempt would hit this — expect(0) proves the cap
+        // refused the spend before anything reached the marketplace.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/acme/purchase"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "order_id": "never", "order_url": "never"
+            })))
+            .expect(0)
+            .mount(&overpay)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_1", "buy_credits",
+                        r#"{"seller_slug": "acme", "amount_usd": 999999.0}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-1", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content(
+                        "That exceeds this request's spending allowance.", "openai/gpt-5-mini", false
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server_with_scopes(seeded_state(&overpay.uri(), &tmp), "chat spend");
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "load a million dollars"}],
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "That exceeds this request's spending allowance."
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dashboard_set_spend_cap_overrides_the_default_per_request() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        // $10 fits the built-in $20 cap but not the wallet's stored $5
+        // override — expect(0) proves the stored cap refused the spend.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/acme/purchase"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "order_id": "never", "order_url": "never"
+            })))
+            .expect(0)
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_1", "buy_credits",
+                        r#"{"seller_slug": "acme", "amount_usd": 10.0}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-1", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content(
+                        "That exceeds this request's spending allowance.", "openai/gpt-5-mini", false
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        // The wallet-level cap is read per request — set after the router
+        // exists, no restart involved.
+        state
+            .db
+            .lock()
+            .unwrap()
+            .write_spend_cap_usd_cents(Some(500))
+            .unwrap();
+        let s = test_server_with_scopes(state, "chat spend");
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "load ten dollars"}],
+            }))
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "That exceeds this request's spending allowance."
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn buy_credits_beyond_the_key_budget_is_refused_without_touching_the_wallet() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        // $10 fits the $20 per-request cap but not this key's $5 daily
+        // budget — expect(0) proves the budget refused the spend before
+        // anything reached the marketplace.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/acme/purchase"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "order_id": "never", "order_url": "never"
+            })))
+            .expect(0)
+            .mount(&overpay)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_1", "buy_credits",
+                        r#"{"seller_slug": "acme", "amount_usd": 10.0}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-1", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content(
+                        "That exceeds this key's budget.", "openai/gpt-5-mini", false
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let s = test_server_with_key(state.clone(), "chat spend", Some(500));
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "load ten dollars of credits"}],
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "That exceeds this key's budget."
+        );
+        // The refused reservation must not eat the budget — only the two
+        // chat turns' own operating cost (2¢ each, per the redeem mock)
+        // was recorded.
+        let keys = state
+            .db
+            .lock()
+            .unwrap()
+            .list_provider_keys("npub1abandon")
+            .unwrap();
+        assert_eq!(keys[0].spent_today_usd_cents(), 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn key_budget_persists_across_requests_and_exhausts() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        // Budget $1.05. Request 1: turn OR-0 (2¢ operating cost) +
+        // pay_order ($1.00 redemption) + turn OR-1 (2¢) = $1.04 — 1¢
+        // remains, so request 2 passes the up-front gate. Its first turn
+        // OR-2 (2¢) overshoots; the pay_order call then refuses on the
+        // exhausted budget, and the loop breaks to the landing turn OR-3.
+        // expect(1) on the acme redeem endpoint proves only the first
+        // settlement happened (chat orders redeem under openrouter-bot).
+        for turn in ["OR-0", "OR-2"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/orders/{turn}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {
+                        "id": turn, "fulfillment_status": "delivered",
+                        "delivered_content": delivered_content_with_tool_call(
+                            "openai/gpt-5-mini", "call_1", "pay_order",
+                            r#"{"order_id": "ORD-77", "seller_slug": "acme"}"#
+                        ),
+                    }
+                })))
+                .mount(&overpay)
+                .await;
+        }
+        for (turn, text) in [("OR-1", "Paid."), ("OR-3", "This key's budget is spent.")] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/orders/{turn}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "data": {
+                        "id": turn, "fulfillment_status": "delivered",
+                        "delivered_content": delivered_content(text, "openai/gpt-5-mini", false),
+                    }
+                })))
+                .mount(&overpay)
+                .await;
+        }
+        // pay_order always fetches the order first (already-paid check).
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/ORD-77"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "ORD-77", "payment_status": "pending",
+                    "fulfillment_status": "pending",
+                    "listing": {"id": "L-ACME", "title": "Widget"},
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/acme/redeem"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"status": "fully_paid", "amount_redeemed_cents": 100,
+                         "credit_balance_cents": 400}
+            })))
+            .expect(1)
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let s = test_server_with_key(state.clone(), "chat spend", Some(105));
+
+        for expected in ["Paid.", "This key's budget is spent."] {
+            let res = s
+                .post("/chat/completions")
+                .json(&json!({
+                    "model": "openai/gpt-5-mini",
+                    "messages": [{"role": "user", "content": "pay order ORD-77"}],
+                }))
+                .await;
+            res.assert_status_ok();
+            let body: Value = res.json();
+            assert_eq!(body["choices"][0]["message"]["content"], expected);
+        }
+
+        let keys = state
+            .db
+            .lock()
+            .unwrap()
+            .list_provider_keys("npub1abandon")
+            .unwrap();
+        assert_eq!(
+            keys[0].spent_today_usd_cents(),
+            108,
+            "the settlement plus four 2¢ chat turns were recorded"
+        );
+        assert_eq!(keys[0].remaining_today_usd_cents(), Some(0));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_turn_operating_cost_counts_against_the_key_budget() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content("Hi.", "openai/gpt-5-mini", false),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        // A chat-only key: no spending tools, but chat turns still cost.
+        let s = test_server_with_key(state.clone(), "chat", Some(500));
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hello"}],
+            }))
+            .await;
+        res.assert_status_ok();
+
+        let keys = state
+            .db
+            .lock()
+            .unwrap()
+            .list_provider_keys("npub1abandon")
+            .unwrap();
+        assert_eq!(
+            keys[0].spent_today_usd_cents(),
+            2,
+            "the turn's own redemption (2¢ mock) counts against the budget"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exhausted_daily_budget_refuses_a_new_request_up_front() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let s = test_server_with_key(state.clone(), "chat", Some(100));
+        {
+            let db = state.db.lock().unwrap();
+            let keys = db.list_provider_keys("npub1abandon").unwrap();
+            db.record_provider_key_spend(&keys[0].id, 100).unwrap();
+        }
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hello"}],
+            }))
+            .await;
+        res.assert_status(axum::http::StatusCode::PAYMENT_REQUIRED);
+        let body: Value = res.json();
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("daily budget exhausted"),
+            "got: {body}"
+        );
+    }
+
+    #[test]
+    fn balances_projection_reports_the_key_budget() {
+        let ledger = SpendLedger::new(20.0);
+        let key = owallet_db::ProviderKeyRow {
+            id: "k1".into(),
+            npub: "npub1abandon".into(),
+            created_at: 0,
+            label: None,
+            token_prefix: None,
+            scopes: Some("chat spend".into()),
+            daily_budget_usd_cents: Some(2500),
+            spent_usd_cents: 1000,
+            spent_day: None,
+        };
+        let projected = project_balances(&json!({}), &ledger, Some(&key));
+        assert_eq!(projected["key_budget"]["daily_budget_usd"], json!(25.0));
+        assert_eq!(projected["key_budget"]["spent_today_usd"], json!(10.0));
+        assert_eq!(projected["key_budget"]["remaining_today_usd"], json!(15.0));
+        // Identity fields never ride along.
+        let text = projected.to_string();
+        assert!(!text.contains("npub1abandon") && !text.contains("\"k1\""));
+
+        // No-limit key: budget/remaining are null, spend still visible.
+        let unlimited = owallet_db::ProviderKeyRow {
+            daily_budget_usd_cents: None,
+            ..key
+        };
+        let projected = project_balances(&json!({}), &ledger, Some(&unlimited));
+        assert_eq!(projected["key_budget"]["daily_budget_usd"], Value::Null);
+        assert_eq!(projected["key_budget"]["remaining_today_usd"], Value::Null);
+        assert_eq!(projected["key_budget"]["spent_today_usd"], json!(10.0));
+
+        // Chat-only requests carry no key handle → no key_budget at all.
+        let projected = project_balances(&json!({}), &ledger, None);
+        assert!(projected.get("key_budget").is_none());
     }
 }

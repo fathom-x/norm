@@ -19,3 +19,8 @@ pub(crate) fn write(conn: &Connection, key: &str, value: &str) -> rusqlite::Resu
     )?;
     Ok(())
 }
+
+pub(crate) fn delete(conn: &Connection, key: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+    Ok(())
+}

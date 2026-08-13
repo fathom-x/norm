@@ -11,6 +11,7 @@ pub mod provider;
 pub mod purchases;
 pub mod select;
 pub mod send;
+pub mod settings;
 
 use axum::http::header::{HeaderMap, COOKIE, SET_COOKIE};
 use axum::http::HeaderValue;

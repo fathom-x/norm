@@ -8,8 +8,8 @@
   {% if provider_scope %}
     <p>A client is asking for a <strong>provider API key</strong> — an
        OpenAI-compatible credential that can spend the selected wallet's
-       merchant credits. Approving creates a key you can revoke any time
-       from the wallet dashboard.</p>
+       merchant credits on chat. Approving creates a key you can revoke any
+       time from the wallet dashboard.</p>
   {% else %}
     <p>An MCP client is asking for access to your wallet. Pick which wallet
        it should sign as, and enter that wallet's password to approve.</p>
@@ -32,6 +32,26 @@
         {% endfor %}
       </select>
     </div>
+    {% if provider_scope %}
+      <div class="field">
+        <label style="display:block;">
+          <input type="checkbox" name="allow_spend">
+          Also allow <strong>wallet spending</strong>: the model behind this
+          key may buy merchant credits and pay orders with them
+          (order-scoped, capped per request). Leave unchecked for chat-only —
+          you can always create a spending key later from the dashboard.
+        </label>
+      </div>
+      <div class="field">
+        <label for="spend-budget">Daily spending budget (USD)</label>
+        <input id="spend-budget" name="spend_budget_usd" type="text"
+               placeholder="no limit" inputmode="decimal">
+        <span class="muted">Hard cap on everything the key costs per day —
+        each chat turn is a paid order, so this applies even without
+        wallet spending. Resets at midnight in the wallet's time zone;
+        blank for no limit. You can change it later from the dashboard.</span>
+      </div>
+    {% endif %}
     <div class="field">
       <label for="password">Wallet password</label>
       <input id="password" name="password" type="password" autofocus

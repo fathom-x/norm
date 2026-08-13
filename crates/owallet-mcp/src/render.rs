@@ -38,6 +38,9 @@ pub fn render(tool: &str, data: &Value) -> String {
         "get_order_status" => render_order(tool, data),
         "wait_for_order" => render_order(tool, data),
         "redeem_merchant_credits" => render_redeem(data),
+        // Same result vocabulary as redeem (status / redeemed / balance) —
+        // pay_order returns it flat, which is what render_redeem reads.
+        "pay_order" => render_redeem(data),
         "buy" => render_buy(data),
         "load_core_credits" => render_load_credits(data),
         "send_usdc" => render_send(data),
