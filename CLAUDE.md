@@ -32,6 +32,20 @@ Original Python source lives in the `fathom-x/overpay` repository at
 `owallet/wallet_mcp/`. Cross-references in code comments use
 `wallet_mcp/server.py:NNNN` style.
 
+## Syncing from overpay
+
+While `owallet-rs/` still lives in overpay, pull its newer commits into
+this repo with `scripts/sync-from-overpay.sh` (fetch → deterministic
+`git subtree split` → merge; see the script header for why the histories
+stay compatible). Conflicts only arise in files norm has diverged on
+(README.md, CLAUDE.md, the vendored
+`crates/owallet-crypto/tests/fixtures/nip98_vectors.json`) — resolve
+keeping norm's standalone wording, and re-copy the fixture if overpay's
+`test/fixtures/nip98_vectors.json` changed. Run the test suite after
+every sync. This is deliberately **not** a submodule: a submodule can
+only pin the whole overpay repo, and wouldn't merge upstream changes
+into these crates.
+
 ## Run commands
 
 ```bash

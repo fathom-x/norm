@@ -11,8 +11,10 @@ librustzcash.
 This repository (`norm`) is the standalone home of the workspace that
 started life as the `owallet-rs/` subdirectory of
 [`fathom-x/overpay`](https://github.com/fathom-x/overpay), the
-marketplace it talks to. It is a Rust port of the Python `owallet/`
-implementation that lives in that repository. The on-disk wallet
+marketplace it talks to (`scripts/sync-from-overpay.sh` pulls newer
+`owallet-rs/` commits from there while both copies exist). It is a Rust
+port of the Python `owallet/` implementation that lives in that
+repository. The on-disk wallet
 database is **byte-compatible** with the Python version's
 `~/.owallet.db` format, so existing wallets keep working after the
 upgrade.
