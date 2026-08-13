@@ -74,20 +74,33 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   — "OpenRouter Inference" (seller `openrouter-bot`, chat) and "Run Python
   Code" (seller `exec`, the one listing-backed tool) — resolved via
   `resolve_listing_id_cached(state, seller_slug, title, cache)`.
-  **The listing-tool side is still expected to generalize**: more listings
-  (storage, compute, …) are planned, each of which is naturally a tool, so
-  treat the `PYTHON_*` / `RUN_PYTHON_TOOL_NAME` constants,
-  `run_python_tool_def`, `extract_python_delivered`, and
-  `execute_tool_call`'s name dispatch as the things a multi-listing router
-  replaces rather than as settled design. Everything a tool definition
-  needs is already on the listing — `preferred_slug` → `function.name`,
-  `description` → `function.description`, `buyer_note_schema` →
-  `function.parameters` (already used verbatim that way) — so the missing
-  piece is only *which* listings are tools; `Listing#metadata` is the
-  established behavior gate for that kind of marker (cf.
-  `metadata["service"]`, `metadata["delivery_eta"]`). See PR #383's
-  reviewer question for the design sketch and the caller-supplied-`tools`
-  tradeoff that goes with it.
+  **The listing-tool side is generalized** (`ListingTool` /
+  `listing_tools` / `run_listing_tool`): any listing whose
+  `metadata.provider_tool.name` is set (the bot DSL's
+  `provider_tool name: "..."` — `Listing#metadata` as the behavior gate,
+  cf. `metadata["service"]`; Rails exposes it as the curated top-level
+  `provider_tool` field on the public listing JSON, like
+  `delivery_eta` — the raw metadata hash never rides the API) is
+  advertised as a tool — name from the marker, description from the
+  listing, `buyer_note_schema` as `function.parameters` (fetched via a
+  per-listing `show`, since the index deliberately omits the heavy
+  schemas) (bare non-object schemas are wrapped as
+  `{input: …}` and unwrapped at execution; string buyer_notes pass to
+  Rails verbatim, matching MCP `create_order`). Execution is
+  place-and-pay + poll-to-terminal, result projected through an
+  allowlist (`extract_listing_delivered`, content capped at
+  `DELIVERED_CONTENT_MODEL_CAP`). The registry cache lives **on `Ctx`**,
+  not a process global — each serve env resolves its own marketplace and
+  tests stay isolated; a marked-after-startup listing needs a restart. A
+  failed catalog fetch is not cached (that request degrades to
+  `run_python` + wallet tools). The hardcoded `run_python` path is still
+  authoritative for its name — marked listings colliding with it or a
+  wallet tool are skipped — and its partial-output streaming remains
+  special-cased in the streaming generator (fenced, code-shaped); generic
+  listing tools forward their in-flight partial output too, unfenced —
+  the preview is buyer-facing markdown — set off by blank lines, with
+  keep-alive comments between deltas. First consumer: the weather reporter's
+  `forecast`.
   **Wallet tools** (`WALLET_TOOLS` in `openai_compat.rs`) sit alongside
   the listing tool: `get_balances` / `browse_marketplace` / `get_listing`
   / `list_orders` / `get_order_status` for any provider key;

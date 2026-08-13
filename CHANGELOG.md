@@ -4,6 +4,37 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Listing-backed provider tools on `/v1` (generalizing `run_python`)
+
+- **Any listing marked `metadata.provider_tool` is now a model-callable
+  tool on `/v1`** — the generalization sketched in PR #383. The listing
+  supplies everything: the marker's `name` becomes the function name, the
+  listing description its description, and `buyer_note_schema` its
+  parameters; executing a call places and pays a real order against the
+  listing and feeds the delivered content back to the model (statuses,
+  capped `delivered_content`, its type, and the download URL — an
+  allowlist like every model-facing projection). First consumer: the
+  weather reporter's `forecast` tool, closing the gap where a model
+  narrates a purchase instead of performing one — one `forecast(input:
+  "Galveston")` call is a real order end to end.
+- Bare (non-object) `buyer_note_schema`s (`buyer_input :text`) are
+  offered wrapped as `{input: <schema>}` and unwrapped at execution, and
+  string buyer_notes now pass to the marketplace verbatim (matching the
+  MCP `create_order` convention) instead of JSON-quoted.
+- On the streaming path, a listing tool's in-flight partial output is
+  forwarded into the chat stream as it arrives (unfenced — the preview
+  is buyer-facing markdown — unlike `run_python`'s fenced stdout), so a
+  streaming seller like the weather reporter pours its forecast into the
+  client mid-call.
+- The registry is cached per router (each serve env resolves its own
+  marketplace's tools; a listing marked after startup needs a restart —
+  same tradeoff as the listing-id caches). A failed catalog fetch
+  degrades that request to `run_python` + wallet tools and retries on
+  the next. Names are validated conservatively; the hardcoded
+  `run_python` stays authoritative, and marked listings colliding with
+  it or a wallet tool are skipped. Listing-tool orders count against the
+  key's daily budget like every other order the endpoint pays.
+
 ### MCP responses sanitized of all on-chain data (fathom-x/overpay#391)
 
 - **Every `/mcp` tool result is now projected through a chain-free

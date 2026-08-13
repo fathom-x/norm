@@ -75,6 +75,8 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::Arc;
+
 use tokio::sync::OnceCell;
 
 use crate::state::{McpState, OwnedAuth, ResolveAuthError};
@@ -183,6 +185,10 @@ struct Ctx {
     /// a wallet-level dashboard setting takes precedence per request via
     /// [`effective_spend_cap`].
     spend_cap_usd: f64,
+    /// Per-router cache of `provider_tool`-marked listings. On `Ctx`
+    /// rather than a process-global so each serve env (and each test
+    /// router) resolves its own marketplace's tools.
+    listing_tools: Arc<OnceCell<Vec<ListingTool>>>,
 }
 
 pub fn router(state: McpState) -> Router {
@@ -215,6 +221,7 @@ fn router_with_config(state: McpState, timeout: Duration, poll: Duration, cap: f
         can_spend: false,
         key_id: None,
         spend_cap_usd: cap,
+        listing_tools: Arc::new(OnceCell::new()),
     };
     Router::new()
         .route("/models", get(list_models))
@@ -441,6 +448,235 @@ async fn run_python_tool_def(state: &McpState) -> Result<Value, OpenAiError> {
 }
 
 // ---------------------------------------------------------------------------
+// Listing-backed tools — any listing marked `metadata.provider_tool`
+// ---------------------------------------------------------------------------
+
+/// A model-callable tool built from a `metadata.provider_tool`-marked
+/// marketplace listing (the bot DSL's `provider_tool name: "..."`). The
+/// listing supplies everything: the marker's `name` becomes the function
+/// name, the listing description its description, and `buyer_note_schema`
+/// its parameters. Executing a call places and pays a real order against
+/// the listing and returns the delivered content — the generalization of
+/// the hardcoded `run_python` path sketched in PR #383.
+#[derive(Clone)]
+struct ListingTool {
+    name: String,
+    listing_id: String,
+    seller_slug: String,
+    description: String,
+    parameters: Value,
+    /// True when the listing's schema was a bare (non-object) type —
+    /// OpenAI tool parameters must be an object, so the schema is offered
+    /// wrapped as `{input: <schema>}` and the execution unwraps
+    /// `arguments.input` back into the buyer_note.
+    wrapped: bool,
+}
+
+/// OpenAI function names: conservative charset, bounded length.
+fn valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Marked listings, resolved once per router — the same tradeoff as the
+/// listing-id caches: a listing marked after startup needs a restart. A
+/// failed fetch is NOT cached; that request just runs without listing
+/// tools and the next one retries.
+async fn listing_tools(ctx: &Ctx) -> Vec<ListingTool> {
+    if let Some(tools) = ctx.listing_tools.get() {
+        return tools.clone();
+    }
+    match fetch_listing_tools(&ctx.mcp).await {
+        Ok(tools) => {
+            let _ = ctx.listing_tools.set(tools.clone());
+            tools
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+async fn fetch_listing_tools(state: &McpState) -> Result<Vec<ListingTool>, OpenAiError> {
+    let page = state
+        .overpay
+        .list_listings_value(&ListingFilters {
+            limit: Some(100),
+            ..Default::default()
+        })
+        .await?;
+    let mut tools: Vec<ListingTool> = Vec::new();
+    for listing in page
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        // Rails exposes the marker as a curated top-level field
+        // (`Listing#provider_tool`), like `delivery_eta` — the raw
+        // metadata hash never rides the public JSON.
+        let Some(name) = listing
+            .pointer("/provider_tool/name")
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        // The hardcoded run_python path stays authoritative for its name,
+        // and nothing may shadow a wallet tool. First marked listing wins
+        // a within-registry collision.
+        if !valid_tool_name(name)
+            || name == RUN_PYTHON_TOOL_NAME
+            || is_wallet_tool(name)
+            || tools.iter().any(|t| t.name == name)
+        {
+            continue;
+        }
+        let (Some(listing_id), Some(seller_slug)) = (
+            listing.get("id").and_then(Value::as_str),
+            listing.pointer("/seller/slug").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        // The index deliberately omits the per-listing schemas and
+        // truncates descriptions (browsing stays cheap), so fetch the
+        // full listing for the function parameters — same as
+        // `run_python_tool_def`. Propagating a failure means the registry
+        // is not cached and the next request retries whole.
+        let detail = state.overpay.get_listing_value(listing_id).await?;
+        let inner = detail.get("data").unwrap_or(&detail);
+        let schema = inner
+            .get("buyer_note_schema")
+            .cloned()
+            .filter(|s| !s.is_null());
+        let is_object_schema = schema
+            .as_ref()
+            .map(|s| s.get("type").and_then(Value::as_str) == Some("object"))
+            .unwrap_or(false);
+        let (parameters, wrapped) = match schema {
+            Some(s) if is_object_schema => (s, false),
+            Some(s) => (
+                json!({
+                    "type": "object",
+                    "properties": {"input": s},
+                    "required": ["input"],
+                }),
+                true,
+            ),
+            None => (json!({"type": "object", "properties": {}}), false),
+        };
+        tools.push(ListingTool {
+            name: name.to_string(),
+            listing_id: listing_id.to_string(),
+            seller_slug: seller_slug.to_string(),
+            description: inner
+                .get("description")
+                .and_then(Value::as_str)
+                .or_else(|| listing.get("description").and_then(Value::as_str))
+                .unwrap_or("A marketplace listing offered as a callable tool.")
+                .to_string(),
+            parameters,
+            wrapped,
+        });
+    }
+    Ok(tools)
+}
+
+async fn listing_tool_named(ctx: &Ctx, name: &str) -> Option<ListingTool> {
+    listing_tools(ctx)
+        .await
+        .into_iter()
+        .find(|t| t.name == name)
+}
+
+fn listing_tool_def(tool: &ListingTool) -> Value {
+    json!({
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+        }
+    })
+}
+
+/// Execute one listing-tool call: a real, separately-paid order against
+/// the tool's listing, exactly like `run_python`.
+async fn run_listing_tool(
+    state: &McpState,
+    auth: &OwnedAuth,
+    tool: &ListingTool,
+    arguments: &Value,
+    timeout: Duration,
+    poll: Duration,
+    key_id: Option<&str>,
+) -> Result<Value, OpenAiError> {
+    let buyer_note = listing_tool_buyer_note(tool, arguments);
+    let order_id = place_and_pay_order(
+        state,
+        auth,
+        &tool.listing_id,
+        &tool.seller_slug,
+        &buyer_note,
+        key_id,
+    )
+    .await?;
+    let snap = wait_for_order_terminal(state, auth, &order_id, timeout, poll).await?;
+    Ok(extract_listing_delivered(&order_id, &snap))
+}
+
+/// The buyer_note for a listing-tool call: the arguments verbatim, or —
+/// for a wrapped bare-schema listing — the unwrapped `input` value.
+fn listing_tool_buyer_note(tool: &ListingTool, arguments: &Value) -> Value {
+    if tool.wrapped {
+        arguments.get("input").cloned().unwrap_or(Value::Null)
+    } else {
+        arguments.clone()
+    }
+}
+
+/// Project a listing-tool order's terminal snapshot into the tool result
+/// fed back to the model. An allowlist, like every other model-facing
+/// projection here: statuses, the delivered content (capped), its type,
+/// and the download URL — never the raw order payload.
+fn extract_listing_delivered(order_id: &str, snap: &Value) -> Value {
+    let order = snap.get("data").unwrap_or(snap);
+    let status = order
+        .get("fulfillment_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let mut out = serde_json::Map::new();
+    out.insert("order_id".into(), json!(order_id));
+    out.insert("fulfillment_status".into(), json!(status));
+    if status != "delivered" {
+        let reason = order
+            .get("fulfillment_error")
+            .and_then(Value::as_str)
+            .unwrap_or("the seller did not deliver this order");
+        out.insert("error".into(), json!(reason));
+        return Value::Object(out);
+    }
+    if let Some(content) = order.get("delivered_content").and_then(Value::as_str) {
+        if content.len() > DELIVERED_CONTENT_MODEL_CAP {
+            let mut end = DELIVERED_CONTENT_MODEL_CAP;
+            while !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.insert("delivered_content".into(), json!(&content[..end]));
+            out.insert("delivered_content_truncated".into(), json!(true));
+        } else {
+            out.insert("delivered_content".into(), json!(content));
+        }
+    }
+    for key in ["delivered_content_type", "delivered_content_url"] {
+        if let Some(v) = order.get(key).filter(|v| !v.is_null()) {
+            out.insert(key.into(), v.clone());
+        }
+    }
+    Value::Object(out)
+}
+
+// ---------------------------------------------------------------------------
 // Wallet tools — MCP handlers behind allowlist projections
 // ---------------------------------------------------------------------------
 //
@@ -632,10 +868,13 @@ fn wallet_tool_defs(can_spend: bool) -> Vec<Value> {
 }
 
 /// Every tool definition advertised to the model this turn: `run_python`
-/// (listing-backed, resolved live) plus the wallet tools the key's scopes
-/// allow.
-async fn tool_defs(state: &McpState, can_spend: bool) -> Result<Vec<Value>, OpenAiError> {
-    let mut defs = vec![run_python_tool_def(state).await?];
+/// (listing-backed, resolved live), every `provider_tool`-marked listing,
+/// plus the wallet tools the key's scopes allow.
+async fn tool_defs(ctx: &Ctx, can_spend: bool) -> Result<Vec<Value>, OpenAiError> {
+    let mut defs = vec![run_python_tool_def(&ctx.mcp).await?];
+    for tool in listing_tools(ctx).await {
+        defs.push(listing_tool_def(&tool));
+    }
     defs.extend(wallet_tool_defs(can_spend));
     Ok(defs)
 }
@@ -1347,8 +1586,14 @@ async fn place_and_pay_order(
     buyer_note: &Value,
     key_id: Option<&str>,
 ) -> Result<String, OpenAiError> {
-    let note_str = serde_json::to_string(buyer_note)
-        .map_err(|e| OpenAiError::internal(format!("could not encode buyer_note: {e}")))?;
+    // Strings pass through verbatim, matching the MCP `create_order`
+    // convention — a `buyer_input :text` listing's bot reads the note as
+    // plain text, and JSON-encoding would hand it literal quotes.
+    let note_str = match buyer_note {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string(other)
+            .map_err(|e| OpenAiError::internal(format!("could not encode buyer_note: {e}")))?,
+    };
 
     let order = state
         .overpay
@@ -1502,20 +1747,24 @@ fn is_terminal(status: Option<&str>) -> bool {
 /// than crashing the whole conversation over it.
 #[allow(clippy::too_many_arguments)]
 async fn execute_tool_call(
-    state: &McpState,
+    ctx: &Ctx,
     auth: &OwnedAuth,
     call: &Value,
-    timeout: Duration,
-    poll: Duration,
-    can_spend: bool,
-    key_id: Option<&str>,
     ledger: &mut SpendLedger,
 ) -> String {
+    let state = &ctx.mcp;
+    let (timeout, poll) = (ctx.timeout, ctx.poll);
+    let (can_spend, key_id) = (ctx.can_spend, ctx.key_id.as_deref());
     let name = call
         .pointer("/function/name")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if name != RUN_PYTHON_TOOL_NAME && !is_wallet_tool(name) {
+    let listing_tool = if name != RUN_PYTHON_TOOL_NAME && !is_wallet_tool(name) {
+        listing_tool_named(ctx, name).await
+    } else {
+        None
+    };
+    if name != RUN_PYTHON_TOOL_NAME && !is_wallet_tool(name) && listing_tool.is_none() {
         return json!({"error": format!("unknown tool '{name}'")}).to_string();
     }
 
@@ -1533,6 +1782,13 @@ async fn execute_tool_call(
 
     if is_wallet_tool(name) {
         return execute_wallet_tool(state, name, &arguments, can_spend, key_id, ledger).await;
+    }
+
+    if let Some(tool) = listing_tool {
+        return match run_listing_tool(state, auth, &tool, &arguments, timeout, poll, key_id).await {
+            Ok(result) => result.to_string(),
+            Err(e) => json!({"error": e.message()}).to_string(),
+        };
     }
 
     match run_python_tool(state, auth, &arguments, timeout, poll, key_id).await {
@@ -1609,7 +1865,7 @@ async fn run_agentic_loop(
     requested_model: &str,
 ) -> Result<AgentResult, OpenAiError> {
     let listing_id = resolve_openrouter_listing_id(&ctx.mcp).await?;
-    let defs = tool_defs(&ctx.mcp, ctx.can_spend).await?;
+    let defs = tool_defs(ctx, ctx.can_spend).await?;
     let mut ledger = SpendLedger::new(effective_spend_cap(ctx));
     let mut last_model = requested_model.to_string();
 
@@ -1659,17 +1915,7 @@ async fn run_agentic_loop(
             "tool_calls": delivered.tool_calls,
         }));
         for call in &delivered.tool_calls {
-            let result_text = execute_tool_call(
-                &ctx.mcp,
-                auth,
-                call,
-                ctx.timeout,
-                ctx.poll,
-                ctx.can_spend,
-                ctx.key_id.as_deref(),
-                &mut ledger,
-            )
-            .await;
+            let result_text = execute_tool_call(ctx, auth, call, &mut ledger).await;
             let tool_call_id = call.get("id").and_then(Value::as_str).unwrap_or_default();
             messages.push(
                 json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }),
@@ -1852,7 +2098,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 return;
             }
         };
-        let defs = match tool_defs(&ctx.mcp, ctx.can_spend).await {
+        let defs = match tool_defs(&ctx, ctx.can_spend).await {
             Ok(d) => d,
             Err(e) => {
                 for ev in error_events("error", &requested_model, e) { yield Ok(ev); }
@@ -1956,7 +2202,12 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or_default();
                 let tool_call_id = call.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
 
-                if name != RUN_PYTHON_TOOL_NAME && !is_wallet_tool(name) {
+                let listing_tool = if name != RUN_PYTHON_TOOL_NAME && !is_wallet_tool(name) {
+                    listing_tool_named(&ctx, name).await
+                } else {
+                    None
+                };
+                if name != RUN_PYTHON_TOOL_NAME && !is_wallet_tool(name) && listing_tool.is_none() {
                     let result_text = json!({"error": format!("unknown tool '{name}'")}).to_string();
                     messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
                     continue 'tool_calls;
@@ -1978,6 +2229,65 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 if is_wallet_tool(name) {
                     yield Ok(Event::default().comment("owallet: running a wallet tool"));
                     let result_text = execute_wallet_tool(&ctx.mcp, name, &arguments, ctx.can_spend, ctx.key_id.as_deref(), &mut ledger).await;
+                    messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
+                    continue 'tool_calls;
+                }
+
+                // Listing tools execute like run_python (a real second
+                // order), forwarding the seller's in-flight partial output
+                // into the chat stream as it arrives — a streaming seller
+                // (the weather reporter's forecast preview) pours into the
+                // client mid-call. Unlike run_python's stdout, the preview
+                // is buyer-facing markdown, so it is forwarded unfenced,
+                // set off by blank lines.
+                if let Some(tool) = listing_tool {
+                    yield Ok(Event::default().comment(format!("owallet: running {}", tool.name)));
+                    let order_id = match place_and_pay_order(&ctx.mcp, &auth, &tool.listing_id, &tool.seller_slug, &listing_tool_buyer_note(&tool, &arguments), ctx.key_id.as_deref()).await {
+                        Ok(id) => id,
+                        Err(e) => {
+                            let result_text = json!({"error": e.message()}).to_string();
+                            messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
+                            continue 'tool_calls;
+                        }
+                    };
+                    let started = Instant::now();
+                    let mut lt_streamed = 0usize;
+                    let mut lt_emitted = false;
+                    let result_text = loop {
+                        let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                            Ok(s) => s,
+                            Err(e) => break json!({"error": OpenAiError::from(e).message()}).to_string(),
+                        };
+
+                        // Forward whatever is new before checking for the
+                        // end, so the final flush of the preview is never
+                        // dropped on the delivering poll.
+                        let (partial, _seq) = partial_output(&snap);
+                        match new_output_since(partial, &mut lt_streamed) {
+                            Some(delta) => {
+                                if !lt_emitted {
+                                    yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n\n"}), None));
+                                    lt_emitted = true;
+                                }
+                                yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None));
+                            }
+                            None => yield Ok(Event::default().comment(format!("owallet: {} still running", tool.name))),
+                        }
+
+                        if is_terminal(order_status(&snap)) {
+                            break extract_listing_delivered(&order_id, &snap).to_string();
+                        }
+                        if started.elapsed() >= ctx.timeout {
+                            break json!({
+                                "error": format!("order {order_id} did not reach a terminal status in time"),
+                                "order_id": order_id,
+                            }).to_string();
+                        }
+                        tokio::time::sleep(ctx.poll).await;
+                    };
+                    if lt_emitted {
+                        yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n\n"}), None));
+                    }
                     messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
                     continue 'tool_calls;
                 }
@@ -2185,6 +2495,56 @@ mod tests {
     /// stubbed, not just the one it's actually exercising. Query-param
     /// matching on `seller` disambiguates the two list calls; exact `path`
     /// matching on the by-id calls avoids one regex catching both ids.
+    const FORECAST_ID: &str = "L-FORECAST";
+
+    /// The forecast listing as the Rails *index* serializes it: the
+    /// `provider_tool` marker rides as a curated top-level field (like
+    /// `delivery_eta`), and the heavy schemas are deliberately omitted.
+    fn forecast_index_row() -> Value {
+        json!({
+            "id": FORECAST_ID,
+            "title": "AI Weather Report",
+            "description": "AI-generated post-apocalyptic weather…",
+            "seller": {"slug": "weather", "name": "Weather Reporter"},
+            "provider_tool": {"name": "forecast"},
+        })
+    }
+
+    /// The `show` payload: full description plus the buyer_note_schema —
+    /// a bare-string schema (`buyer_input :text`), which the tool def
+    /// must wrap in an object and unwrap at execution.
+    fn forecast_show_body() -> Value {
+        json!({
+            "id": FORECAST_ID,
+            "title": "AI Weather Report",
+            "description": "AI-generated post-apocalyptic weather forecast for any location.",
+            "buyer_note_schema": {"type": "string", "title": "Enter a location"},
+            "seller": {"slug": "weather", "name": "Weather Reporter"},
+            "provider_tool": {"name": "forecast"},
+        })
+    }
+
+    /// The unfiltered listings catalog the listing-tool registry fetches
+    /// (index + the per-listing detail the registry follows up with).
+    /// Mounted AFTER the seller-filtered mocks (wiremock matches in mount
+    /// order), so `?seller=` lookups keep hitting their specific mocks.
+    async fn mount_listing_tool_catalog(overpay: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/api/v1/listings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [forecast_index_row()]
+            })))
+            .mount(overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/listings/{FORECAST_ID}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": forecast_show_body()})),
+            )
+            .mount(overpay)
+            .await;
+    }
+
     async fn mount_both_listings(overpay: &MockServer) {
         mount_seller_listing(
             overpay,
@@ -2914,9 +3274,14 @@ mod tests {
     /// Python listing) based on the request's `listing_id` — so a test
     /// spanning multiple OpenRouter turns and tool executions can mount a
     /// distinct, deterministic GET response for each one.
+    #[derive(Default)]
     struct OrderCreateRouter {
         openrouter_calls: AtomicUsize,
         python_calls: AtomicUsize,
+        forecast_calls: AtomicUsize,
+        /// The buyer_note of the last forecast order, for verbatim-string
+        /// assertions (a `buyer_input :text` note must arrive unquoted).
+        forecast_note: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
     }
     impl Respond for OrderCreateRouter {
         fn respond(&self, req: &Request) -> ResponseTemplate {
@@ -2932,6 +3297,9 @@ mod tests {
                 )
             } else if listing_id == PYTHON_ID {
                 format!("PY-{}", self.python_calls.fetch_add(1, Ordering::SeqCst))
+            } else if listing_id == FORECAST_ID {
+                *self.forecast_note.lock().unwrap() = body.get("buyer_note").cloned();
+                format!("F-{}", self.forecast_calls.fetch_add(1, Ordering::SeqCst))
             } else {
                 panic!("unexpected listing_id in create_order body: {body}");
             };
@@ -2941,16 +3309,26 @@ mod tests {
     }
 
     async fn mount_order_router(overpay: &MockServer) {
+        mount_order_router_capturing(overpay).await;
+    }
+
+    /// Like [`mount_order_router`] but hands back the forecast buyer_note
+    /// capture slot.
+    async fn mount_order_router_capturing(
+        overpay: &MockServer,
+    ) -> std::sync::Arc<std::sync::Mutex<Option<Value>>> {
+        let note = std::sync::Arc::new(std::sync::Mutex::new(None));
         Mock::given(method("POST"))
             .and(path("/api/v1/orders"))
             .respond_with(OrderCreateRouter {
-                openrouter_calls: AtomicUsize::new(0),
-                python_calls: AtomicUsize::new(0),
+                forecast_note: note.clone(),
+                ..Default::default()
             })
             .mount(overpay)
             .await;
         mount_redeem_fully_paid(overpay, "openrouter-bot").await;
         mount_redeem_fully_paid(overpay, "exec").await;
+        note
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3450,6 +3828,111 @@ mod tests {
             };
             ResponseTemplate::new(200).set_body_json(body)
         }
+    }
+
+    /// Sequenced forecast order: first poll in flight with a streamed
+    /// preview, second poll a delivered report — the streamed prefix plus
+    /// the rest, so the client-visible preview and the deliverable agree.
+    struct ForecastToolStream {
+        calls: AtomicUsize,
+    }
+    impl Respond for ForecastToolStream {
+        fn respond(&self, _req: &Request) -> ResponseTemplate {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            let body = if n == 0 {
+                json!({"data": {
+                    "id": "F-0", "fulfillment_status": "awaiting_seller",
+                    "partial_content": "*Consulting the Elder Meteorologists about Reykjavik…*\n",
+                    "partial_seq": 1,
+                }})
+            } else {
+                json!({"data": {
+                    "id": "F-0", "fulfillment_status": "delivered",
+                    "delivered_content": "{\"description\":\"Reykjavik shivers.\",\"image_url\":\"http://localhost:3001/blob.png\"}",
+                    "delivered_content_type": "application/json",
+                }})
+            };
+            ResponseTemplate::new(200).set_body_json(body)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_forwards_a_listing_tools_preview_unfenced() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        mount_listing_tool_catalog(&overpay).await;
+        mount_redeem_fully_paid(&overpay, "weather").await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_1", "forecast", r#"{"input": "Reykjavik"}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/F-0"))
+            .respond_with(ForecastToolStream {
+                calls: AtomicUsize::new(0),
+            })
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-1", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content("Reykjavik shivers.", "openai/gpt-5-mini", false),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "forecast for Reykjavik"}],
+                "stream": true,
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let text = res.text();
+        let content: String = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|l| *l != "[DONE]")
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| {
+                v["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+
+        assert!(
+            content.contains("\n\n*Consulting the Elder Meteorologists about Reykjavik…*\n\n\n"),
+            "the preview must reach the client unfenced, set off by blank lines: {content:?}\n{text}"
+        );
+        assert!(
+            !content.contains("```"),
+            "listing-tool previews are buyer-facing markdown, not fenced output: {content:?}"
+        );
+        assert!(
+            content.ends_with("Reykjavik shivers."),
+            "the final turn's answer must still follow: {content:?}\n{text}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4242,6 +4725,203 @@ mod tests {
                 .unwrap()
                 .contains("daily budget exhausted"),
             "got: {body}"
+        );
+    }
+
+    #[test]
+    fn tool_names_are_validated_conservatively() {
+        assert!(valid_tool_name("forecast"));
+        assert!(valid_tool_name("run_javascript"));
+        assert!(valid_tool_name("a-b_C9"));
+        assert!(!valid_tool_name(""));
+        assert!(!valid_tool_name("has space"));
+        assert!(!valid_tool_name("emoji✨"));
+        assert!(!valid_tool_name(&"x".repeat(65)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn listing_tool_registry_filters_wraps_and_skips_collisions() {
+        let overpay = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/listings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [
+                    // Bare-string schema → wrapped parameters.
+                    forecast_index_row(),
+                    // Object schema → passed through verbatim.
+                    {"id": "L-OBJ", "title": "Objective", "description": "obj",
+                     "seller": {"slug": "obj"},
+                     "provider_tool": {"name": "objective"}},
+                    // Colliding with the hardcoded run_python: skipped.
+                    {"id": "L-PY2", "title": "Sneaky Python", "seller": {"slug": "sneak"},
+                     "provider_tool": {"name": "run_python"}},
+                    // Colliding with a wallet tool: skipped.
+                    {"id": "L-BAL", "title": "Sneaky Balances", "seller": {"slug": "sneak"},
+                     "provider_tool": {"name": "get_balances"}},
+                    // Invalid name: skipped.
+                    {"id": "L-BAD", "title": "Bad", "seller": {"slug": "bad"},
+                     "provider_tool": {"name": "has space"}},
+                    // Duplicate of forecast: first wins.
+                    {"id": "L-DUP", "title": "Dup", "seller": {"slug": "dup"},
+                     "provider_tool": {"name": "forecast"}},
+                    // Unmarked listing: ignored.
+                    {"id": "L-PLAIN", "title": "Plain", "seller": {"slug": "plain"}},
+                ]
+            })))
+            .mount(&overpay)
+            .await;
+        // Only the survivors get a detail fetch — the skipped candidates
+        // are filtered before any per-listing GET (no mocks for them, so
+        // an eager fetch would 404 and fail the test).
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/listings/{FORECAST_ID}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": forecast_show_body()})),
+            )
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/listings/L-OBJ"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "L-OBJ", "title": "Objective", "description": "obj",
+                         "buyer_note_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
+                         "seller": {"slug": "obj"},
+                         "provider_tool": {"name": "objective"}}
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let tools = match fetch_listing_tools(&state).await {
+            Ok(t) => t,
+            Err(e) => panic!("fetch failed: {}", e.message()),
+        };
+
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["forecast", "objective"]);
+
+        let forecast = &tools[0];
+        assert_eq!(forecast.listing_id, FORECAST_ID);
+        assert_eq!(forecast.seller_slug, "weather");
+        assert!(forecast.wrapped, "bare-string schema must be wrapped");
+        assert_eq!(forecast.parameters["type"], "object");
+        assert_eq!(forecast.parameters["properties"]["input"]["type"], "string");
+        assert_eq!(forecast.parameters["required"][0], "input");
+
+        let objective = &tools[1];
+        assert!(!objective.wrapped);
+        assert_eq!(objective.parameters["properties"]["q"]["type"], "string");
+
+        // Buyer-note unwrapping matches the wrapping.
+        assert_eq!(
+            listing_tool_buyer_note(forecast, &json!({"input": "Galveston"})),
+            json!("Galveston")
+        );
+        assert_eq!(
+            listing_tool_buyer_note(objective, &json!({"q": "hi"})),
+            json!({"q": "hi"})
+        );
+    }
+
+    #[test]
+    fn listing_delivery_projection_handles_failure_and_caps_content() {
+        let failed = extract_listing_delivered(
+            "F-9",
+            &json!({"data": {"fulfillment_status": "failed", "fulfillment_error": "no gpu",
+                             "settlement_tx_hash": "0xdeadbeef"}}),
+        );
+        assert_eq!(failed["order_id"], "F-9");
+        assert_eq!(failed["error"], "no gpu");
+        assert!(
+            !failed.to_string().contains("0xdeadbeef"),
+            "projection must stay chain-free: {failed}"
+        );
+
+        let big = "x".repeat(DELIVERED_CONTENT_MODEL_CAP + 100);
+        let capped = extract_listing_delivered(
+            "F-10",
+            &json!({"data": {"fulfillment_status": "delivered", "delivered_content": big,
+                             "delivered_content_type": "text/plain"}}),
+        );
+        assert_eq!(
+            capped["delivered_content"].as_str().unwrap().len(),
+            DELIVERED_CONTENT_MODEL_CAP
+        );
+        assert_eq!(capped["delivered_content_truncated"], true);
+        assert_eq!(capped["delivered_content_type"], "text/plain");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn marked_listing_is_advertised_and_executed_as_a_tool() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        let note_slot = mount_order_router_capturing(&overpay).await;
+        mount_listing_tool_catalog(&overpay).await;
+        mount_redeem_fully_paid(&overpay, "weather").await;
+
+        // Turn 1: the model calls the forecast listing tool.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_1", "forecast", r#"{"input": "Galveston"}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        // The forecast order itself: a real, separately-paid order that
+        // delivers the report JSON.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/F-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "F-0", "fulfillment_status": "delivered",
+                    "delivered_content": "{\"description\":\"Galveston steams.\",\"image_url\":\"http://localhost:3001/rails/active_storage/blobs/redirect/real/delivered.png\"}",
+                    "delivered_content_type": "application/json",
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        // Turn 2: with the real delivered report in hand, the model answers.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-1", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content("Galveston steams.", "openai/gpt-5-mini", false),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "order a weather report for Galveston"}],
+            }))
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "Galveston steams."
+        );
+
+        // The buyer_note reached the marketplace as the raw string —
+        // unwrapped from {input: ...} and NOT JSON-quoted, so the bot's
+        // `buyer_note.to_s` sees clean text.
+        assert_eq!(
+            *note_slot.lock().unwrap(),
+            Some(json!("Galveston")),
+            "buyer_note must be the verbatim location string"
         );
     }
 
