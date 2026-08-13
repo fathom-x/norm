@@ -8,6 +8,7 @@
 pub mod jsonrpc;
 pub mod openai_compat;
 pub mod progress;
+pub mod projection;
 pub mod render;
 pub mod state;
 pub mod tools;

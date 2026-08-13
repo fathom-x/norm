@@ -43,7 +43,7 @@ pub fn render(tool: &str, data: &Value) -> String {
         "pay_order" => render_redeem(data),
         "buy" => render_buy(data),
         "load_core_credits" => render_load_credits(data),
-        "send_usdc" => render_send(data),
+        "send_usdc" | "send_zcash" => render_send(data),
         "list_purchases" => render_purchases(data),
         "get_purchase" => render_purchase(data),
         "sync_purchases" => render_sync(data),
@@ -125,17 +125,17 @@ fn render_soft_error(tool: &str, data: &Value) -> Option<String> {
 // Per-shape renderers
 // ---------------------------------------------------------------------------
 
-/// `get_account_info`: the wallet identity + balances table. This is the
-/// markdown that used to be built inline in `tools::get_account_info`.
+/// `get_account_info`: the wallet's balances table. Handles both the
+/// sanitized shape the MCP transport emits (flat formatted balances, no
+/// identity fields — fathom-x/overpay#391) and the raw handler shape
+/// (`{formatted, symbol}` balance objects plus address/npub), which
+/// internal callers still render.
 fn render_account(data: &Value) -> String {
     let s = |k: &str| data.get(k).and_then(Value::as_str).unwrap_or("—");
     let account_data = data.get("account").and_then(|a| a.get("data"));
     let username = account_data
         .and_then(|d| d.get("username").and_then(Value::as_str))
         .or_else(|| data.get("account_hint").and_then(Value::as_str))
-        .unwrap_or("—");
-    let account_number = account_data
-        .and_then(|d| d.get("formatted_account_number").and_then(Value::as_str))
         .unwrap_or("—");
 
     // Human chain name (e.g. "Base") for the balance cells, derived from
@@ -145,13 +145,16 @@ fn render_account(data: &Value) -> String {
         .map(|c| c.name.to_string())
         .unwrap_or_else(|_| network.to_string());
 
-    // Balance cells fall back to the formatted balance, then a balance
-    // error, then "unavailable" — matching the prior inline logic.
+    // Balance cells: the raw shape nests `{formatted}`, the sanitized
+    // shape is the formatted string itself; then a balance error, then
+    // "unavailable".
     let bal = |key: &str, symbol: &str| -> String {
-        if let Some(f) = data
-            .get(key)
-            .and_then(|v| v.get("formatted").and_then(Value::as_str))
-        {
+        let formatted = data.get(key).and_then(|v| {
+            v.get("formatted")
+                .and_then(Value::as_str)
+                .or_else(|| v.as_str())
+        });
+        if let Some(f) = formatted {
             format!("{f} {symbol} ({chain_name})")
         } else if let Some(e) = data.get("balance_error").and_then(Value::as_str) {
             e.to_string()
@@ -161,16 +164,33 @@ fn render_account(data: &Value) -> String {
     };
 
     let mut md = String::from("| Field | Value |\n|---|---|\n");
-    let _ = writeln!(md, "| Address | {} |", s("address"));
+    // Identity rows only exist on the raw (internal) shape — the
+    // sanitized response deliberately carries none of them.
+    if let Some(addr) = data.get("address").and_then(Value::as_str) {
+        let _ = writeln!(md, "| Address | {addr} |");
+    }
     let _ = writeln!(md, "| Network | {} |", s("network"));
-    let _ = writeln!(md, "| npub | {} |", s("npub"));
+    if let Some(npub) = data.get("npub").and_then(Value::as_str) {
+        let _ = writeln!(md, "| npub | {npub} |");
+    }
     let _ = writeln!(md, "| ETH Balance | {} |", bal("eth_balance", "ETH"));
     let _ = writeln!(md, "| USDC Balance | {} |", bal("usdc_balance", "USDC"));
-    let _ = writeln!(md, "| Username | {username} |");
-    let _ = write!(md, "| Account Number | {account_number} |");
+    if let Some(zec) = data.get("zec_balance").and_then(Value::as_str) {
+        let _ = writeln!(md, "| ZEC Balance | {zec} ZEC |");
+    }
+    let _ = write!(md, "| Username | {username} |");
+    if let Some(number) = account_data
+        .and_then(|d| d.get("formatted_account_number"))
+        .and_then(Value::as_str)
+    {
+        let _ = write!(md, "\n| Account Number | {number} |");
+    }
     if let Some(credits) = data.get("merchant_credits") {
         md.push('\n');
         md.push_str(&render_credits(credits));
+    }
+    if let Some(note) = data.get("identity_note").and_then(Value::as_str) {
+        let _ = write!(md, "\n{note}");
     }
     md
 }
@@ -357,8 +377,14 @@ fn order_next_step(id: &str, pay: &str, ful: &str, order: &Value) -> String {
 }
 
 /// `get_merchant_credits`: either a single seller's balance or a list.
+/// The raw Rails shape nests the list under `data`; the sanitized shape
+/// is a bare array of projected rows.
 fn render_credits(data: &Value) -> String {
-    if let Some(list) = data.get("data").and_then(Value::as_array) {
+    if let Some(list) = data
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| data.as_array())
+    {
         if list.is_empty() {
             return "No merchant credits yet. Next: buy(seller_slug, amount_usd) to fund a balance.".to_string();
         }
@@ -427,8 +453,22 @@ fn render_buy(data: &Value) -> String {
     out
 }
 
-/// `send_usdc`: just a tx hash.
+/// `send_usdc` / `send_zcash`. The sanitized shape carries
+/// `{status: "sent", asset}` (the tx id stays on the operator surfaces —
+/// fathom-x/overpay#391); the raw shape's tx hash still renders for
+/// internal callers.
 fn render_send(data: &Value) -> String {
+    if data.get("status").and_then(Value::as_str) == Some("sent") {
+        let asset = data.get("asset").and_then(Value::as_str).unwrap_or("USDC");
+        let mut out = format!("✅ {asset} transfer broadcast.");
+        if let Some(note) = data.get("note").and_then(Value::as_str) {
+            let _ = write!(out, "\n{note}");
+        }
+        out.push_str(
+            "\nNext: the recipient/order settles automatically once the transfer confirms on-chain.",
+        );
+        return out;
+    }
     match data.get("tx_hash").and_then(Value::as_str) {
         Some(h) => format!(
             "✅ USDC transfer broadcast · tx {}\nNext: the recipient/order settles automatically once the transfer confirms on-chain.",

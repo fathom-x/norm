@@ -180,15 +180,17 @@ async fn tools_call(state: &McpState, params: Value) -> Result<Value, JrpcError>
         message: format!("bad tools/call params: {e}"),
     })?;
 
-    let outcome = tools::dispatch(state, &params.name, params.arguments, None).await;
+    let outcome = tools::dispatch_sanitized(state, &params.name, params.arguments, None).await;
     Ok(tool_result_value(outcome))
 }
 
 /// Wrap a tool outcome as the MCP `tools/call` result value:
 /// `{ content: [...], structuredContent, isError }`. The model only sees
 /// `content`, so the rendered, model-facing summary (`out.text`, built by
-/// `crate::render`) goes there while the raw payload stays in
+/// `crate::render`) goes there while the structured payload sits in
 /// `structuredContent` for programmatic clients (fathom-x/overpay#295).
+/// Both legs arrive pre-sanitized of on-chain data by
+/// `tools::dispatch_sanitized` (fathom-x/overpay#391).
 /// Errors render to a friendly, actionable message via `render_error`.
 /// Shared by the buffered and streamed paths so both frame results
 /// identically.
@@ -262,7 +264,7 @@ fn sse_tools_call(state: McpState, id: Value, params: Value) -> Response {
         // Drive the tool and the progress channel concurrently: yield each
         // progress notification as it arrives, break out with the result
         // once the tool completes.
-        let fut = tools::dispatch(&state, &name, arguments, Some(&sink));
+        let fut = tools::dispatch_sanitized(&state, &name, arguments, Some(&sink));
         tokio::pin!(fut);
         let outcome = loop {
             tokio::select! {

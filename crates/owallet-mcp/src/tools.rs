@@ -73,7 +73,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         ToolSpec {
             name: "get_account_info",
             description:
-                "Show the active wallet's EVM address, Nostr npub, Overpay account, and merchant credit balances (when linked).",
+                "Show the active wallet's balances (ETH / USDC / ZEC), Overpay link status, and merchant credit balances (when linked). Addresses and account identifiers are shown on the owallet dashboard, not here.",
             input_schema: schema_object(json!({})),
         },
         ToolSpec {
@@ -185,7 +185,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "buy",
-            description: "One-shot purchase of merchant credits: opens a credit-purchase order with Overpay, then signs and broadcasts a USDC transfer to the returned payment address. Returns the order id, tx hash, and the USDC amount sent.",
+            description: "One-shot purchase of merchant credits: opens a credit-purchase order with Overpay, then signs and broadcasts a USDC transfer to the returned payment address. Returns the order id, status, and the USDC amount sent.",
             input_schema: schema_with_required(
                 json!({
                     "seller_slug": {"type": "string"},
@@ -196,7 +196,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "send_usdc",
-            description: "Sign and broadcast an ERC-20 USDC transfer on the configured EVM chain (default Base mainnet). Returns `{tx_hash}`.",
+            description: "Sign and broadcast an ERC-20 USDC transfer on the configured EVM chain (default Base mainnet). Returns `{status: \"sent\"}`; the transaction id is viewable on the owallet dashboard and CLI.",
             input_schema: schema_with_required(
                 json!({
                     "to_address":  {"type": "string"},
@@ -207,7 +207,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "send_zcash",
-            description: "Sync, then sign and broadcast a shielded Zcash (Orchard) payment to a Unified Address (u1…). Returns `{txid}`.",
+            description: "Sync, then sign and broadcast a shielded Zcash (Orchard) payment to a Unified Address (u1…). Returns `{status: \"sent\"}`; the transaction id is viewable on the owallet dashboard and CLI.",
             input_schema: schema_with_required(
                 json!({
                     "to_address": {"type": "string"},
@@ -315,6 +315,36 @@ pub async fn dispatch(
             })
         }
     };
+    let text = crate::render::render(name, &data);
+    Ok(ToolOutput { text, data })
+}
+
+/// [`dispatch`], then sanitize the result for transmission off-machine
+/// (fathom-x/overpay#391): the data is run through the chain-free
+/// allowlist projection for its tool and the text is re-rendered from the
+/// *projected* data, so neither `content` nor `structuredContent` can
+/// carry txids, tx hashes, addresses, npubs, or account numbers.
+///
+/// This is the entry point for the externally-reachable MCP transport
+/// (`/mcp` — see `transport.rs`). Internal consumers that need the raw
+/// shapes (`/v1`'s own model-facing projections, the dashboard's
+/// `sync_purchases` reuse) call [`dispatch`] directly — the split replaces
+/// a mode flag on `McpState`, which `/mcp` and `/v1` share.
+///
+/// `OWALLET_MCP_UNSANITIZED=1` restores raw responses for local
+/// debugging. The default is sanitized: this is a privacy posture, not a
+/// preference.
+pub async fn dispatch_sanitized(
+    state: &McpState,
+    name: &str,
+    args: Value,
+    progress: Option<&ProgressSink>,
+) -> Result<ToolOutput, ToolError> {
+    let raw = dispatch(state, name, args, progress).await?;
+    if std::env::var("OWALLET_MCP_UNSANITIZED").is_ok_and(|v| v == "1") {
+        return Ok(raw);
+    }
+    let data = crate::projection::sanitize(name, &raw.data);
     let text = crate::render::render(name, &data);
     Ok(ToolOutput { text, data })
 }

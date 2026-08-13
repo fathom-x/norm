@@ -4,6 +4,34 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### MCP responses sanitized of all on-chain data (fathom-x/overpay#391)
+
+- **Every `/mcp` tool result is now projected through a chain-free
+  allowlist** before it leaves the machine — both the `content` text the
+  model reads and the `structuredContent` leg. Txids, tx hashes, wallet
+  addresses, npubs, pubkeys, and account numbers no longer appear in any
+  tool response; order/listing ids, amounts, statuses, and spending
+  limits do. On-chain details stay on the surfaces the user reads
+  directly: the CLI and the dashboard in their own browser.
+- The `/v1` provider surface's allowlist projections moved to a shared
+  `owallet-mcp/src/projection.rs`; `/v1` layers its spend-ledger context
+  on top and the MCP transport applies `projection::sanitize` per tool
+  via `tools::dispatch_sanitized`. Internal consumers that need raw
+  shapes (`/v1`'s own projections, the dashboard's `sync_purchases`
+  reuse) still call `dispatch` — sanitization is a property of the
+  externally-reachable transport, not a mode flag. `OWALLET_MCP_UNSANITIZED=1`
+  restores raw responses for local debugging.
+- Envelope shapes are preserved (`{data: [...]}` etc.) so programmatic
+  clients keep their contract; row keys converge on the `/v1` vocabulary
+  (`order_id`, `listing_id`). `send_usdc`/`send_zcash` return
+  `{status: "sent"}` instead of the tx id; `get_account_info` returns
+  balances + credits + username with a pointer to the dashboard for
+  addresses; `get_purchase` responses drop the raw `snapshot` (the local
+  cache still stores it in full); free-text `balance_error` strings are
+  scrubbed of hex runs (an allowlist can't reach inside a string).
+- Leak tests cover every tool with payloads stuffed with all on-chain
+  fields, at both the projection layer and the `/mcp` transport level.
+
 ### Model-callable wallet tools on `/v1`, gated by provider-key scopes
 
 - **Wallet tools in the `/v1` tool loop.** Alongside `run_python`, the model

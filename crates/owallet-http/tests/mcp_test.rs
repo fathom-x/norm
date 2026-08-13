@@ -264,7 +264,8 @@ async fn mcp_get_wallet_orders_without_token_falls_back_to_nip98() {
     let content_text = body["result"]["content"][0]["text"].as_str().unwrap();
     assert!(content_text.contains("O1"), "rendered text: {content_text}");
     let data = &body["result"]["structuredContent"]["data"];
-    assert_eq!(data[0]["id"], "O1");
+    // Sanitized rows use the converged `order_id` key (#391).
+    assert_eq!(data[0]["order_id"], "O1");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -444,13 +445,22 @@ async fn mcp_bearer_known_token_unlocks_wallet_scoped_tools() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false);
-    // `get_account_info` now emits a single markdown summary block in
+    // `get_account_info` emits a single markdown summary block in
     // `content`; the structured payload lives in `structuredContent`
-    // (fathom-x/overpay#295). The latter carries the username under
-    // `account.data.username` to match Python's Rails-envelope passthrough.
+    // (fathom-x/overpay#295). Both legs are sanitized of on-chain and
+    // identity data before they leave the machine (fathom-x/overpay#391):
+    // the username survives, the npub / EVM address / pubkey do not.
     let dump = &body["result"]["structuredContent"];
-    assert_eq!(dump["npub"], "npub1alice");
     assert_eq!(dump["account"]["data"]["username"], "alice");
+    assert!(
+        dump.get("npub").is_none() && dump.get("address").is_none(),
+        "identity fields must not leave the machine: {dump}"
+    );
+    let serialized = body["result"].to_string();
+    assert!(
+        !serialized.contains("npub1alice") && !serialized.contains("0xabc"),
+        "no response leg may carry wallet identity: {serialized}"
+    );
     let md = body["result"]["content"][0]["text"].as_str().unwrap();
     assert!(md.contains("| Username | alice |"), "markdown: {md}");
 }
@@ -1036,21 +1046,24 @@ async fn mcp_get_account_info_includes_onchain_balances() {
     assert!(md.contains("| ETH Balance | 1 ETH (Base) |"));
     assert!(md.contains("| USDC Balance | 5 USDC (Base) |"));
     assert!(md.contains("| Username | alice |"));
-    assert!(md.contains("| Account Number | 0001-0002-0003-0004 |"));
+    // The account number, pubkey, and addresses stay on the dashboard/CLI
+    // (fathom-x/overpay#391).
+    assert!(
+        !md.contains("0001-0002-0003-0004"),
+        "account number must not leave the machine: {md}"
+    );
 
+    // Sanitized shape (fathom-x/overpay#391): flat formatted balances,
+    // projected credits, no identity fields.
     let dump = &body["result"]["structuredContent"];
     assert_eq!(dump["network"], "eip155:8453");
     assert_eq!(dump["chain_id"], 8453);
-    assert!(dump["pubkey"].as_str().unwrap().len() == 64);
-    assert_eq!(dump["eth_balance"]["formatted"], "1");
-    assert_eq!(dump["eth_balance"]["symbol"], "ETH");
-    assert_eq!(dump["usdc_balance"]["formatted"], "5");
-    assert_eq!(dump["usdc_balance"]["symbol"], "USDC");
-    // `account` keeps the full Rails `{data: {...}}` envelope.
+    assert!(dump.get("pubkey").is_none() && dump.get("address").is_none());
+    assert_eq!(dump["eth_balance"], "1");
+    assert_eq!(dump["usdc_balance"], "5");
     assert_eq!(dump["account"]["data"]["username"], "alice");
-    // merchant_credits are now included inline in get_account_info.
-    assert_eq!(dump["merchant_credits"]["data"][0]["seller_slug"], "core");
-    assert_eq!(dump["merchant_credits"]["data"][0]["balance_cents"], 500);
+    assert_eq!(dump["merchant_credits"][0]["seller_slug"], "core");
+    assert_eq!(dump["merchant_credits"][0]["balance_cents"], 500);
     assert!(md.contains("@core"), "credits in markdown: {md}");
     assert!(md.contains("$5.00"), "credits in markdown: {md}");
 }
@@ -1141,23 +1154,24 @@ async fn mcp_buy_composes_purchase_then_send_usdc() {
         body["result"]["content"][0]["text"]
     );
     let structured = &body["result"]["structuredContent"];
-    // Strict Python-shape parity (fathom-x/overpay#288 follow-up): the
-    // success output must be exactly the six fields the Python tool
-    // returns in `server.py:2172-2179`. `payment_address`, `chain`,
-    // `block_number`, `seller_slug`, `explorer_url` are intentionally
-    // dropped.
+    // The Python tool's strict six-field shape (`server.py:2172-2179`)
+    // minus the tx hash, which the sanitized MCP surface withholds
+    // (fathom-x/overpay#391). `payment_address`, `chain`, `block_number`,
+    // `seller_slug`, `explorer_url` remain intentionally dropped.
     assert_eq!(structured["order_id"], "ord_buy_001");
     assert_eq!(structured["payment_amount_usdc"], 7.50);
     assert_eq!(structured["status"], "payment_sent");
     assert!(structured["note"].as_str().unwrap().contains("Credits"));
     assert!(structured["order_url"].is_string());
+    // The sanitized MCP surface never returns the tx hash — it stays on
+    // the dashboard/CLI (fathom-x/overpay#391).
     assert!(
-        structured["tx_hash"].as_str().unwrap().starts_with("0x"),
-        "tx_hash missing or malformed: {structured:?}"
+        structured.get("tx_hash").is_none(),
+        "tx_hash must NOT leave the machine: {structured:?}"
     );
     assert!(
         structured.get("payment_address").is_none(),
-        "payment_address must NOT be in the strict-shape output: {structured:?}",
+        "payment_address must NOT be in the output: {structured:?}",
     );
     assert!(
         structured.get("chain").is_none(),
@@ -1248,7 +1262,8 @@ async fn mcp_get_listing_forwards_rails_envelope_with_schema() {
     assert_eq!(body["result"]["isError"], false);
     // Verbatim forward — Rails envelope intact, schema round-tripped.
     let structured = &body["result"]["structuredContent"];
-    assert_eq!(structured["data"]["id"], "L42");
+    // Sanitized listings use the converged `listing_id` key (#391).
+    assert_eq!(structured["data"]["listing_id"], "L42");
     assert_eq!(
         structured["data"]["buyer_note_schema"]["required"][0],
         "code"
@@ -1361,7 +1376,10 @@ async fn mcp_create_order_accepts_valid_schema_compliant_note() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false, "body: {body}");
-    assert_eq!(body["result"]["structuredContent"]["data"]["id"], "O1");
+    assert_eq!(
+        body["result"]["structuredContent"]["data"]["order_id"],
+        "O1"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1421,7 +1439,10 @@ async fn mcp_create_order_accepts_json_encoded_string_buyer_note() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false, "body: {body}");
-    assert_eq!(body["result"]["structuredContent"]["data"]["id"], "O2");
+    assert_eq!(
+        body["result"]["structuredContent"]["data"]["order_id"],
+        "O2"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1459,7 +1480,10 @@ async fn mcp_create_order_passes_through_when_no_schema() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false, "body: {body}");
-    assert_eq!(body["result"]["structuredContent"]["data"]["id"], "O2");
+    assert_eq!(
+        body["result"]["structuredContent"]["data"]["order_id"],
+        "O2"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1496,7 +1520,10 @@ async fn mcp_create_order_passes_through_on_listing_fetch_failure() {
     res.assert_status_ok();
     let body: Value = res.json();
     assert_eq!(body["result"]["isError"], false, "body: {body}");
-    assert_eq!(body["result"]["structuredContent"]["data"]["id"], "O3");
+    assert_eq!(
+        body["result"]["structuredContent"]["data"]["order_id"],
+        "O3"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1553,7 +1580,7 @@ async fn mcp_wait_for_order_returns_snap_plus_waited_seconds_and_timed_out_false
     let snap = &body["result"]["structuredContent"];
     // Rails envelope preserved + Python's extra fields spliced on top
     // (server.py:2045).
-    assert_eq!(snap["data"]["id"], "ord_wait_1");
+    assert_eq!(snap["data"]["order_id"], "ord_wait_1");
     assert_eq!(snap["data"]["fulfillment_status"], "delivered");
     assert!(
         snap["waited_seconds"].is_number(),
