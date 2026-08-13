@@ -102,7 +102,26 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   When touching these, extend the projections field-by-field (never copy
   whole payload objects) and keep raw-address sends (`send_usdc` /
   `send_zcash`) off this surface entirely — they're MCP/dashboard-only by
-  design. Spending is bounded per request by `SpendLedger`. The cap
+  design.
+  **The same rule now covers the MCP transport** (fathom-x/overpay#391):
+  the row-level allowlists live in `owallet-mcp/src/projection.rs`
+  (shared with `/v1`, which layers its spend-ledger fields on top), and
+  the `/mcp` transport calls `tools::dispatch_sanitized` — dispatch, then
+  `projection::sanitize(tool, data)`, then re-render `text` from the
+  *projected* data, so neither `content` nor `structuredContent` can
+  carry chain data. Internal consumers that need raw shapes (`/v1`'s own
+  projections, the dashboard's `sync_purchases` reuse) call plain
+  `dispatch`; sanitization is a property of the externally-reachable
+  transport, not a flag on the shared `McpState`
+  (`OWALLET_MCP_UNSANITIZED=1` exists for local debugging only).
+  Sanitized envelopes keep their shapes (`{data: [...]}`), row keys use
+  the `/v1` vocabulary (`order_id`/`listing_id`), and free-text
+  `balance_error` strings get hex runs scrubbed (`scrub_hex`) since an
+  allowlist can't reach inside a string. Renderers in `render.rs` accept
+  both raw and sanitized shapes — internal callers still render raw.
+  When adding a tool, add its projection arm to `sanitize` and a stuffed
+  payload to the leak test in `projection.rs`.
+  Spending is bounded per request by `SpendLedger`. The cap
   resolves per request via `effective_spend_cap`: the wallet-level
   dashboard setting (`Database::read_spend_cap_usd_cents`, settings key
   `v1_spend_cap_usd_cents`, edited from the OpenCode provider card —

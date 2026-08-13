@@ -815,43 +815,7 @@ fn project_balances(
     ledger: &SpendLedger,
     key: Option<&owallet_db::ProviderKeyRow>,
 ) -> Value {
-    let mut out = serde_json::Map::new();
-    if let Some(v) = data.pointer("/eth_balance/formatted") {
-        out.insert("eth_balance".into(), v.clone());
-    }
-    if let Some(v) = data.pointer("/usdc_balance/formatted") {
-        out.insert("usdc_balance".into(), v.clone());
-    }
-    if let Some(v) = data.pointer("/zec_balance/zec") {
-        out.insert("zec_balance".into(), v.clone());
-    }
-    if let Some(v) = data.get("balance_error") {
-        out.insert("balance_error".into(), v.clone());
-    }
-    // Merchant credits arrive as the raw Rails `{data: [...]}` list; keep
-    // only who holds them and how much.
-    let credits = data
-        .pointer("/merchant_credits/data")
-        .or_else(|| data.get("merchant_credits"))
-        .and_then(Value::as_array);
-    if let Some(rows) = credits {
-        let projected: Vec<Value> = rows
-            .iter()
-            .map(|c| {
-                let mut row = serde_json::Map::new();
-                for key in ["holder_type", "seller_slug", "organization_slug"] {
-                    if let Some(v) = c.get(key) {
-                        row.insert(key.into(), v.clone());
-                    }
-                }
-                if let Some(v) = c.get("balance_cents") {
-                    row.insert("balance_cents".into(), v.clone());
-                }
-                Value::Object(row)
-            })
-            .collect();
-        out.insert("merchant_credits".into(), json!(projected));
-    }
+    let mut out = crate::projection::balances_map(data);
     out.insert(
         "spend_allowance".into(),
         json!({
@@ -876,46 +840,11 @@ fn project_balances(
     Value::Object(out)
 }
 
-/// Shared allowlist for one marketplace listing. Listings are public data,
-/// so the projection is about consistency and context economy rather than
-/// secrecy: image/checkout URLs and non-decision fields stay out of the
-/// conversation that ships to the OpenRouter seller. `detail` adds the
-/// fields an ordering flow needs (full description arrives naturally —
-/// the detail endpoint returns it untruncated under the same key).
+/// Shared allowlist for one marketplace listing — see
+/// [`crate::projection::listing_row`], which `/v1` and the MCP transport
+/// share. `detail` adds the fields an ordering flow needs.
 fn project_listing(listing: &Value, detail: bool) -> Value {
-    let mut row = serde_json::Map::new();
-    if let Some(id) = listing.get("id").or_else(|| listing.get("listing_id")) {
-        row.insert("listing_id".into(), id.clone());
-    }
-    for key in [
-        "title",
-        "description",
-        "price_usd",
-        "free",
-        "currency",
-        "category",
-        "condition",
-        "quantity",
-        "delivery_eta_seconds",
-    ] {
-        if let Some(v) = listing.get(key) {
-            row.insert(key.into(), v.clone());
-        }
-    }
-    if let Some(slug) = listing.pointer("/seller/slug") {
-        row.insert("seller_slug".into(), slug.clone());
-    }
-    if let Some(name) = listing.pointer("/seller/name") {
-        row.insert("seller_name".into(), name.clone());
-    }
-    if detail {
-        for key in ["buyer_note_schema", "delivered_content_type"] {
-            if let Some(v) = listing.get(key).filter(|v| !v.is_null()) {
-                row.insert(key.into(), v.clone());
-            }
-        }
-    }
-    Value::Object(row)
+    crate::projection::listing_row(listing, detail)
 }
 
 /// Allowlist projection of `list_marketplace`: compact listing rows plus
@@ -952,24 +881,7 @@ fn project_orders_list(data: &Value) -> Value {
         .map(|orders| {
             orders
                 .iter()
-                .map(|order| {
-                    let mut row = serde_json::Map::new();
-                    if let Some(id) = order.get("id").or_else(|| order.get("order_id")) {
-                        row.insert("order_id".into(), id.clone());
-                    }
-                    for key in [
-                        "product_title",
-                        "payment_status",
-                        "fulfillment_status",
-                        "total_usd",
-                        "created_at",
-                    ] {
-                        if let Some(v) = order.get(key) {
-                            row.insert(key.into(), v.clone());
-                        }
-                    }
-                    Value::Object(row)
-                })
+                .map(crate::projection::order_summary_row)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -981,13 +893,7 @@ fn project_orders_list(data: &Value) -> Value {
     Value::Object(out)
 }
 
-/// Ceiling on how much `delivered_content` the `get_order_status` wallet
-/// tool hands the model. The deliverable is exactly what the buyer paid
-/// for, so it belongs in the conversation — but everything in `messages`
-/// re-ships to the OpenRouter seller every turn, so an unbounded blob
-/// would blow the context (and the buyer's per-turn cost) for the rest of
-/// the chat.
-const DELIVERED_CONTENT_MODEL_CAP: usize = 8 * 1024;
+use crate::projection::DELIVERED_CONTENT_MODEL_CAP;
 
 /// Allowlist projection of `get_order_status`: identity + statuses +
 /// price + (once delivered) the deliverable itself, capped at
@@ -1044,21 +950,7 @@ fn project_pay_order(
     ledger: &SpendLedger,
     key: Option<&owallet_db::ProviderKeyRow>,
 ) -> Value {
-    let mut out = serde_json::Map::new();
-    for key in [
-        "order_id",
-        "seller_slug",
-        "status",
-        "amount_redeemed_cents",
-        "credit_balance_cents",
-        "message",
-        "error",
-        "hint",
-    ] {
-        if let Some(v) = data.get(key) {
-            out.insert(key.into(), v.clone());
-        }
-    }
+    let mut out = crate::projection::pay_order_map(data);
     out.insert("remaining_spend_usd".into(), json!(ledger.remaining_usd()));
     insert_key_remaining(&mut out, key);
     Value::Object(out)
