@@ -8,13 +8,14 @@ Native USDC send on Base (and a handful of other EVM chains) is built in,
 plus shielded **Zcash (Orchard-only)** receive / sync / balance / send via
 librustzcash.
 
-This repository (`norm`) is the standalone home of the workspace that
-started life as the `owallet-rs/` subdirectory of
+This directory (`owallet/` in the `norm` repository) is the standalone
+home of the workspace that started life as the `owallet-rs/`
+subdirectory of
 [`fathom-x/overpay`](https://github.com/fathom-x/overpay), the
-marketplace it talks to (`scripts/sync-from-overpay.sh` pulls newer
-`owallet-rs/` commits from there while both copies exist). It is a Rust
-port of the Python `owallet/` implementation that lives in that
-repository. The on-disk wallet
+marketplace it talks to (`scripts/sync-from-overpay.sh` at the repo
+root pulls newer `owallet-rs/` commits from there while both copies
+exist). It is a Rust port of the Python `owallet/` implementation that
+lives in that repository. The on-disk wallet
 database is **byte-compatible** with the Python version's
 `~/.owallet.db` format, so existing wallets keep working after the
 upgrade.
@@ -22,7 +23,7 @@ upgrade.
 ## Workspace layout
 
 ```
-norm/
+owallet/
   crates/
     owallet-crypto/   AES-256-GCM, PBKDF2-SHA256, BIP-39/BIP-32, Nostr,
                       NIP-98 — every cryptographic primitive used elsewhere
@@ -47,7 +48,7 @@ norm/
 ## Install
 
 Per-target static binaries are produced by the GitHub Actions release
-workflow on every `v*` tag. Pick the artifact for your platform:
+workflow on every `owallet-v*` tag. Pick the artifact for your platform:
 
 ```bash
 # macOS / Linux — extract and drop into your PATH
@@ -58,6 +59,7 @@ curl -L https://github.com/fathom-x/norm/releases/download/<TAG>/owallet-<TARGET
 Or build from source:
 
 ```bash
+cd owallet
 cargo install --path crates/owallet --features dev-envs
 ```
 

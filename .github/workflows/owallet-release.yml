@@ -1,14 +1,14 @@
-name: release
+name: owallet release
 
-# Build static `owallet` binaries for the standard targets on every `v*`
-# tag push and attach them to the GitHub release. Replaces the conda +
-# constructor pipeline from the Python install (no Python runtime
-# bundled — just one statically linked binary per target).
+# Build static `owallet` binaries for the standard targets on every
+# `owallet-v*` tag push and attach them to the GitHub release. The
+# prefixed tag pattern keeps owallet releases distinct from releases of
+# the opencode fork at the repo root.
 
 on:
   push:
     tags:
-      - "v*"
+      - "owallet-v*"
   workflow_dispatch:
 
 permissions:
@@ -61,10 +61,12 @@ jobs:
 
       - name: Build (cross)
         if: matrix.cross
+        working-directory: owallet
         run: cross build --profile dist --target ${{ matrix.target }} -p owallet
 
       - name: Build (cargo)
         if: ${{ !matrix.cross }}
+        working-directory: owallet
         run: cargo build --profile dist --target ${{ matrix.target }} -p owallet
 
       - name: Determine version
@@ -72,7 +74,7 @@ jobs:
         shell: bash
         run: |
           ref="${GITHUB_REF##*/}"
-          ver="${ref#v}"
+          ver="${ref#owallet-v}"
           if [ -z "$ver" ] || [ "$ver" = "$ref" ]; then
             # workflow_dispatch — use a -dev tag
             ver="0.0.0-dev"
@@ -81,6 +83,7 @@ jobs:
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
+        working-directory: owallet
         run: |
           stage="owallet-${{ steps.version.outputs.version }}-${{ matrix.target }}"
           mkdir -p "dist/$stage"
@@ -91,6 +94,7 @@ jobs:
       - name: Package (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
+        working-directory: owallet
         run: |
           $stage = "owallet-${{ steps.version.outputs.version }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
@@ -102,13 +106,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: owallet-${{ matrix.target }}
-          path: dist/owallet-*.${{ matrix.archive }}
+          path: owallet/dist/owallet-*.${{ matrix.archive }}
           if-no-files-found: error
 
   release:
     name: Attach to GitHub Release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/owallet-v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8

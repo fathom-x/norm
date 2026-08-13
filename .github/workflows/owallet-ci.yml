@@ -1,9 +1,15 @@
-name: ci
+name: owallet ci
 
 on:
   push:
     branches: [main]
+    paths:
+      - "owallet/**"
+      - ".github/workflows/owallet-ci.yml"
   pull_request:
+    paths:
+      - "owallet/**"
+      - ".github/workflows/owallet-ci.yml"
 
 jobs:
   test:
@@ -19,20 +25,27 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: owallet
       - name: cargo fmt --check
+        working-directory: owallet
         run: cargo fmt --all --check
       - name: cargo clippy
+        working-directory: owallet
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: cargo clippy (dev-envs)
+        working-directory: owallet
         run: cargo clippy -p owallet -p owallet-config --all-targets --features dev-envs -- -D warnings
       - name: cargo test
+        working-directory: owallet
         run: cargo test --workspace --locked
       - name: cargo test (dev-envs)
+        working-directory: owallet
         run: cargo test -p owallet -p owallet-config --features dev-envs --locked
 
   docker_build:
     # Verify the production image still builds. The Dockerfile uses
-    # `COPY . /src` so the build context is the repo root.
+    # `COPY . /src` so the build context is the owallet workspace root.
     runs-on: ubuntu-latest
 
     steps:
@@ -45,8 +58,8 @@ jobs:
       - name: Build owallet image
         uses: docker/build-push-action@v7
         with:
-          context: .
-          file: Dockerfile
+          context: owallet
+          file: owallet/Dockerfile
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=owallet
+          cache-to: type=gha,mode=max,scope=owallet

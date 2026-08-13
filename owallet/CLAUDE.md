@@ -1,9 +1,10 @@
-# CLAUDE.md — norm (owallet)
+# CLAUDE.md — owallet
 
-Operational notes for working in this workspace. This repo is the
-standalone fork of the `owallet-rs/` workspace from `fathom-x/overpay`
-(the marketplace it talks to — that repo's top-level CLAUDE.md covers
-the Rails app + bot_manager).
+Operational notes for working in this workspace — the `owallet/`
+directory of norm (the opencode fork; see the repo-root CLAUDE.md).
+This workspace is the standalone fork of the `owallet-rs/` workspace
+from `fathom-x/overpay` (the marketplace it talks to — that repo's
+top-level CLAUDE.md covers the Rails app + bot_manager).
 
 ## What this is
 
@@ -49,6 +50,10 @@ into these crates.
 ## Run commands
 
 ```bash
+# MUST cd into this workspace; cargo can't find Cargo.toml from the
+# repo root (that's the opencode fork).
+cd owallet
+
 cargo build --workspace          # ~30s clean, instant incremental
 cargo test --workspace           # ~6 min cold (alloy build dominates)
 cargo clippy --workspace --all-targets -- -D warnings   # CI runs this
@@ -459,9 +464,10 @@ land any of these:
 
 ## Release flow
 
-- Tag pattern `v*` fires `.github/workflows/release.yml` which builds
-  the static matrix and attaches everything (+ SHA256SUMS) to a GitHub
-  release.
+- Tag pattern `owallet-v*` fires `.github/workflows/owallet-release.yml`
+  which builds the static matrix and attaches everything (+ SHA256SUMS)
+  to a GitHub release. (Bare `v*` tags belong to the opencode fork at
+  the repo root.)
 - Update `CHANGELOG.md` + bump `[workspace.package].version` in
   `Cargo.toml` + run `cargo build` so `Cargo.lock` updates, all in the
   same commit, before tagging.

@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Pull the latest owallet-rs/ history from fathom-x/overpay into this repo.
+# Pull the latest owallet-rs/ history from fathom-x/overpay into this
+# repo's owallet/ directory.
 #
-# norm began as `git subtree split -P owallet-rs` of overpay. The split is
-# deterministic: re-splitting a newer overpay main regenerates identical
-# commit ids for the history already imported here, plus new commits on
-# top — so the merge below shares ancestry with this repo and behaves like
-# an ordinary pull. Conflicts can only come from files norm itself has
-# diverged on (README.md, CLAUDE.md, the vendored nip98 fixture); resolve
-# keeping norm's standalone wording.
+# owallet/ began as `git subtree split -P owallet-rs` of overpay. The
+# split is deterministic: re-splitting a newer overpay main regenerates
+# identical commit ids for the history already imported here, plus new
+# commits on top — so the merge below shares ancestry with this repo and
+# behaves like an ordinary pull (the -Xsubtree option maps the split's
+# root-level paths onto owallet/). Conflicts can only come from files
+# norm itself has diverged on (owallet/README.md, owallet/CLAUDE.md, the
+# vendored nip98 fixture); resolve keeping norm's standalone wording.
 #
 # Usage: scripts/sync-from-overpay.sh
 #   OVERPAY_URL    override the source repo (default: fathom-x/overpay)
@@ -39,5 +41,6 @@ if git merge-base --is-ancestor "$split" HEAD; then
   exit 0
 fi
 
-git merge --no-edit -m "Sync owallet-rs from overpay ($(git rev-parse --short FETCH_HEAD))" "$split"
+git merge -Xsubtree=owallet --no-edit \
+  -m "Sync owallet from overpay ($(git rev-parse --short FETCH_HEAD))" "$split"
 echo "Merged. Review, run the test suite, then push."
