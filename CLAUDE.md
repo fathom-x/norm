@@ -1,13 +1,14 @@
-# CLAUDE.md — owallet-rs
+# CLAUDE.md — norm (owallet)
 
-Operational notes for working in this workspace. Read alongside the
-top-level `/home/user/overpay/CLAUDE.md` (which covers the Rails app +
-bot_manager).
+Operational notes for working in this workspace. This repo is the
+standalone fork of the `owallet-rs/` workspace from `fathom-x/overpay`
+(the marketplace it talks to — that repo's top-level CLAUDE.md covers
+the Rails app + bot_manager).
 
 ## What this is
 
-Rust port of the Python `owallet/` package that lives next to this
-directory. The on-disk encrypted DB (`~/.owallet.db`) is intentionally
+Rust port of the Python `owallet/` package from the `fathom-x/overpay`
+repository. The on-disk encrypted DB (`~/.owallet.db`) is intentionally
 **byte-compatible** with the Python implementation — same schema, same
 PBKDF2/AES-GCM parameters, same migration list. Don't change the wire
 format without also updating the Python compat fixture + test.
@@ -27,16 +28,13 @@ crates/
   owallet/          binary crate (clap CLI)
 ```
 
-Original Python source is at `/home/user/overpay/owallet/wallet_mcp/`.
-Cross-references in code comments use `wallet_mcp/server.py:NNNN` style.
+Original Python source lives in the `fathom-x/overpay` repository at
+`owallet/wallet_mcp/`. Cross-references in code comments use
+`wallet_mcp/server.py:NNNN` style.
 
 ## Run commands
 
 ```bash
-# MUST cd into the workspace; `cd /home/user/overpay` won't work — cargo
-# can't find Cargo.toml from the parent.
-cd /home/user/overpay/owallet-rs
-
 cargo build --workspace          # ~30s clean, instant incremental
 cargo test --workspace           # ~6 min cold (alloy build dominates)
 cargo clippy --workspace --all-targets -- -D warnings   # CI runs this
@@ -447,9 +445,9 @@ land any of these:
 
 ## Release flow
 
-- Tag pattern `owallet-rs-v*` fires
-  `.github/workflows/owallet-rs-release.yml` which builds the static
-  matrix and attaches everything (+ SHA256SUMS) to a GitHub release.
+- Tag pattern `v*` fires `.github/workflows/release.yml` which builds
+  the static matrix and attaches everything (+ SHA256SUMS) to a GitHub
+  release.
 - Update `CHANGELOG.md` + bump `[workspace.package].version` in
   `Cargo.toml` + run `cargo build` so `Cargo.lock` updates, all in the
   same commit, before tagging.

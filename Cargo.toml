@@ -17,7 +17,7 @@ version = "0.0.1"
 edition = "2021"
 rust-version = "1.81"
 license = "MIT"
-repository = "https://github.com/fathom-x/overpay"
+repository = "https://github.com/fathom-x/norm"
 authors = ["fathom-x"]
 homepage = "https://overpay.com"
 

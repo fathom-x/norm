@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This script is intended to be run from within the owallet-rs directory
+# This script is intended to be run from the repo root
 cd "$(dirname "$0")"
 
 echo "Installing owallet from crates/owallet..."

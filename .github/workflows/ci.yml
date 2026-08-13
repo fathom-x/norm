@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # Standard runner: Swatinem/rust-cache handles the warm-build case
+    # (the common one) just fine. Cold builds — when Cargo.lock changes
+    # — are slow either way; bumping to a larger runner via
+    # `ubuntu-latest-8-cores` was tried but the org's larger-runner
+    # provisioning made the job queue indefinitely without dispatching.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: cargo clippy (dev-envs)
+        run: cargo clippy -p owallet -p owallet-config --all-targets --features dev-envs -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace --locked
+      - name: cargo test (dev-envs)
+        run: cargo test -p owallet -p owallet-config --features dev-envs --locked
+
+  docker_build:
+    # Verify the production image still builds. The Dockerfile uses
+    # `COPY . /src` so the build context is the repo root.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build owallet image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

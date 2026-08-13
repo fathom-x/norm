@@ -8,15 +8,19 @@ Native USDC send on Base (and a handful of other EVM chains) is built in,
 plus shielded **Zcash (Orchard-only)** receive / sync / balance / send via
 librustzcash.
 
-This crate is a Rust port of the Python `owallet/` implementation that
-lives next to it in this repository. The on-disk wallet database is
-**byte-compatible** with the Python version's `~/.owallet.db` format, so
-existing wallets keep working after the upgrade.
+This repository (`norm`) is the standalone home of the workspace that
+started life as the `owallet-rs/` subdirectory of
+[`fathom-x/overpay`](https://github.com/fathom-x/overpay), the
+marketplace it talks to. It is a Rust port of the Python `owallet/`
+implementation that lives in that repository. The on-disk wallet
+database is **byte-compatible** with the Python version's
+`~/.owallet.db` format, so existing wallets keep working after the
+upgrade.
 
 ## Workspace layout
 
 ```
-owallet-rs/
+norm/
   crates/
     owallet-crypto/   AES-256-GCM, PBKDF2-SHA256, BIP-39/BIP-32, Nostr,
                       NIP-98 — every cryptographic primitive used elsewhere
@@ -45,14 +49,13 @@ workflow on every `v*` tag. Pick the artifact for your platform:
 
 ```bash
 # macOS / Linux — extract and drop into your PATH
-curl -L https://github.com/fathom-x/overpay/releases/download/<TAG>/owallet-<TARGET>.tar.gz \
+curl -L https://github.com/fathom-x/norm/releases/download/<TAG>/owallet-<TARGET>.tar.gz \
   | tar -xz -C /usr/local/bin
 ```
 
 Or build from source:
 
 ```bash
-cd owallet-rs
 cargo install --path crates/owallet --features dev-envs
 ```
 
