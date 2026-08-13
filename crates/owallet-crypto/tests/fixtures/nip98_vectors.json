@@ -1,0 +1,55 @@
+{
+  "_comment": "Frozen NIP-98 test vectors. Pins the NIP-98 serialization shared by owallet (Rust/secp256k1, owallet-rs/crates/owallet-crypto/tests/cross_language_vectors.rs) and the marketplace (Ruby/libsecp256k1, test/services/nip98_cross_language_test.rb).",
+  "vectors": [
+    {
+      "name": "get_orders_basic",
+      "secret_key_hex": "0000000000000000000000000000000000000000000000000000000000000003",
+      "pubkey_hex": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+      "url": "http://127.0.0.1:3000/api/v1/orders?payer_address=0xabc",
+      "method": "GET",
+      "created_at": 1747000000,
+      "serialized": "[0,\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",1747000000,27235,[[\"u\",\"http://127.0.0.1:3000/api/v1/orders?payer_address=0xabc\"],[\"method\",\"GET\"]],\"\"]",
+      "event_id": "da0c610aa74217853fc3ab8b74cf7ded3ae3209bc678ebb35e1db78d09401a5e"
+    },
+    {
+      "name": "post_credit_purchase",
+      "secret_key_hex": "b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfef",
+      "pubkey_hex": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "url": "http://127.0.0.1:3000/api/v1/merchant_credits/acme/purchase",
+      "method": "POST",
+      "created_at": 1747000001,
+      "serialized": "[0,\"dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659\",1747000001,27235,[[\"u\",\"http://127.0.0.1:3000/api/v1/merchant_credits/acme/purchase\"],[\"method\",\"POST\"]],\"\"]",
+      "event_id": "2276528cd1217a36f5ec10627930774b6ace3efd0e1e26c1c4ab7a9ea4b3b3cb"
+    },
+    {
+      "name": "account_nondefault_port",
+      "secret_key_hex": "c90fdaa22168c234c4c6628b80dc1cd129024e088a67cc74020bbea63b14e5c9",
+      "pubkey_hex": "dd308afec5777e13121fa72b9cc1b7cc0139715309b086c960e18fd969774eb8",
+      "url": "http://localhost:8080/api/v1/account",
+      "method": "GET",
+      "created_at": 1747000002,
+      "serialized": "[0,\"dd308afec5777e13121fa72b9cc1b7cc0139715309b086c960e18fd969774eb8\",1747000002,27235,[[\"u\",\"http://localhost:8080/api/v1/account\"],[\"method\",\"GET\"]],\"\"]",
+      "event_id": "50bba21a2dc6cbd81841e12824cc725dcc669a1c31ca7974a7f4310de06de667"
+    },
+    {
+      "name": "orders_with_escaped_cursor",
+      "secret_key_hex": "0000000000000000000000000000000000000000000000000000000000000003",
+      "pubkey_hex": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+      "url": "http://127.0.0.1:3000/api/v1/orders?status=paid&fulfillment_status=awaiting_seller&cursor=eyJpZCI6MX0%3D",
+      "method": "GET",
+      "created_at": 1747000003,
+      "serialized": "[0,\"f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9\",1747000003,27235,[[\"u\",\"http://127.0.0.1:3000/api/v1/orders?status=paid&fulfillment_status=awaiting_seller&cursor=eyJpZCI6MX0%3D\"],[\"method\",\"GET\"]],\"\"]",
+      "event_id": "5592866dbb78fad9227f1a51d209a44ebb4e3d48b28efd89cc1a28d6d4762904"
+    },
+    {
+      "name": "non_ascii_url_canary",
+      "secret_key_hex": "b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfef",
+      "pubkey_hex": "dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659",
+      "url": "http://127.0.0.1:3000/api/v1/café",
+      "method": "GET",
+      "created_at": 1747000004,
+      "serialized": "[0,\"dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659\",1747000004,27235,[[\"u\",\"http://127.0.0.1:3000/api/v1/café\"],[\"method\",\"GET\"]],\"\"]",
+      "event_id": "59176f941e0609e828dac53c64e7a97831aa209c87fee1ac7b00359a2d687863"
+    }
+  ]
+}

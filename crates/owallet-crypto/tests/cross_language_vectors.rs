@@ -1,9 +1,12 @@
 //! Cross-language NIP-98 compatibility test (Rust counterpart of
 //! `owallet/wallet_mcp/tests/test_nip98_compat.py` and
-//! `test/services/nip98_cross_language_test.rb`).
+//! `test/services/nip98_cross_language_test.rb` in the `fathom-x/overpay`
+//! repository).
 //!
-//! Reads `test/fixtures/nip98_vectors.json` — the same file the Python and
-//! Ruby suites consume — and asserts that signing the vector inputs through
+//! Reads `tests/fixtures/nip98_vectors.json` — a vendored copy of overpay's
+//! `test/fixtures/nip98_vectors.json`, the file the Python and Ruby suites
+//! consume; keep the two in sync — and asserts that signing the vector
+//! inputs through
 //! `owallet_crypto::nip98::sign_at` produces a NIP-01 event whose `id`,
 //! `pubkey`, `created_at`, `kind`, and `tags` match the captured vector,
 //! and whose signature verifies under the wallet x-only pubkey.
@@ -41,9 +44,7 @@ struct Vector {
 }
 
 fn vectors_path() -> PathBuf {
-    // CARGO_MANIFEST_DIR is .../owallet-rs/crates/owallet-crypto, so the
-    // repo root is three levels up.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../test/fixtures/nip98_vectors.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nip98_vectors.json")
 }
 
 fn load_vectors() -> Vec<Vector> {
