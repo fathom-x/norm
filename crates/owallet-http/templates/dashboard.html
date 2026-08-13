@@ -75,13 +75,25 @@
     {% if provider_keys.is_empty() %}
       <p class="muted">No provider API keys yet.</p>
     {% else %}
+      <div class="table-scroll">
       <table>
-        <thead><tr><th>Key</th><th>Source</th><th>Created</th><th></th></tr></thead>
+        <thead><tr><th>Key</th><th>Source</th><th>Access</th><th>Budget</th><th>Created</th><th></th></tr></thead>
         <tbody>
           {% for key in provider_keys %}
             <tr>
               <td><code>{{ key.key }}</code></td>
               <td>{{ key.label }}</td>
+              <td>{{ key.scopes }}</td>
+              <td>
+                {{ key.budget }}
+                <form method="POST" action="/wallet/provider-keys/budget" class="inline-edit">
+                  <input type="hidden" name="id" value="{{ key.id }}">
+                  <input type="text" name="budget_usd" value="{{ key.budget_input }}"
+                         placeholder="no limit" inputmode="decimal"
+                         aria-label="Daily budget in USD (blank for no limit)">
+                  <button type="submit" class="button secondary">Update</button>
+                </form>
+              </td>
               <td>{{ key.created }}</td>
               <td>
                 <form method="POST" action="/wallet/provider-keys/revoke" style="margin:0;"
@@ -94,11 +106,68 @@
           {% endfor %}
         </tbody>
       </table>
+      </div>
     {% endif %}
     <form method="POST" action="/wallet/provider-keys" style="margin-top:14px;">
+      <label style="display:block; margin-bottom:8px;">
+        <input type="checkbox" name="allow_spend">
+        Allow wallet spending — the model behind this key may buy merchant
+        credits and pay orders with them (order-scoped, capped per request).
+        Leave unchecked for chat-only.
+      </label>
+      <div class="field" style="margin-bottom:8px;">
+        <label for="new-key-budget">Daily spending budget (USD)</label>
+        <input id="new-key-budget" name="budget_usd" type="text" placeholder="no limit"
+               inputmode="decimal">
+        <span class="muted">Hard cap on everything this key costs per day —
+        each chat turn is a paid order, so this applies to chat-only keys
+        too. Resets at midnight, {{ timezone }} time; blank for no limit.
+        You can change it later from this page.</span>
+      </div>
       <button type="submit">Create provider API key</button>
     </form>
+    <form method="POST" action="/wallet/settings/spend-cap" style="margin-top:18px;">
+      <div class="field" style="margin-bottom:8px;">
+        <label for="spend-cap">Per-request spending cap (USD)</label>
+        <input id="spend-cap" name="spend_cap_usd" type="text"
+               value="{{ spend_cap_input }}" placeholder="20 (default)"
+               inputmode="decimal">
+        <span class="muted">Ceiling on what the wallet spending tools may
+        move within a single chat completion — applies to every key (each
+        key's daily budget is the per-key bound). Blank restores the
+        default. Takes effect on the next request.</span>
+      </div>
+      <button type="submit" class="button secondary">Save spending cap</button>
+    </form>
   {% endif %}
+</div>
+
+<div class="card">
+  <h2>Time zone</h2>
+  <p class="muted">The wallet's local time zone decides when daily spending
+  budgets reset (midnight local time). Timestamps elsewhere are still shown
+  in UTC.</p>
+  <form method="POST" action="/wallet/settings/timezone">
+    <div class="field">
+      <label for="timezone">IANA time zone</label>
+      <input id="timezone" name="timezone" type="text" value="{{ timezone }}"
+             placeholder="UTC" list="tz-suggestions">
+      <datalist id="tz-suggestions">
+        <option value="UTC"></option>
+        <option value="America/New_York"></option>
+        <option value="America/Chicago"></option>
+        <option value="America/Denver"></option>
+        <option value="America/Los_Angeles"></option>
+        <option value="Europe/London"></option>
+        <option value="Europe/Berlin"></option>
+        <option value="Asia/Tokyo"></option>
+        <option value="Australia/Sydney"></option>
+      </datalist>
+      <span class="muted">Any IANA name works ("Europe/Berlin"); blank
+      resets to UTC.</span>
+    </div>
+    <button type="submit">Save time zone</button>
+  </form>
 </div>
 
 <div class="card">

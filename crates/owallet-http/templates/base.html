@@ -31,7 +31,7 @@
       padding: 10px 16px; border: none; border-radius: 8px;
       font-size: .95rem; font-weight: 500; cursor: pointer;
       background: #2563eb; color: white; text-decoration: none;
-      display: inline-block;
+      display: inline-block; white-space: nowrap;
     }
     button:hover, .button:hover { opacity: .88; }
     .button.secondary { background: #f3f4f6; color: #374151; }
@@ -41,7 +41,18 @@
     .notice.err { background: #fee2e2; color: #991b1b; }
     table { width: 100%; border-collapse: collapse; }
     td, th { padding: 8px 6px; text-align: left; border-bottom: 1px solid #eee;
-             font-size: .9rem; word-break: break-all; }
+             font-size: .9rem; }
+    /* Long unbroken values (npubs, addresses, key prefixes) may wrap
+       anywhere; prose cells wrap at spaces like normal text. */
+    td code { word-break: break-all; }
+    /* Wide tables scroll inside their card instead of mangling cells. */
+    .table-scroll { overflow-x: auto; }
+    .table-scroll td, .table-scroll th { white-space: nowrap; }
+    .table-scroll td code { word-break: normal; }
+    /* Compact in-row form (the per-key budget editor). */
+    .inline-edit { display: flex; gap: 4px; align-items: center; margin: 4px 0 0; }
+    .inline-edit input[type=text] { width: 90px; padding: 6px 8px; font-size: .85rem; }
+    .inline-edit button { padding: 6px 10px; font-size: .85rem; }
     code, pre { font-family: ui-monospace, "SF Mono", Menlo, monospace;
                 font-size: .85rem; }
     pre { background: #f3f4f6; padding: 14px; border-radius: 8px;

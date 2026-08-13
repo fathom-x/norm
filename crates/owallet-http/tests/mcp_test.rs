@@ -683,6 +683,10 @@ async fn provider_scope_flow_mints_a_revocable_provider_key() {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].label.as_deref(), Some("browser login"));
         assert_eq!(listed[0].token_prefix.as_deref(), Some(&key[..12]));
+        assert!(
+            !listed[0].can_spend(),
+            "a browser login without the spend checkbox must mint a chat-only key"
+        );
     }
 
     // /v1 accepts the minted key (anything but 401 proves auth passed —
@@ -698,6 +702,174 @@ async fn provider_scope_flow_mints_a_revocable_provider_key() {
         .add_header("authorization", "Bearer owk_bogus")
         .await;
     bad.assert_status(StatusCode::UNAUTHORIZED);
+}
+
+/// Drive register → authorize(`scope`) → consent (optionally ticking the
+/// spend checkbox and filling the budget field) → PKCE token exchange,
+/// returning the minted credential. The wallet `npub1evm` (password
+/// `wallet-pw`) must already be seeded.
+async fn browser_login_flow(
+    s: &axum_test::TestServer,
+    scope: &str,
+    tick_allow_spend: bool,
+    spend_budget_usd: Option<&str>,
+) -> String {
+    let reg = s
+        .post("/oauth/register")
+        .json(&json!({"redirect_uris": ["http://127.0.0.1:5555/cb"]}))
+        .await;
+    reg.assert_status_ok();
+    let client_id = reg.json::<Value>()["client_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let verifier = "consent-scope-test-verifier-0123456789abcdef";
+    let challenge = {
+        use sha2::{Digest, Sha256};
+        b64url(Sha256::digest(verifier.as_bytes()).as_slice())
+    };
+
+    let res = s
+        .get("/oauth/authorize")
+        .add_query_param("response_type", "code")
+        .add_query_param("client_id", client_id.as_str())
+        .add_query_param("redirect_uri", "http://127.0.0.1:5555/cb")
+        .add_query_param("code_challenge", challenge.as_str())
+        .add_query_param("code_challenge_method", "S256")
+        .add_query_param("scope", scope)
+        .await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    let loc_hdr = res.header("location");
+    let session = loc_hdr
+        .to_str()
+        .unwrap()
+        .strip_prefix("/consent?session=")
+        .unwrap()
+        .to_string();
+
+    let mut form = json!({
+        "session": session,
+        "npub": "npub1evm",
+        "password": "wallet-pw",
+        "action": "approve",
+    });
+    if tick_allow_spend {
+        form["allow_spend"] = json!("on");
+    }
+    if let Some(budget) = spend_budget_usd {
+        form["spend_budget_usd"] = json!(budget);
+    }
+    let res = s.post("/consent").form(&form).await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    let loc_hdr = res.header("location");
+    let loc = loc_hdr.to_str().unwrap();
+    let code = loc
+        .split(['?', '&'])
+        .find_map(|kv| kv.strip_prefix("code="))
+        .unwrap_or_else(|| panic!("no code in redirect '{loc}'"))
+        .to_string();
+
+    let res = s
+        .post("/oauth/token")
+        .form(&json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": "http://127.0.0.1:5555/cb",
+            "client_id": client_id,
+            "code_verifier": verifier,
+        }))
+        .await;
+    res.assert_status_ok();
+    res.json::<Value>()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The consent checkbox — and nothing else — decides whether a
+/// browser-minted provider key can spend: ticking it grants the scope,
+/// while a client *requesting* `scope=provider spend` without the user's
+/// tick still gets a chat-only key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consent_checkbox_controls_the_minted_keys_spend_scope() {
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, "http://127.0.0.1:1");
+
+    let db_path = tmp.path().join("test.db");
+    {
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(db.unlock("master-pw").unwrap());
+        db.write_wallet(
+            "npub1evm",
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            None,
+        )
+        .unwrap();
+        db.write_default_npub("npub1evm").unwrap();
+        db.write_wallet_password("npub1evm", "wallet-pw").unwrap();
+    }
+
+    // The consent page offers the spending choice for provider scope.
+    // (Ticked path first so the key order below is deterministic.)
+    let spend_key = browser_login_flow(&s, "provider", true, None).await;
+    let sneaky_key = browser_login_flow(&s, "provider spend", false, None).await;
+
+    let mut db = Database::open(&db_path).unwrap();
+    assert!(db.unlock("master-pw").unwrap());
+
+    let auth = db.read_provider_key_auth(&spend_key).unwrap().unwrap();
+    assert!(
+        auth.can_spend(),
+        "ticked checkbox must grant spend, got scopes {:?}",
+        auth.scopes
+    );
+    assert_eq!(
+        auth.daily_budget_usd_cents, None,
+        "blank budget field must mint a no-limit key"
+    );
+
+    let auth = db.read_provider_key_auth(&sneaky_key).unwrap().unwrap();
+    assert!(
+        !auth.can_spend(),
+        "client-requested spend scope without the user's tick must be stripped, got {:?}",
+        auth.scopes
+    );
+}
+
+/// The consent page's budget field rides the auth code to token exchange:
+/// a browser-minted spend key carries the user's chosen lifetime budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consent_budget_field_bounds_the_browser_minted_key() {
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, "http://127.0.0.1:1");
+
+    let db_path = tmp.path().join("test.db");
+    {
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(db.unlock("master-pw").unwrap());
+        db.write_wallet(
+            "npub1evm",
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            None,
+        )
+        .unwrap();
+        db.write_default_npub("npub1evm").unwrap();
+        db.write_wallet_password("npub1evm", "wallet-pw").unwrap();
+    }
+
+    let key = browser_login_flow(&s, "provider", true, Some("$12.50")).await;
+
+    let mut db = Database::open(&db_path).unwrap();
+    assert!(db.unlock("master-pw").unwrap());
+    let auth = db.read_provider_key_auth(&key).unwrap().unwrap();
+    assert!(auth.can_spend());
+    assert_eq!(
+        auth.daily_budget_usd_cents,
+        Some(1250),
+        "the consent budget must land on the minted key"
+    );
+    assert_eq!(auth.spent_today_usd_cents(), 0);
 }
 
 /// Tiny base64url(NO_PAD) encoder for the PKCE challenge — mirrors the

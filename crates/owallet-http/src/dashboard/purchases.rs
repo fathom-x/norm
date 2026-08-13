@@ -557,8 +557,27 @@ fn render_delivered_content(record: &PurchaseRow) -> String {
                     esc(&src)
                 ));
             }
+            // Hosted-image alternative to inline `image` bytes: bots that
+            // deliver a URL (weather_reporter's `image_url`) rather than
+            // base64. Without the listing schema in the cache (older rows,
+            // or an order payload that didn't carry it) this envelope is
+            // the only chance to show it — http(s) only, anything else
+            // would render a broken <img>.
+            if let Some(url) = parsed
+                .get("image_url")
+                .and_then(Value::as_str)
+                .filter(|u| u.starts_with("http://") || u.starts_with("https://"))
+            {
+                parts.push_str(&format!(
+                    "<img src=\"{}\" class=\"delivered-image\" loading=\"lazy\" alt=\"Delivered image\">",
+                    esc(url)
+                ));
+            }
             if let Some(desc) = parsed.get("description").and_then(Value::as_str) {
-                parts.push_str(&format!("<p class=\"delivered-text\">{}</p>", esc(desc)));
+                parts.push_str(&format!(
+                    "<div class=\"delivered-markdown\">{}</div>",
+                    markdown_to_html(desc)
+                ));
             }
             if !parts.is_empty() {
                 return parts;
@@ -740,4 +759,75 @@ fn urlencoding(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    fn row(content: &str, schema: Option<Value>) -> PurchaseRow {
+        PurchaseRow {
+            order_id: "O1".into(),
+            listing_id: None,
+            title: None,
+            seller: None,
+            payment_status: Some("paid".into()),
+            fulfillment_status: Some("delivered".into()),
+            delivered_at: None,
+            paid_at: None,
+            total_usd_cents: Some(5),
+            delivered_content: Some(content.to_string()),
+            delivered_content_url: None,
+            delivered_content_type: Some("application/json".into()),
+            delivered_content_schema: schema,
+            cached_at: 0,
+            snapshot: serde_json::json!({}),
+        }
+    }
+
+    const WEATHER: &str = r##"{"description":"# Weather Report\nSunny, 22C","image_url":"https://img.example/w.png"}"##;
+
+    #[test]
+    fn schemaless_json_renders_a_hosted_image_url_and_markdown_description() {
+        // The weather_reporter regression: cached rows predating the
+        // schema-in-order-payload fix have no delivered_content_schema, so
+        // the {description, image_url} envelope is all we have to go on.
+        let html = render_delivered_content(&row(WEATHER, None));
+        assert!(
+            html.contains(r#"<img src="https://img.example/w.png""#),
+            "hosted image must render: {html}"
+        );
+        assert!(
+            html.contains("delivered-markdown") && html.contains("Sunny, 22C"),
+            "description renders as markdown: {html}"
+        );
+    }
+
+    #[test]
+    fn schemaless_image_url_must_be_http_to_render() {
+        let html = render_delivered_content(&row(
+            r#"{"description":"x","image_url":"javascript:alert(1)"}"#,
+            None,
+        ));
+        assert!(
+            !html.contains("<img"),
+            "non-http url must not render: {html}"
+        );
+    }
+
+    #[test]
+    fn schema_driven_image_widget_renders_a_url_valued_field() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "x-widget": "markdown"},
+                "image_url":   {"type": "string", "x-widget": "image"},
+            }
+        });
+        let html = render_delivered_content(&row(WEATHER, Some(schema)));
+        assert!(
+            html.contains(r#"<img src="https://img.example/w.png""#),
+            "schema image widget with a URL value: {html}"
+        );
+    }
 }

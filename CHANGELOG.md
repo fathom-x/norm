@@ -4,6 +4,96 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Model-callable wallet tools on `/v1`, gated by provider-key scopes
+
+- **Wallet tools in the `/v1` tool loop.** Alongside `run_python`, the model
+  can now call `get_balances`, `browse_marketplace`, `get_listing`,
+  `list_orders` (find an order id when the user refers to "my pending
+  order"), and `get_order_status` (any provider key) and — only with a
+  spend-scoped key — the full purchase loop: `create_order` (unpaid),
+  `buy_credits`, and `pay_order`. All eight
+  are backed by the MCP tool handlers, but their results pass through
+  **allowlist projections** before reaching the model: everything a tool
+  returns is appended to `messages` and shipped to the OpenRouter seller on
+  the next turn, so no on-chain data (txids, tx hashes, addresses) ever
+  appears in a wallet tool result, in either direction — order ids,
+  amounts, statuses, and spending limits only. Raw-address sends
+  (`send_usdc` / `send_zcash`) are deliberately not offered on `/v1` and
+  remain MCP/dashboard-only.
+- **`pay_order` MCP tool** — settle a pending order with merchant credits,
+  resolving the seller from the order's listing when `seller_slug` is
+  omitted. (Credits are the API-side settlement path; the Rails API exposes
+  no crypto payment address for pending orders.)
+- **Provider-key scopes.** `provider_keys` gains a `scopes` column
+  (`"chat"` / `"chat spend"`); every pre-existing key stays chat-only. The
+  dashboard's create form has an "allow wallet spending" checkbox and the
+  key list shows an Access badge. In the browser-login OAuth flow the
+  consent page offers the same choice — and only that checkbox can grant
+  `spend`: a client requesting `scope=provider spend` without the user's
+  tick still gets a chat-only key.
+- **Iteration cap raised to 10, with a graceful landing.** The old cap of 4
+  predated the wallet tools (every iteration implied a paid `run_python`
+  order) and broke the purchase loop mid-flight — browse → get_listing →
+  create_order → pay_order is already four turns, and the request errored
+  *after* creating and paying the order. Reaching the cap now runs one
+  final `tool_choice: "none"` turn so the model reports what it actually
+  did instead of the client getting a 502 with no record of the spend.
+- **Per-request spend cap.** Wallet spending is additionally bounded per
+  chat completion (default $20, `OWALLET_V1_SPEND_CAP_USD` to override):
+  `buy_credits` reserves its amount up front, `pay_order` records what the
+  redemption actually applied, and a request that hits the ceiling gets a
+  tool-result error the model can relay rather than a failed request.
+- **Per-key daily spending budgets.** A spend-scoped key can now carry a
+  hard dollar budget per day instead of the all-or-nothing toggle:
+  `provider_keys` gains `daily_budget_usd_cents` (NULL = no limit — every
+  pre-existing key) plus `spent_usd_cents`/`spent_day` (the day's spend and
+  its window; persists across requests). `buy_credits` reserves against
+  today's budget with one atomic guarded UPDATE that also rolls a stale
+  window over to the current day — parallel requests can't double-spend
+  the last dollar, and midnight needs no sweeper job — and releases the
+  reservation when the payment never moves; `pay_order` gates on remaining
+  budget and records the redeemed amount after the fact. The budget is set
+  in the dashboard's create form or the browser-login consent page (the
+  field, like the `spend` scope itself, is the user's choice alone — a
+  client can't request one), shown as "$X left today of $Y/day" in the key
+  list, and editable in place with immediate effect; today's spend is
+  never reset by an edit. `get_balances` reports the key's remaining daily
+  budget alongside the per-request allowance so the model can plan; the
+  wallet's own on-chain balance stays the outer bound shared by every key.
+  (Per-task/per-session budget scopes are anticipated follow-ups — the
+  window column is the piece that generalizes.)
+- **The daily budget covers everything the key costs.** Field testing
+  showed merchant credits draining while `spent_today` stayed $0.00:
+  each `/v1` chat turn is itself a paid order, and the budget originally
+  counted only the wallet spending tools. Every order the endpoint pays
+  on a key's behalf (chat turns, `run_python`, the spending tools) now
+  records against the key's daily budget; an exhausted key refuses new
+  requests up front (HTTP 402, `insufficient_quota`), and exhaustion
+  mid-request breaks to the `tool_choice: "none"` landing turn (one turn
+  of accepted overshoot) so the model reports what it already did.
+  Because operating spend applies to every key, budgets now attach to
+  chat-only keys too — the dashboard create form, key list editor, and
+  consent page offer the budget regardless of the spending checkbox.
+  The per-request $20 cap is unchanged: it still bounds only what the
+  spending tools move within one completion.
+- **Dashboard-set per-request spending cap.** The `/v1` per-request
+  ceiling on wallet-tool spending is now a wallet-level setting
+  (`settings` key `v1_spend_cap_usd_cents`), edited from the OpenCode
+  provider card and read per request — no server restart. Precedence:
+  dashboard setting → `OWALLET_V1_SPEND_CAP_USD` env → the built-in $20
+  default; blank clears the override. Deliberately wallet-level rather
+  than per-key: keys are already individually bounded by their daily
+  budgets, so the cap stays the shared blast-radius bound for any single
+  chat completion.
+- **Wallet timezone setting.** The budget day boundary follows a new
+  wallet-wide IANA timezone preference (`settings` key `timezone`, default
+  UTC; DST-correct via the bundled `time-tz` database) — set from the
+  dashboard's "Time zone" card, validated server-side, blank resets to
+  UTC. Rows are normalized at read time, so a stale window reads as a
+  fresh budget the moment local midnight passes, and changing the
+  timezone simply moves the boundary (a one-time early/late reset, never
+  an accounting error). Timestamp *display* elsewhere stays UTC.
+
 ### OpenAI-compatible `/v1` endpoint (fathom-x/overpay#381)
 
 - **`GET /v1/models` and `POST /v1/chat/completions`**, mounted alongside

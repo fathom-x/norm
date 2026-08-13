@@ -34,7 +34,7 @@ pub async fn dashboard(
         return Ok(redirect_to_login().into_response());
     };
 
-    let (wallets, default_npub, active_npub, provider_keys) = {
+    let (wallets, default_npub, active_npub, provider_keys, timezone, spend_cap_input) = {
         let db = state
             .db
             .lock()
@@ -54,17 +54,50 @@ pub async fn dashboard(
             .unwrap_or_default()
             .into_iter()
             .map(|key| ProviderKeyListRow {
-                id: key.id,
+                id: key.id.clone(),
                 key: key
                     .token_prefix
+                    .clone()
                     .map(|p| format!("{p}…"))
                     .unwrap_or_else(|| "—".to_string()),
-                label: key.label.unwrap_or_else(|| "—".to_string()),
+                label: key.label.clone().unwrap_or_else(|| "—".to_string()),
                 created: format_timestamp(key.created_at),
+                scopes: if key.can_spend() {
+                    "chat + spend".to_string()
+                } else {
+                    "chat".to_string()
+                },
+                budget: match key.daily_budget_usd_cents {
+                    None => "no limit".to_string(),
+                    Some(budget) => format!(
+                        "{} left today of {}/day",
+                        super::provider::format_usd_cents(
+                            key.remaining_today_usd_cents().unwrap_or(0)
+                        ),
+                        super::provider::format_usd_cents(budget),
+                    ),
+                },
+                budget_input: key
+                    .daily_budget_usd_cents
+                    .map(|c| format!("{}.{:02}", c / 100, (c % 100).abs()))
+                    .unwrap_or_default(),
             })
             .collect();
 
-        (wallets, default_npub, active_npub, provider_keys)
+        let timezone = db.read_timezone()?.unwrap_or_else(|| "UTC".to_string());
+        let spend_cap_input = db
+            .read_spend_cap_usd_cents()?
+            .map(|c| format!("{}.{:02}", c / 100, (c % 100).abs()))
+            .unwrap_or_default();
+
+        (
+            wallets,
+            default_npub,
+            active_npub,
+            provider_keys,
+            timezone,
+            spend_cap_input,
+        )
     };
 
     // The stored bearer for the active wallet, used both as the linked-flag
@@ -105,6 +138,18 @@ pub async fn dashboard(
         ("authorize-error", Some(m)) => format!("Overpay link failed: {m}"),
         ("authorize-error", None) => "Overpay link failed.".to_string(),
         ("no-wallet", _) => "No default wallet selected.".to_string(),
+        ("provider-key-budget-updated", _) => "Provider key budget updated.".to_string(),
+        ("provider-key-budget-invalid", _) => {
+            "Budget must be a positive dollar amount, or blank for no limit.".to_string()
+        }
+        ("spend-cap-updated", _) => "Per-request spending cap updated.".to_string(),
+        ("spend-cap-invalid", _) => {
+            "Spending cap must be a positive dollar amount, or blank for the default.".to_string()
+        }
+        ("timezone-updated", _) => "Wallet time zone updated.".to_string(),
+        ("timezone-invalid", _) => {
+            "Unknown time zone — use an IANA name like Europe/Berlin.".to_string()
+        }
         (other, _) => other.to_string(),
     });
 
@@ -125,6 +170,8 @@ pub async fn dashboard(
         eth_balance: balances.eth,
         usdc_balance: balances.usdc,
         provider_keys,
+        timezone,
+        spend_cap_input,
     };
     Ok(Html(tpl.render()?).into_response())
 }

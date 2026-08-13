@@ -29,7 +29,10 @@ use zeroize::Zeroize;
 pub use access_tokens::AccessTokenRow;
 pub use auth_codes::AuthCodeRow;
 pub use oauth_clients::OAuthClientRow;
-pub use provider_keys::ProviderKeyRow;
+pub use provider_keys::{
+    budget_day, scopes_allow_spend, timezone_is_valid, BudgetReservation, ProviderKeyRow,
+    PROVIDER_SCOPE_CHAT, PROVIDER_SCOPE_SPEND,
+};
 pub use purchases::PurchaseRow;
 pub use tokens::TokenRow;
 pub use wallet_state::{data_dir, wallet_state_dir, WalletStateDir};
@@ -369,9 +372,18 @@ impl Database {
 
     /// Generate a bearer key bound to one wallet. The raw key is returned
     /// exactly once; only its SHA-256 verifier is persisted — plus a short
-    /// display prefix (`owk_` + 8 hex) and a creator `label` so the
-    /// dashboard list stays tellable-apart.
-    pub fn create_provider_key(&self, npub: &str, label: &str) -> Result<(ProviderKeyRow, String)> {
+    /// display prefix (`owk_` + 8 hex), a creator `label`, its
+    /// space-separated capability `scopes` ("chat", "chat spend") so the
+    /// dashboard list stays tellable-apart, and an optional per-UTC-day
+    /// spending budget in cents (`None` = no limit; only meaningful on
+    /// spend-scoped keys).
+    pub fn create_provider_key(
+        &self,
+        npub: &str,
+        label: &str,
+        scopes: &str,
+        daily_budget_usd_cents: Option<i64>,
+    ) -> Result<(ProviderKeyRow, String)> {
         let mut token_bytes = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut token_bytes);
         let token = format!("owk_{}", hex::encode(token_bytes));
@@ -385,31 +397,131 @@ impl Database {
             created_at: now_secs(),
             label: Some(label.to_string()),
             token_prefix: Some(token_prefix.to_string()),
+            scopes: Some(scopes.to_string()),
+            daily_budget_usd_cents,
+            spent_usd_cents: 0,
+            spent_day: None,
         };
-        provider_keys::insert(
-            &self.conn,
-            &row.id,
-            &provider_key_hash(&token),
-            npub,
-            row.created_at,
-            label,
-            token_prefix,
-        )?;
+        provider_keys::insert(&self.conn, &row, &provider_key_hash(&token))?;
         Ok((row, token))
     }
 
-    /// Return the wallet authorized by `token`, if it is an active provider
-    /// key. The raw key never enters SQLite; only its verifier is queried.
+    /// Return the full key row authorized by `token` (id, wallet, scopes,
+    /// budget — spend normalized to today's window), if it is an active
+    /// provider key. The raw key never enters SQLite; only its verifier is
+    /// queried.
+    pub fn read_provider_key_auth(&self, token: &str) -> Result<Option<ProviderKeyRow>> {
+        provider_keys::read_auth(
+            &self.conn,
+            &provider_key_hash(token),
+            self.current_budget_day(),
+        )
+    }
+
+    /// Return just the wallet authorized by `token`. Convenience wrapper
+    /// over [`Self::read_provider_key_auth`] for callers that don't gate on
+    /// scopes.
     pub fn read_provider_key_npub(&self, token: &str) -> Result<Option<String>> {
-        provider_keys::read_npub(&self.conn, &provider_key_hash(token))
+        Ok(self.read_provider_key_auth(token)?.map(|row| row.npub))
+    }
+
+    /// Read one key row by id — the budget gate uses this for live
+    /// remaining-allowance checks and refusal messages.
+    pub fn read_provider_key(&self, id: &str) -> Result<Option<ProviderKeyRow>> {
+        provider_keys::read(&self.conn, id, self.current_budget_day())
     }
 
     pub fn list_provider_keys(&self, npub: &str) -> Result<Vec<ProviderKeyRow>> {
-        provider_keys::list(&self.conn, npub)
+        provider_keys::list(&self.conn, npub, self.current_budget_day())
     }
 
     pub fn delete_provider_key(&self, id: &str, npub: &str) -> Result<()> {
         provider_keys::delete(&self.conn, id, npub)
+    }
+
+    /// Set (or clear, with `None`) a key's daily spending budget without
+    /// touching today's spend — raising the budget takes effect
+    /// immediately, lowering it below what's already spent today just
+    /// stops spending until the wallet-local midnight. Returns false when no
+    /// key
+    /// matched.
+    pub fn update_provider_key_budget(
+        &self,
+        id: &str,
+        npub: &str,
+        daily_budget_usd_cents: Option<i64>,
+    ) -> Result<bool> {
+        provider_keys::update_budget(&self.conn, id, npub, daily_budget_usd_cents)
+    }
+
+    /// Atomically reserve `amount_cents` against a key's daily budget
+    /// (wallet-timezone day window, rolled over lazily inside the same
+    /// UPDATE). See [`BudgetReservation`] for the outcomes; keys without a
+    /// budget always reserve (their spend is still tracked).
+    pub fn try_reserve_provider_key_spend(
+        &self,
+        id: &str,
+        amount_cents: i64,
+    ) -> Result<BudgetReservation> {
+        provider_keys::try_reserve_spend(&self.conn, id, amount_cents, self.current_budget_day())
+    }
+
+    /// Hand back a reservation whose payment never moved funds.
+    pub fn release_provider_key_spend(&self, id: &str, amount_cents: i64) -> Result<()> {
+        provider_keys::release_spend(&self.conn, id, amount_cents, self.current_budget_day())
+    }
+
+    /// Record spend knowable only after the fact (credit redemptions).
+    pub fn record_provider_key_spend(&self, id: &str, amount_cents: i64) -> Result<()> {
+        provider_keys::record_spend(&self.conn, id, amount_cents, self.current_budget_day())
+    }
+
+    // ---- Wallet timezone ----
+
+    /// The wallet's IANA timezone setting ("Europe/Berlin"). `None` — never
+    /// set — means UTC. Governs the daily-budget window boundary.
+    pub fn read_timezone(&self) -> Result<Option<String>> {
+        Ok(settings::read(&self.conn, "timezone")?)
+    }
+
+    /// Set the wallet's timezone. Validated against the bundled IANA
+    /// database ([`timezone_is_valid`]); pass "UTC" to go back to the
+    /// default explicitly.
+    pub fn write_timezone(&self, name: &str) -> Result<()> {
+        if !provider_keys::timezone_is_valid(name) {
+            return Err(DbError::State(format!("unknown IANA timezone '{name}'")));
+        }
+        settings::write(&self.conn, "timezone", name)?;
+        Ok(())
+    }
+
+    /// Today's budget-window key: the julian day of the current date in
+    /// the wallet's timezone (UTC when unset). See [`budget_day`].
+    pub fn current_budget_day(&self) -> i64 {
+        let tz = settings::read(&self.conn, "timezone").ok().flatten();
+        provider_keys::budget_day(tz.as_deref())
+    }
+
+    // ---- /v1 per-request spend cap ----
+
+    /// Wallet-level override (cents) for the `/v1` per-request spending
+    /// cap — what the wallet spending tools may move within one chat
+    /// completion. `None` means unset: the server falls back to its
+    /// `OWALLET_V1_SPEND_CAP_USD` env override or the built-in default.
+    pub fn read_spend_cap_usd_cents(&self) -> Result<Option<i64>> {
+        Ok(settings::read(&self.conn, "v1_spend_cap_usd_cents")?
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|c| *c > 0))
+    }
+
+    /// Set (or clear, with `None`) the wallet-level per-request spend
+    /// cap. Takes effect on the next `/v1` request — no restart needed.
+    pub fn write_spend_cap_usd_cents(&self, cents: Option<i64>) -> Result<()> {
+        match cents {
+            Some(c) => settings::write(&self.conn, "v1_spend_cap_usd_cents", &c.to_string())?,
+            None => settings::delete(&self.conn, "v1_spend_cap_usd_cents")?,
+        }
+        Ok(())
     }
 
     // ---- Per-wallet encrypted state directory (issue #310) ----
@@ -566,6 +678,7 @@ impl Database {
         redirect_uri_provided_explicitly: bool,
         expires_at: f64,
         npub: Option<&str>,
+        spend_budget_usd_cents: Option<i64>,
     ) -> Result<()> {
         auth_codes::insert(
             &self.conn,
@@ -577,6 +690,7 @@ impl Database {
             redirect_uri_provided_explicitly,
             expires_at,
             npub,
+            spend_budget_usd_cents,
         )
     }
 
@@ -641,7 +755,7 @@ fn state_dir_for(db_path: &Path) -> PathBuf {
     data_dir()
 }
 
-fn now_secs() -> i64 {
+pub(crate) fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

@@ -254,6 +254,213 @@ async fn admin_can_import_known_mnemonic() {
 }
 
 #[tokio::test]
+async fn provider_key_budget_is_set_at_creation_and_editable_from_the_dashboard() {
+    let h = harness();
+    let npub = seed_abandon_wallet_via_file(&h._tmp, "wallet-pw");
+    login_admin(&h.server).await;
+
+    // Create a spend key with a $25 lifetime budget.
+    let res = h
+        .server
+        .post("/wallet/provider-keys")
+        .form(&json!({"allow_spend": "on", "budget_usd": "25"}))
+        .await;
+    res.assert_status_ok();
+    assert!(
+        res.text().contains("$25.00"),
+        "created page shows the budget"
+    );
+
+    let db_path = h._tmp.path().join("test.db");
+    let key_id = {
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(db.unlock(MASTER_PW).unwrap());
+        let listed = db.list_provider_keys(&npub).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(listed[0].can_spend());
+        assert_eq!(listed[0].daily_budget_usd_cents, Some(2500));
+        listed[0].id.clone()
+    };
+
+    // The dashboard row shows remaining-of-daily-total and the edit form.
+    let dash = h.server.get("/wallet").await.text();
+    assert!(
+        dash.contains("$25.00 left today of $25.00/day"),
+        "budget cell renders"
+    );
+
+    // Blank budget clears the limit.
+    let res = h
+        .server
+        .post("/wallet/provider-keys/budget")
+        .form(&json!({"id": key_id, "budget_usd": ""}))
+        .await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    {
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(db.unlock(MASTER_PW).unwrap());
+        let listed = db.list_provider_keys(&npub).unwrap();
+        assert_eq!(listed[0].daily_budget_usd_cents, None);
+    }
+    let dash = h.server.get("/wallet").await.text();
+    assert!(dash.contains("no limit"));
+
+    // An invalid budget is refused with a notice and changes nothing.
+    let res = h
+        .server
+        .post("/wallet/provider-keys/budget")
+        .form(&json!({"id": key_id, "budget_usd": "-5"}))
+        .await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    let loc = res.header("location");
+    assert!(loc
+        .to_str()
+        .unwrap()
+        .contains("provider-key-budget-invalid"));
+    {
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(db.unlock(MASTER_PW).unwrap());
+        assert_eq!(
+            db.list_provider_keys(&npub).unwrap()[0].daily_budget_usd_cents,
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn wallet_timezone_is_settable_validated_and_shown_on_the_dashboard() {
+    let h = harness();
+    login_admin(&h.server).await;
+
+    // Default renders as UTC.
+    let dash = h.server.get("/wallet").await.text();
+    assert!(dash.contains("Time zone"));
+    assert!(dash.contains("value=\"UTC\""));
+
+    // A valid IANA name is stored and echoed back.
+    let res = h
+        .server
+        .post("/wallet/settings/timezone")
+        .form(&json!({"timezone": "Europe/Berlin"}))
+        .await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    let dash = h.server.get("/wallet").await.text();
+    assert!(dash.contains("value=\"Europe/Berlin\""));
+    {
+        let mut db = Database::open(&h._tmp.path().join("test.db")).unwrap();
+        assert!(db.unlock(MASTER_PW).unwrap());
+        assert_eq!(
+            db.read_timezone().unwrap().as_deref(),
+            Some("Europe/Berlin")
+        );
+    }
+
+    // Garbage is refused with a notice and the setting stays put.
+    let res = h
+        .server
+        .post("/wallet/settings/timezone")
+        .form(&json!({"timezone": "Mars/Olympus_Mons"}))
+        .await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    assert!(res
+        .header("location")
+        .to_str()
+        .unwrap()
+        .contains("timezone-invalid"));
+    {
+        let mut db = Database::open(&h._tmp.path().join("test.db")).unwrap();
+        assert!(db.unlock(MASTER_PW).unwrap());
+        assert_eq!(
+            db.read_timezone().unwrap().as_deref(),
+            Some("Europe/Berlin")
+        );
+    }
+
+    // Blank resets to UTC.
+    let res = h
+        .server
+        .post("/wallet/settings/timezone")
+        .form(&json!({"timezone": ""}))
+        .await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    let mut db = Database::open(&h._tmp.path().join("test.db")).unwrap();
+    assert!(db.unlock(MASTER_PW).unwrap());
+    assert_eq!(db.read_timezone().unwrap().as_deref(), Some("UTC"));
+}
+
+#[tokio::test]
+async fn spend_cap_is_settable_cleared_and_prefilled_on_the_dashboard() {
+    let h = harness();
+    seed_abandon_wallet_via_file(&h._tmp, "wallet-pw");
+    login_admin(&h.server).await;
+    let db_path = h._tmp.path().join("test.db");
+
+    // Set a $5 wallet-level cap.
+    let res = h
+        .server
+        .post("/wallet/settings/spend-cap")
+        .form(&json!({"spend_cap_usd": "5"}))
+        .await;
+    res.assert_status(StatusCode::SEE_OTHER);
+    {
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(db.unlock(MASTER_PW).unwrap());
+        assert_eq!(db.read_spend_cap_usd_cents().unwrap(), Some(500));
+    }
+    let dash = h.server.get("/wallet").await.text();
+    assert!(dash.contains("value=\"5.00\""), "prefilled cap: {dash}");
+
+    // Garbage is refused with a notice; the setting stays put.
+    let res = h
+        .server
+        .post("/wallet/settings/spend-cap")
+        .form(&json!({"spend_cap_usd": "-3"}))
+        .await;
+    assert!(res
+        .header("location")
+        .to_str()
+        .unwrap()
+        .contains("spend-cap-invalid"));
+    {
+        let mut db = Database::open(&db_path).unwrap();
+        assert!(db.unlock(MASTER_PW).unwrap());
+        assert_eq!(db.read_spend_cap_usd_cents().unwrap(), Some(500));
+    }
+
+    // Blank clears the override (back to the server default).
+    h.server
+        .post("/wallet/settings/spend-cap")
+        .form(&json!({"spend_cap_usd": ""}))
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    let mut db = Database::open(&db_path).unwrap();
+    assert!(db.unlock(MASTER_PW).unwrap());
+    assert_eq!(db.read_spend_cap_usd_cents().unwrap(), None);
+}
+
+#[tokio::test]
+async fn budget_on_a_chat_only_key_is_stored_and_bounds_operating_spend() {
+    let h = harness();
+    let npub = seed_abandon_wallet_via_file(&h._tmp, "wallet-pw");
+    login_admin(&h.server).await;
+
+    // No allow_spend tick: the key is chat-only, but chat turns are paid
+    // orders, so the daily budget applies to it all the same.
+    h.server
+        .post("/wallet/provider-keys")
+        .form(&json!({"budget_usd": "10"}))
+        .await
+        .assert_status_ok();
+
+    let mut db = Database::open(&h._tmp.path().join("test.db")).unwrap();
+    assert!(db.unlock(MASTER_PW).unwrap());
+    let listed = db.list_provider_keys(&npub).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(!listed[0].can_spend());
+    assert_eq!(listed[0].daily_budget_usd_cents, Some(1000));
+}
+
+#[tokio::test]
 async fn import_bad_material_shows_error_on_same_page() {
     let h = harness();
     login_admin(&h.server).await;

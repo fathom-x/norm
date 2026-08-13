@@ -171,6 +171,19 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
+            name: "pay_order",
+            description: "Settle a pending order with previously-purchased merchant credits. \
+                          Resolves the seller from the order's listing when `seller_slug` is \
+                          omitted. Returns the redemption status and remaining credit balance.",
+            input_schema: schema_with_required(
+                json!({
+                    "order_id":    {"type": "string"},
+                    "seller_slug": {"type": "string", "description": "Optional — resolved from the order's listing when omitted."},
+                }),
+                &["order_id"],
+            ),
+        },
+        ToolSpec {
             name: "buy",
             description: "One-shot purchase of merchant credits: opens a credit-purchase order with Overpay, then signs and broadcasts a USDC transfer to the returned payment address. Returns the order id, tx hash, and the USDC amount sent.",
             input_schema: schema_with_required(
@@ -286,6 +299,7 @@ pub async fn dispatch(
         "get_order_status" => get_order_status(state, args).await?,
         "wait_for_order" => wait_for_order(state, args, progress).await?,
         "redeem_merchant_credits" => redeem_merchant_credits(state, args).await?,
+        "pay_order" => pay_order(state, args).await?,
         "buy" => buy(state, args).await?,
         "send_usdc" => send_usdc(state, args).await?,
         "send_zcash" => send_zcash(state, args).await?,
@@ -1365,6 +1379,92 @@ async fn redeem_merchant_credits(state: &McpState, args: Value) -> Result<Value,
         .redeem_merchant_credits_value(&args.seller_slug, &args.order_id, auth.as_auth())
         .await
         .map_err(Into::into)
+}
+
+// ---------------------------------------------------------------------------
+// pay_order — settle an order with credits, resolving the seller if needed
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct PayOrderArgs {
+    order_id: String,
+    #[serde(default)]
+    seller_slug: Option<String>,
+}
+
+/// Settle an order by redeeming merchant credits against it. The Rails API
+/// deliberately exposes no crypto payment address for a pending order, so
+/// credits *are* the API-side settlement path (on-chain activity only
+/// happens when loading credits — see `buy`). This composite exists so a
+/// caller can pay knowing only the order id: the seller slug the redeem
+/// endpoint routes on is resolved from the order's listing when omitted.
+async fn pay_order(state: &McpState, args: Value) -> Result<Value, ToolError> {
+    let args: PayOrderArgs = serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
+        arg: "arguments",
+        reason: e.to_string(),
+    })?;
+    let (_npub, auth) = state.resolve_owned_auth()?;
+
+    // One order fetch serves both needs: short-circuit already-paid orders
+    // (cheaper than resolving the seller just to hear "already_paid" from
+    // Rails) and find the listing to resolve the seller from.
+    let snap = state
+        .overpay
+        .get_order_value(&args.order_id, auth.as_auth())
+        .await?;
+    let order = snap.get("data").unwrap_or(&snap);
+    if order.get("payment_status").and_then(Value::as_str) == Some("paid") {
+        return Ok(json!({
+            "order_id": args.order_id,
+            "status": "already_paid",
+            "amount_redeemed_cents": 0,
+            "message": "Order already paid",
+        }));
+    }
+
+    let seller_slug = match args.seller_slug {
+        Some(s) => s,
+        None => {
+            let listing_id = order
+                .pointer("/listing/id")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let Some(listing_id) = listing_id else {
+                return Ok(json!({
+                    "error": "order carries no listing to resolve the seller from",
+                    "order_id": args.order_id,
+                    "hint": "Pass seller_slug explicitly.",
+                }));
+            };
+            let listing = state.overpay.get_listing_value(&listing_id).await?;
+            let inner = listing.get("data").unwrap_or(&listing);
+            match inner.pointer("/seller/slug").and_then(Value::as_str) {
+                Some(slug) => slug.to_string(),
+                None => {
+                    return Ok(json!({
+                        "error": "listing carries no seller slug",
+                        "order_id": args.order_id,
+                        "hint": "Pass seller_slug explicitly.",
+                    }))
+                }
+            }
+        }
+    };
+
+    let redeem = state
+        .overpay
+        .redeem_merchant_credits_value(&seller_slug, &args.order_id, auth.as_auth())
+        .await?;
+    // Flatten the Rails `{data: {...}}` envelope and splice in what the
+    // caller needs to follow up, so the result is one self-describing
+    // object (unlike the raw-passthrough redeem_merchant_credits tool).
+    let mut out = match redeem.get("data") {
+        Some(Value::Object(m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    out.insert("order_id".into(), json!(args.order_id));
+    out.insert("seller_slug".into(), json!(seller_slug));
+    Ok(Value::Object(out))
 }
 
 // ---------------------------------------------------------------------------

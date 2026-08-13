@@ -295,6 +295,15 @@ struct ConsentForm {
     password: String,
     #[serde(default)]
     action: String,
+    /// Provider-scope consent only: checkbox opting the minted key into the
+    /// wallet spending tools. Absent (chat-only) unless the user ticked it.
+    #[serde(default)]
+    allow_spend: Option<String>,
+    /// Provider-scope consent only: optional daily spending budget in
+    /// USD for the minted key (per UTC day). Blank means no limit; only
+    /// meaningful when `allow_spend` is ticked.
+    #[serde(default)]
+    spend_budget_usd: Option<String>,
 }
 
 async fn consent_post(
@@ -370,6 +379,37 @@ async fn consent_post(
         .into_response());
     }
 
+    // The `spend` scope is granted by the consent checkbox and nothing
+    // else: whatever the OAuth client asked for, `spend` is stripped from
+    // the requested scopes and re-added only if the user ticked the box.
+    // A client cannot pre-grant itself spending power by requesting
+    // `scope=provider spend`.
+    let mut granted_scopes: Vec<String> = pending
+        .scopes
+        .iter()
+        .filter(|s| s.as_str() != "spend")
+        .cloned()
+        .collect();
+    let provider_scope = granted_scopes.iter().any(|s| s == "provider");
+    let allow_spend = provider_scope && form.allow_spend.is_some();
+    if allow_spend {
+        granted_scopes.push("spend".to_string());
+    }
+
+    // The budget is likewise the user's choice alone (the form field, not
+    // anything the client requested). It applies to chat-only keys too —
+    // chat turns are paid orders — so any provider grant may carry one.
+    let spend_budget_usd_cents = if provider_scope {
+        match crate::dashboard::provider::parse_budget_usd(form.spend_budget_usd.as_deref()) {
+            Ok(v) => v,
+            Err(msg) => {
+                return Ok(Html(render_consent(&state, &form.session, Some(msg))?).into_response())
+            }
+        }
+    } else {
+        None
+    };
+
     // Issue an authorization code.
     let code = rand_url_safe(20);
     let expires_at = unix_now_f64() + AUTH_CODE_TTL.as_secs() as f64;
@@ -382,12 +422,13 @@ async fn consent_post(
         db.write_auth_code(
             &code,
             &pending.client_id,
-            &pending.scopes,
+            &granted_scopes,
             &pending.code_challenge,
             &pending.redirect_uri,
             pending.redirect_uri_provided_explicitly,
             expires_at,
             Some(&npub),
+            spend_budget_usd_cents,
         )?;
     }
 
@@ -485,7 +526,21 @@ async fn token_exchange(
             let npub = row.npub.as_deref().ok_or_else(|| {
                 AppError::BadInput("provider scope requires a wallet to bind".into())
             })?;
-            db.create_provider_key(npub, "browser login")?.1
+            // `spend` (and its budget) reach the auth-code row only via
+            // the consent form (consent_post strips `spend` from
+            // client-requested scopes), so both are safe to honor here.
+            let key_scopes = if row.scopes.iter().any(|s| s == "spend") {
+                "chat spend"
+            } else {
+                "chat"
+            };
+            db.create_provider_key(
+                npub,
+                "browser login",
+                key_scopes,
+                row.spend_budget_usd_cents,
+            )?
+            .1
         } else {
             let token = format!("at_{}", rand_url_safe(32));
             db.write_access_token(

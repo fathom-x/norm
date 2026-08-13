@@ -349,6 +349,7 @@ fn write_and_read_auth_code() {
         true,
         expires_at,
         None,
+        None,
     )
     .unwrap();
     let row = t.db.read_auth_code("code_xyz").unwrap().unwrap();
@@ -368,6 +369,7 @@ fn delete_auth_code_removes() {
         "http://localhost/cb",
         false,
         now_secs_f64() + 300.0,
+        None,
         None,
     )
     .unwrap();
@@ -679,7 +681,9 @@ fn read_token_migrating_returns_none_when_nothing_is_stored() {
 fn provider_keys_are_wallet_scoped_and_revocable() {
     let t = fresh("pw");
     let db = &t.db;
-    let (row, key) = db.create_provider_key(NPUB, "dashboard").unwrap();
+    let (row, key) = db
+        .create_provider_key(NPUB, "dashboard", owallet_db::PROVIDER_SCOPE_CHAT, None)
+        .unwrap();
 
     assert!(key.starts_with("owk_"));
     assert_eq!(row.label.as_deref(), Some("dashboard"));
@@ -693,4 +697,307 @@ fn provider_keys_are_wallet_scoped_and_revocable() {
     db.delete_provider_key(&row.id, NPUB).unwrap();
     assert_eq!(db.read_provider_key_npub(&key).unwrap(), None);
     assert!(db.list_provider_keys(NPUB).unwrap().is_empty());
+}
+
+#[test]
+fn provider_key_scopes_gate_spending() {
+    let t = fresh("pw");
+    let db = &t.db;
+
+    let (chat_row, chat_key) = db
+        .create_provider_key(NPUB, "dashboard", owallet_db::PROVIDER_SCOPE_CHAT, None)
+        .unwrap();
+    let (spend_row, spend_key) = db
+        .create_provider_key(NPUB, "dashboard", "chat spend", None)
+        .unwrap();
+
+    assert!(!chat_row.can_spend());
+    assert!(spend_row.can_spend());
+
+    let auth = db.read_provider_key_auth(&chat_key).unwrap().unwrap();
+    assert_eq!(auth.npub, NPUB);
+    assert!(!auth.can_spend());
+
+    let auth = db.read_provider_key_auth(&spend_key).unwrap().unwrap();
+    assert!(auth.can_spend());
+
+    // A row from before the scopes column existed (NULL scopes) must stay
+    // chat-only — pre-existing keys never silently gain spending power.
+    assert!(!owallet_db::scopes_allow_spend(None));
+}
+
+#[test]
+fn provider_key_budget_reserve_release_record_lifecycle() {
+    use owallet_db::BudgetReservation;
+
+    let t = fresh("pw");
+    let db = &t.db;
+
+    let (key, _) = db
+        .create_provider_key(NPUB, "dashboard", "chat spend", Some(1000))
+        .unwrap();
+    assert_eq!(key.daily_budget_usd_cents, Some(1000));
+    assert_eq!(key.spent_today_usd_cents(), 0);
+    assert_eq!(key.remaining_today_usd_cents(), Some(1000));
+
+    // Reserve within budget; a second reservation over the remainder
+    // refuses atomically and reports the numbers.
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 600).unwrap(),
+        BudgetReservation::Reserved
+    );
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 500).unwrap(),
+        BudgetReservation::OverBudget {
+            daily_budget_usd_cents: 1000,
+            remaining_today_usd_cents: 400,
+        }
+    );
+
+    // A released reservation restores allowance; the retry then fits.
+    db.release_provider_key_spend(&key.id, 600).unwrap();
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 500).unwrap(),
+        BudgetReservation::Reserved
+    );
+
+    // After-the-fact recording may overshoot; remaining floors at 0 and
+    // everything refuses from then on.
+    db.record_provider_key_spend(&key.id, 700).unwrap();
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.spent_today_usd_cents(), 1200);
+    assert_eq!(row.remaining_today_usd_cents(), Some(0));
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 1).unwrap(),
+        BudgetReservation::OverBudget {
+            daily_budget_usd_cents: 1000,
+            remaining_today_usd_cents: 0,
+        }
+    );
+
+    // Raising the budget takes effect immediately and keeps today's spend.
+    assert!(db
+        .update_provider_key_budget(&key.id, NPUB, Some(2000))
+        .unwrap());
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 800).unwrap(),
+        BudgetReservation::Reserved
+    );
+    // Clearing it makes the key unlimited; spend is still tracked.
+    assert!(db.update_provider_key_budget(&key.id, NPUB, None).unwrap());
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 1_000_000)
+            .unwrap(),
+        BudgetReservation::Reserved
+    );
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.daily_budget_usd_cents, None);
+    assert_eq!(row.remaining_today_usd_cents(), None);
+    assert_eq!(row.spent_today_usd_cents(), 1_002_000);
+
+    // Budget edits are wallet-scoped like delete.
+    assert!(!db
+        .update_provider_key_budget(&key.id, "npub1someoneelse", Some(1))
+        .unwrap());
+
+    // A revoked key refuses reservations by name.
+    db.delete_provider_key(&key.id, NPUB).unwrap();
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 1).unwrap(),
+        BudgetReservation::KeyMissing
+    );
+}
+
+#[test]
+fn provider_key_budget_window_resets_at_the_day_boundary() {
+    use owallet_db::BudgetReservation;
+
+    let t = fresh("pw");
+    let db = &t.db;
+    let (key, _) = db
+        .create_provider_key(NPUB, "dashboard", "chat spend", Some(1000))
+        .unwrap();
+
+    // Exhaust today's budget.
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 1000).unwrap(),
+        BudgetReservation::Reserved
+    );
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 1).unwrap(),
+        BudgetReservation::OverBudget {
+            daily_budget_usd_cents: 1000,
+            remaining_today_usd_cents: 0,
+        }
+    );
+
+    // Backdate the window to yesterday (second connection, like the
+    // corruption test) — as if the wallet-local midnight passed since the
+    // spend.
+    let conn = rusqlite::Connection::open(&t.path).unwrap();
+    conn.execute(
+        "UPDATE provider_keys SET spent_day = spent_day - 1 WHERE id = ?1",
+        [&key.id],
+    )
+    .unwrap();
+    drop(conn);
+
+    // Reads report a fresh window without any write happening…
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.spent_today_usd_cents(), 0);
+    assert_eq!(row.remaining_today_usd_cents(), Some(1000));
+
+    // …and the reserve UPDATE rolls the row over to today lazily.
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 900).unwrap(),
+        BudgetReservation::Reserved
+    );
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.spent_today_usd_cents(), 900);
+    assert_eq!(row.spent_day, Some(db.current_budget_day()));
+
+    // A release for a reservation made before the rollover is a no-op —
+    // it must not refund yesterday's spend into today's fresh window.
+    let conn = rusqlite::Connection::open(&t.path).unwrap();
+    conn.execute(
+        "UPDATE provider_keys SET spent_day = spent_day - 1 WHERE id = ?1",
+        [&key.id],
+    )
+    .unwrap();
+    drop(conn);
+    db.release_provider_key_spend(&key.id, 900).unwrap();
+    // The API normalizes past-day spend to 0, so check the raw column.
+    let conn = rusqlite::Connection::open(&t.path).unwrap();
+    let raw: i64 = conn
+        .query_row(
+            "SELECT spent_usd_cents FROM provider_keys WHERE id = ?1",
+            [&key.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        raw, 900,
+        "yesterday's raw spend is untouched by a stale release"
+    );
+}
+
+#[test]
+fn timezone_setting_roundtrips_and_validates() {
+    let t = fresh("pw");
+    let db = &t.db;
+
+    // Unset means UTC.
+    assert_eq!(db.read_timezone().unwrap(), None);
+
+    db.write_timezone("Europe/Berlin").unwrap();
+    assert_eq!(
+        db.read_timezone().unwrap().as_deref(),
+        Some("Europe/Berlin")
+    );
+    db.write_timezone("UTC").unwrap();
+    assert_eq!(db.read_timezone().unwrap().as_deref(), Some("UTC"));
+
+    let err = db.write_timezone("Mars/Olympus_Mons").unwrap_err();
+    assert!(err.to_string().contains("unknown IANA timezone"));
+    assert_eq!(
+        db.read_timezone().unwrap().as_deref(),
+        Some("UTC"),
+        "a rejected name must not clobber the stored setting"
+    );
+
+    assert!(owallet_db::timezone_is_valid("America/New_York"));
+    assert!(!owallet_db::timezone_is_valid("America/Not_A_Place"));
+}
+
+#[test]
+fn spend_cap_setting_roundtrips_and_clears() {
+    let t = fresh("pw");
+    let db = &t.db;
+    assert_eq!(db.read_spend_cap_usd_cents().unwrap(), None);
+    db.write_spend_cap_usd_cents(Some(500)).unwrap();
+    assert_eq!(db.read_spend_cap_usd_cents().unwrap(), Some(500));
+    db.write_spend_cap_usd_cents(None).unwrap();
+    assert_eq!(db.read_spend_cap_usd_cents().unwrap(), None);
+}
+
+#[test]
+fn budget_window_follows_the_wallet_timezone() {
+    use owallet_db::BudgetReservation;
+
+    let t = fresh("pw");
+    let db = &t.db;
+    let (key, _) = db
+        .create_provider_key(NPUB, "dashboard", "chat spend", Some(1000))
+        .unwrap();
+
+    // Etc/GMT+12 (UTC-12) and Etc/GMT-14 (UTC+14) are 26 hours apart, so
+    // their local calendar dates differ at every instant — switching
+    // between them always lands in a different budget window, which makes
+    // this deterministic regardless of when the test runs.
+    db.write_timezone("Etc/GMT+12").unwrap();
+    let west_day = db.current_budget_day();
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 1000).unwrap(),
+        BudgetReservation::Reserved
+    );
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 1).unwrap(),
+        BudgetReservation::OverBudget {
+            daily_budget_usd_cents: 1000,
+            remaining_today_usd_cents: 0,
+        }
+    );
+
+    db.write_timezone("Etc/GMT-14").unwrap();
+    assert_ne!(
+        db.current_budget_day(),
+        west_day,
+        "26h-apart zones never share a calendar date"
+    );
+    // The stored window belongs to another day now: reads show a fresh
+    // budget and the next reserve rolls the row into the new window.
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.spent_today_usd_cents(), 0);
+    assert_eq!(row.remaining_today_usd_cents(), Some(1000));
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 1000).unwrap(),
+        BudgetReservation::Reserved
+    );
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.spent_today_usd_cents(), 1000);
+    assert_eq!(row.spent_day, Some(db.current_budget_day()));
+}
+
+#[test]
+fn provider_key_rows_predating_the_budget_columns_read_as_unlimited_untouched() {
+    let t = fresh("pw");
+    let db = &t.db;
+    let (key, raw) = db
+        .create_provider_key(NPUB, "dashboard", "chat spend", Some(500))
+        .unwrap();
+
+    // Simulate a row from before the budget columns: NULLs everywhere
+    // (via a second connection, like the corruption test above).
+    let conn = rusqlite::Connection::open(&t.path).unwrap();
+    conn.execute(
+        "UPDATE provider_keys SET daily_budget_usd_cents = NULL, spent_usd_cents = NULL, \
+         spent_day = NULL WHERE id = ?1",
+        [&key.id],
+    )
+    .unwrap();
+    drop(conn);
+
+    let row = db.read_provider_key_auth(&raw).unwrap().unwrap();
+    assert_eq!(
+        row.daily_budget_usd_cents, None,
+        "NULL budget means no limit"
+    );
+    assert_eq!(row.spent_today_usd_cents(), 0, "NULL spent reads as zero");
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, 100).unwrap(),
+        owallet_db::BudgetReservation::Reserved,
+        "COALESCE in the guard must treat NULL spent as zero"
+    );
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.spent_today_usd_cents(), 100);
 }
