@@ -20,9 +20,10 @@ up owallet and connect to Overpay's servers by default.
 Both halves track a live upstream; keep norm's divergence surgical so
 merges stay cheap.
 
-- `scripts/sync-from-opencode.sh` — merge newer `anomalyco/opencode`
-  `dev` commits into the repo root (ordinary merge; upstream's full
-  history is in this repo).
+- `scripts/sync-from-opencode.sh` — merge upstream's latest `vX.Y.Z`
+  release tag into the repo root (ordinary merge; upstream's full
+  history is in this repo). Releases, not tip of `dev`, on purpose:
+  known-good snapshots. `OPENCODE_REF` overrides.
 - `scripts/sync-from-overpay.sh` — merge newer `owallet-rs/` commits
   from `fathom-x/overpay` into `owallet/` (deterministic
   `git subtree split` + `-Xsubtree=owallet` merge; see script header).
