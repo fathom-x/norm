@@ -280,3 +280,66 @@ fn wrong_password_fails_unlock() {
         .failure()
         .stderr(contains("wrong password"));
 }
+
+#[test]
+fn provider_key_create_and_list() {
+    let tmp = TempDir::new().unwrap();
+    owallet(&tmp, "pw").arg("init").assert().success();
+    owallet(&tmp, "pw")
+        .args(["import", "--mnemonic", ABANDON_12])
+        .assert()
+        .success();
+
+    // Chat-only key, human output: raw key on stdout.
+    owallet(&tmp, "pw")
+        .args(["provider-key", "create"])
+        .assert()
+        .success()
+        .stdout(starts_with("owk_"));
+
+    // Spend + budget key, JSON output for machine consumers (norm bootstrap).
+    let out = owallet(&tmp, "pw")
+        .args([
+            "provider-key",
+            "create",
+            "--label",
+            "norm",
+            "--spend",
+            "--budget-usd",
+            "5.50",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parsed: serde_json::Value = serde_json::from_slice(&out).expect("json output");
+    assert!(parsed["key"].as_str().unwrap().starts_with("owk_"));
+    assert_eq!(parsed["scopes"], "chat spend");
+    assert_eq!(parsed["daily_budget_usd_cents"], 550);
+    assert_eq!(parsed["label"], "norm");
+
+    owallet(&tmp, "pw")
+        .args(["provider-key", "list"])
+        .assert()
+        .success()
+        .stdout(contains("norm"))
+        .stdout(contains("[chat spend]"))
+        .stdout(contains("$5.50/day"));
+}
+
+#[test]
+fn provider_key_create_rejects_bad_budget() {
+    let tmp = TempDir::new().unwrap();
+    owallet(&tmp, "pw").arg("init").assert().success();
+    owallet(&tmp, "pw")
+        .args(["import", "--mnemonic", ABANDON_12])
+        .assert()
+        .success();
+    owallet(&tmp, "pw")
+        .args(["provider-key", "create", "--budget-usd=0"])
+        .assert()
+        .failure()
+        .stderr(contains("budget"));
+}

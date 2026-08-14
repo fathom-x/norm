@@ -12,6 +12,7 @@ mod install;
 mod list;
 mod login;
 mod overpay;
+mod provider_key;
 mod select;
 mod send;
 mod serve;
@@ -122,5 +123,6 @@ pub fn dispatch(args: Cli) -> Result<()> {
         Command::Credits { what } => match what {
             CreditsWhat::Load { amount_cents, wait } => credits::run(amount_cents, wait),
         },
+        Command::ProviderKey { what } => provider_key::run(what),
     }
 }
