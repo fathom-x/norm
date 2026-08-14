@@ -7,8 +7,11 @@ name: norm-release
 on:
   push:
     tags: ["v*"]
-  # Cut a release without pushing a tag: the run creates tag + release at
-  # the chosen ref via `gh release create`.
+    # Cut a release without pushing a tag (remote sessions may only push
+    # branches): `git push origin main:release/v0.1.0` — the run creates
+    # tag + release at that SHA via `gh release create`, and the branch
+    # can be deleted afterwards.
+    branches: ["release/v*"]
   workflow_dispatch:
     inputs:
       version:
@@ -36,7 +39,8 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ inputs.version }}"
           else
-            VERSION="${GITHUB_REF_NAME#v}"
+            VERSION="${GITHUB_REF_NAME#release/}"
+            VERSION="${VERSION#v}"
           fi
           VERSION="${VERSION#v}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
