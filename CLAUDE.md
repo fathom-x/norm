@@ -15,6 +15,29 @@ up owallet and connect to Overpay's servers by default.
   `fathom-x/overpay`'s `owallet-rs/`. Its own `owallet/CLAUDE.md` is
   the operational guide; cd into `owallet/` for all cargo commands.
 
+## The norm layer
+
+The fork's own behavior lives in `packages/opencode/src/norm/norm.ts`
+plus two surgical hook-ins, kept deliberately tiny so opencode syncs
+stay cheap:
+
+- `src/config/config.ts` seeds `Norm.defaults()` — the `overpay`
+  provider (owallet's `/v1` OpenAI-compatible endpoint via
+  `@ai-sdk/openai-compatible`) and the `owallet` remote MCP server —
+  at the *lowest* config precedence; any user/project config wins.
+- `src/plugin/norm.ts` (registered in `internalPlugins()`) runs
+  `Norm.bootstrap()` before providers load: auto-starts `owallet
+  serve` and mints a provider key into opencode's auth store via
+  `owallet provider-key create --json`, when it can do so
+  non-interactively (binary on PATH, wallet DB exists,
+  `OWALLET_PASSWORD` set). It also registers the manual
+  paste-an-`owk_`-key auth method for `opencode auth login`.
+
+Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_URL`
+(non-default owallet), `NORM_DEBUG=1` (bootstrap diagnostics on
+stderr). Tests: `packages/opencode/test/config/config.test.ts`
+(`norm defaults` describe block).
+
 ## Syncing with upstreams
 
 Both halves track a live upstream; keep norm's divergence surgical so
