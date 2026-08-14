@@ -17,6 +17,13 @@ import { InstallationEvent } from "@opencode-ai/schema/installation-event"
 
 export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop" | "choco" | "unknown"
 
+// norm's releases live in a (currently private) GitHub repo; a token in the
+// environment lets the update check and self-upgrade reach it.
+function normReleaseAuthHeaders(): Record<string, string> {
+  const token = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"]
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
 export type ReleaseType = "patch" | "minor" | "major"
 
 export const Event = InstallationEvent
@@ -144,7 +151,14 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
 
     const upgradeCurl = Effect.fnUntraced(
       function* (target: string) {
-        const response = yield* httpOk.execute(HttpClientRequest.get("https://opencode.ai/install"))
+        // norm: self-upgrade re-runs the fork's own installer, which honors
+        // GITHUB_TOKEN (inherited via extendEnv below) for private-repo
+        // release downloads.
+        const response = yield* httpOk.execute(
+          HttpClientRequest.get("https://raw.githubusercontent.com/fathom-x/norm/main/install").pipe(
+            HttpClientRequest.setHeaders(normReleaseAuthHeaders()),
+          ),
+        )
         const body = yield* response.text
         const bodyBytes = new TextEncoder().encode(body)
         const shell = yield* upgradeScriptShell()
@@ -172,6 +186,7 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
         }
       }),
       method: Effect.fn("Installation.method")(function* () {
+        if (process.execPath.includes(path.join(".norm", "bin"))) return "curl" as Method
         if (process.execPath.includes(path.join(".opencode", "bin"))) return "curl" as Method
         if (process.execPath.includes(path.join(".local", "bin"))) return "curl" as Method
         const exec = process.execPath.toLowerCase()
@@ -254,9 +269,14 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
           return data.version
         }
 
+        // norm: version-check against the fork's own releases, not upstream
+        // opencode's. While the repo is private the anonymous request 404s and
+        // the caller treats that as "no update info" — set GITHUB_TOKEN to
+        // check against a private repo.
         const response = yield* httpOk.execute(
-          HttpClientRequest.get("https://api.github.com/repos/anomalyco/opencode/releases/latest").pipe(
+          HttpClientRequest.get("https://api.github.com/repos/fathom-x/norm/releases/latest").pipe(
             HttpClientRequest.acceptJson,
+            HttpClientRequest.setHeaders(normReleaseAuthHeaders()),
           ),
         )
         const data = yield* HttpClientResponse.schemaBodyJson(GitHubRelease)(response)
