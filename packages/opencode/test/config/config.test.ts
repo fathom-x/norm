@@ -816,7 +816,10 @@ it.instance("loads config from .opencode directory", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "agent", "test.md"),
-      `---\nmodel: test/model\n---\nTest agent prompt`,
+      `---
+model: test/model
+---
+Test agent prompt`,
     )
 
     const config = yield* Config.use.get()
@@ -835,7 +838,13 @@ it.instance("agent markdown permission config preserves user key order", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "agent", "ordered.md"),
-      `---\npermission:\n  bash: allow\n  "*": deny\n  edit: ask\n---\nOrdered permissions`,
+      `---
+permission:
+  bash: allow
+  "*": deny
+  edit: ask
+---
+Ordered permissions`,
     )
 
     const config = yield* Config.use.get()
@@ -848,12 +857,20 @@ it.instance("loads agents from .opencode/agents (plural)", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "agents", "helper.md"),
-      `---\nmodel: test/model\nmode: subagent\n---\nHelper agent prompt`,
+      `---
+model: test/model
+mode: subagent
+---
+Helper agent prompt`,
     )
 
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "agents", "nested", "child.md"),
-      `---\nmodel: test/model\nmode: subagent\n---\nNested agent prompt`,
+      `---
+model: test/model
+mode: subagent
+---
+Nested agent prompt`,
     )
 
     const config = yield* Config.use.get()
@@ -879,12 +896,18 @@ it.instance("loads commands from .opencode/command (singular)", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "command", "hello.md"),
-      `---\ndescription: Test command\n---\nHello from singular command`,
+      `---
+description: Test command
+---
+Hello from singular command`,
     )
 
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "command", "nested", "child.md"),
-      `---\ndescription: Nested command\n---\nNested command template`,
+      `---
+description: Nested command
+---
+Nested command template`,
     )
 
     const config = yield* Config.use.get()
@@ -906,12 +929,18 @@ it.instance("loads commands from .opencode/commands (plural)", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "commands", "hello.md"),
-      `---\ndescription: Test command\n---\nHello from plural commands`,
+      `---
+description: Test command
+---
+Hello from plural commands`,
     )
 
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "commands", "nested", "child.md"),
-      `---\ndescription: Nested command\n---\nNested command template`,
+      `---
+description: Nested command
+---
+Nested command template`,
     )
 
     const config = yield* Config.use.get()
@@ -1080,7 +1109,11 @@ it.instance("does not error when only custom agent is a subagent", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "agent", "helper.md"),
-      `---\nmodel: test/model\nmode: subagent\n---\nHelper subagent prompt`,
+      `---
+model: test/model
+mode: subagent
+---
+Helper subagent prompt`,
     )
 
     const config = yield* Config.use.get()
