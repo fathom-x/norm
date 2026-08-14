@@ -11,6 +11,7 @@ mod session;
 mod state;
 mod templates;
 
+pub use dashboard::provider::parse_budget_usd;
 pub use oauth_as::{OAuthAsState, PendingMap};
 pub use session::{SessionRole, SessionStore, WebSession};
 pub use state::{AppState, PendingDashboardAuth, PendingDashboardAuthMap};

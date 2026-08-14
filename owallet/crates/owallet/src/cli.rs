@@ -154,6 +154,13 @@ pub enum Command {
         what: CreditsWhat,
     },
 
+    /// Manage the wallet-scoped API keys that authenticate the `/v1`
+    /// OpenAI-compatible provider endpoint.
+    ProviderKey {
+        #[command(subcommand)]
+        what: ProviderKeyWhat,
+    },
+
     /// Register owallet (+ the hosted Overpay MCP) with an MCP client
     /// config file. Targets one or more of Claude Code, OpenCode, Codex,
     /// at either local-project or user-global scope.
@@ -188,6 +195,41 @@ pub enum CreditsWhat {
         /// Poll the order until payment is confirmed, then exit.
         #[arg(long)]
         wait: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProviderKeyWhat {
+    /// Mint a new provider key and print it. The raw key is shown this
+    /// once only; owallet retains just a verifier.
+    Create {
+        /// Human-readable label shown in the dashboard key list.
+        #[arg(long, default_value = "cli")]
+        label: String,
+
+        /// Grant the `spend` scope (unlocks the wallet spending tools on
+        /// `/v1`: create_order / buy_credits / pay_order).
+        #[arg(long)]
+        spend: bool,
+
+        /// Daily budget in USD (e.g. `5` or `5.50`) bounding everything
+        /// the key costs. Omit for no limit.
+        #[arg(long, value_name = "USD")]
+        budget_usd: Option<String>,
+
+        /// Mint for a specific wallet instead of the default.
+        #[arg(long)]
+        npub: Option<String>,
+
+        /// Emit machine-readable JSON on stdout instead of prose.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List provider keys for the default wallet (or `--npub <npub>`).
+    List {
+        #[arg(long)]
+        npub: Option<String>,
     },
 }
 
