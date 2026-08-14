@@ -2,11 +2,20 @@ import { EOL } from "os"
 import { Schema } from "effect"
 import { logo as glyphs } from "./logo"
 
+// norm's mascot — the plain-text fallback for non-TTY output; the TTY path
+// renders the same art from @opencode-ai/tui/logo.
 const wordmark = [
-  `⠀                    `,
-  `█▀▀▄ █▀▀█ █▀▀█ █▀█▀█`,
-  `█  █ █  █ █▄▄▀ █ █ █`,
-  `▀  ▀ ▀▀▀▀ ▀  ▀ ▀ ▀ ▀`,
+  `      /\\       /\\       /\\`,
+  `     /  \\▁▁▁▁▁/  \\▁▁▁▁▁/  \\`,
+  ` |\\  |                    |  /|`,
+  ` | >-|   .--.      .--.   |-< |`,
+  ` |/  |  ( () )    ( () )  |  \\|`,
+  `     |   '--'      '--'   |`,
+  ` |\\  | ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ |  /|`,
+  ` | >-|    \\/        \\/    |-< |`,
+  ` |/   \\                  /   \\|`,
+  `       \\▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁/`,
+  `  (oo)    |▄|      |▄|    (oo)`,
 ]
 
 export class CancelledError extends Schema.TaggedErrorClass<CancelledError>()("UICancelledError", {}) {}

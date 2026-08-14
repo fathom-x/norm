@@ -1,6 +1,22 @@
+// norm's mascot (the green spiky one). Drawn without the `_ ^ ~ ,` shadow
+// marks so every character renders literally; `▁`/`▄` stand in for
+// underscores. Kept entirely in `right` so it renders in the theme's
+// primary text color.
 export const logo = {
-  left: ["         ", "█▀▀▄ █▀▀█", "█__█ █__█", "▀~~▀ ▀▀▀▀"],
-  right: ["          ", "█▀▀█ █▀█▀█", "█▄▄▀ █_█_█", "▀__▀ ▀_▀_▀"],
+  left: ["", "", "", "", "", "", "", "", "", "", ""],
+  right: [
+    "      /\\       /\\       /\\",
+    "     /  \\▁▁▁▁▁/  \\▁▁▁▁▁/  \\",
+    " |\\  |                    |  /|",
+    " | >-|   .--.      .--.   |-< |",
+    " |/  |  ( () )    ( () )  |  \\|",
+    "     |   '--'      '--'   |",
+    " |\\  | ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ |  /|",
+    " | >-|    \\/        \\/    |-< |",
+    " |/   \\                  /   \\|",
+    "       \\▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁/",
+    "  (oo)    |▄|      |▄|    (oo)",
+  ],
 }
 
 export const go = {

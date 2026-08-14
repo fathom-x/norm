@@ -232,6 +232,67 @@ else
 
     mv "$tmp_dir/$APP" "$INSTALL_DIR/"
     chmod 755 "${INSTALL_DIR}/$APP"
+
+    # --- owallet (best-effort) ---------------------------------------------
+    # norm is built around a local owallet; pull the matching binary from the
+    # newest owallet-v* release so a fresh machine gets both in one command.
+    # Any failure here is a warning, not an install failure.
+    install_owallet() {
+        if command -v owallet >/dev/null 2>&1; then
+            case "$(command -v owallet)" in
+                "$INSTALL_DIR"/*) ;; # ours — refresh below
+                *) print_message info "${MUTED}owallet already installed elsewhere; leaving it alone${NC}"; return 0 ;;
+            esac
+        fi
+
+        local rust_target archive
+        case "$os-$arch" in
+            darwin-arm64) rust_target="aarch64-apple-darwin"; archive="tar.gz" ;;
+            darwin-x64)   rust_target="x86_64-apple-darwin"; archive="tar.gz" ;;
+            linux-x64)    rust_target="x86_64-unknown-linux-musl"; archive="tar.gz" ;;
+            linux-arm64)  rust_target="aarch64-unknown-linux-musl"; archive="tar.gz" ;;
+            windows-x64)  rust_target="x86_64-pc-windows-msvc"; archive="zip" ;;
+            *) return 0 ;;
+        esac
+
+        local releases owallet_tag owallet_ver
+        releases=$(api "https://api.github.com/repos/$REPO/releases?per_page=100") || {
+            print_message info "${MUTED}Could not list releases for owallet; skipping${NC}"
+            return 0
+        }
+        owallet_tag=$(echo "$releases" | sed -n 's/.*"tag_name": *"\(owallet-v[^"]*\)".*/\1/p' | head -1)
+        if [ -z "$owallet_tag" ]; then
+            print_message info "${MUTED}No owallet release yet; install it separately when one exists${NC}"
+            return 0
+        fi
+        owallet_ver="${owallet_tag#owallet-v}"
+
+        local owallet_json owallet_file owallet_asset_id stage
+        owallet_json=$(api "https://api.github.com/repos/$REPO/releases/tags/$owallet_tag") || return 0
+        owallet_file="owallet-${owallet_ver}-${rust_target}.${archive}"
+        owallet_asset_id=$(echo "$owallet_json" | tr ',' '\n' | grep -B 100 "\"name\": *\"$owallet_file\"" | sed -n 's/.*"id": *\([0-9][0-9]*\).*/\1/p' | tail -1)
+
+        print_message info "${MUTED}Installing ${NC}owallet ${MUTED}version: ${NC}$owallet_ver ${MUTED}($rust_target)${NC}"
+        if [ -n "$token" ] && [ -n "$owallet_asset_id" ]; then
+            curl -fL -# -H "Authorization: Bearer $token" -H "Accept: application/octet-stream" \
+                -o "$tmp_dir/$owallet_file" \
+                "https://api.github.com/repos/$REPO/releases/assets/$owallet_asset_id" || return 0
+        else
+            curl -fL -# -o "$tmp_dir/$owallet_file" \
+                "https://github.com/$REPO/releases/download/$owallet_tag/$owallet_file" || return 0
+        fi
+
+        stage="owallet-${owallet_ver}-${rust_target}"
+        if [ "$archive" = "tar.gz" ]; then
+            tar -xzf "$tmp_dir/$owallet_file" -C "$tmp_dir" || return 0
+            mv "$tmp_dir/$stage/owallet" "$INSTALL_DIR/" || return 0
+        else
+            unzip -q "$tmp_dir/$owallet_file" -d "$tmp_dir" || return 0
+            mv "$tmp_dir/$stage/owallet.exe" "$INSTALL_DIR/" || return 0
+        fi
+        chmod 755 "$INSTALL_DIR"/owallet* 2>/dev/null || true
+    }
+    install_owallet
 fi
 
 # --- PATH setup ---------------------------------------------------------------
@@ -298,12 +359,24 @@ if [ -n "${GITHUB_ACTIONS-}" ] && [ "${GITHUB_ACTIONS}" == "true" ]; then
     print_message info "Added $INSTALL_DIR to \$GITHUB_PATH"
 fi
 
-echo -e ""
-echo -e "${MUTED}          ${NC}          "
-echo -e "${MUTED}█▀▀▄ █▀▀█ ${NC}█▀▀█ █▀█▀█"
-echo -e "${MUTED}█░░█ █░░█ ${NC}█▄▄▀ █░█░█"
-echo -e "${MUTED}▀░░▀ ▀▀▀▀ ${NC}▀░░▀ ▀░▀░▀"
-echo -e ""
+GREEN='\033[0;32m'
+echo ""
+printf "${GREEN}"
+cat <<'MASCOT'
+      /\       /\       /\
+     /  \▁▁▁▁▁/  \▁▁▁▁▁/  \
+ |\  |                    |  /|
+ | >-|   .--.      .--.   |-< |
+ |/  |  ( () )    ( () )  |  \|
+     |   '--'      '--'   |
+ |\  | ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ |  /|
+ | >-|    \/        \/    |-< |
+ |/   \                  /   \|
+       \▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁/
+  (oo)    |▄|      |▄|    (oo)
+MASCOT
+printf "${NC}"
+echo ""
 echo -e "${MUTED}norm comes preconfigured for the Overpay marketplace via owallet. To start:${NC}"
 echo -e ""
 echo -e "cd <project>  ${MUTED}# Open directory${NC}"
