@@ -415,6 +415,73 @@ it.instance(
   { config: { lsp: true } },
 )
 
+describe("norm defaults", () => {
+  // The test preload sets NORM_DISABLE=1 so the seeded defaults stay out of
+  // every other test; these tests lift that to exercise the norm layer.
+  const withNorm = <A, E, R>(effect: Effect.Effect<A, E, R>) => withProcessEnv("NORM_DISABLE", undefined, effect)
+
+  it.instance("seeds the overpay provider and owallet mcp server", () =>
+    withNorm(
+      Effect.gen(function* () {
+        const config = yield* Config.use.get()
+        expect(config.provider?.overpay).toMatchObject({
+          npm: "@ai-sdk/openai-compatible",
+          options: { baseURL: "http://127.0.0.1:8765/v1" },
+        })
+        expect(config.provider?.overpay?.models).toHaveProperty("default")
+        expect(config.mcp?.owallet).toMatchObject({
+          type: "remote",
+          url: "http://127.0.0.1:8765/mcp",
+          enabled: true,
+        })
+      }),
+    ),
+  )
+
+  it.instance(
+    "lets user config override the seeded defaults",
+    withNorm(
+      Effect.gen(function* () {
+        const config = yield* Config.use.get()
+        expect(config.provider?.overpay?.options?.baseURL).toBe("http://10.1.2.3:9999/v1")
+        expect(config.mcp?.owallet).toMatchObject({ enabled: false })
+      }),
+    ),
+    {
+      config: {
+        provider: { overpay: { options: { baseURL: "http://10.1.2.3:9999/v1" } } },
+        mcp: { owallet: { type: "remote", url: "http://127.0.0.1:8765/mcp", enabled: false } },
+      },
+    },
+  )
+
+  it.instance("NORM_DISABLE=1 turns the defaults off", () =>
+    withProcessEnv(
+      "NORM_DISABLE",
+      "1",
+      Effect.gen(function* () {
+        const config = yield* Config.use.get()
+        expect(config.provider?.overpay).toBeUndefined()
+        expect(config.mcp?.owallet).toBeUndefined()
+      }),
+    ),
+  )
+
+  it.instance("NORM_OWALLET_URL points the defaults at another owallet", () =>
+    withNorm(
+      withProcessEnv(
+        "NORM_OWALLET_URL",
+        "http://127.0.0.1:9765/",
+        Effect.gen(function* () {
+          const config = yield* Config.use.get()
+          expect(config.provider?.overpay?.options?.baseURL).toBe("http://127.0.0.1:9765/v1")
+          expect(config.mcp?.owallet).toMatchObject({ type: "remote", url: "http://127.0.0.1:9765/mcp" })
+        }),
+      ),
+    ),
+  )
+})
+
 test("loads project config from Git Bash and MSYS2 paths on Windows", async () => {
   // Git Bash and MSYS2 both use /<drive>/... paths on Windows.
   await check((dir) => {
@@ -749,10 +816,7 @@ it.instance("loads config from .opencode directory", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "agent", "test.md"),
-      `---
-model: test/model
----
-Test agent prompt`,
+      `---\nmodel: test/model\n---\nTest agent prompt`,
     )
 
     const config = yield* Config.use.get()
@@ -771,13 +835,7 @@ it.instance("agent markdown permission config preserves user key order", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "agent", "ordered.md"),
-      `---
-permission:
-  bash: allow
-  "*": deny
-  edit: ask
----
-Ordered permissions`,
+      `---\npermission:\n  bash: allow\n  "*": deny\n  edit: ask\n---\nOrdered permissions`,
     )
 
     const config = yield* Config.use.get()
@@ -790,20 +848,12 @@ it.instance("loads agents from .opencode/agents (plural)", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "agents", "helper.md"),
-      `---
-model: test/model
-mode: subagent
----
-Helper agent prompt`,
+      `---\nmodel: test/model\nmode: subagent\n---\nHelper agent prompt`,
     )
 
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "agents", "nested", "child.md"),
-      `---
-model: test/model
-mode: subagent
----
-Nested agent prompt`,
+      `---\nmodel: test/model\nmode: subagent\n---\nNested agent prompt`,
     )
 
     const config = yield* Config.use.get()
@@ -829,18 +879,12 @@ it.instance("loads commands from .opencode/command (singular)", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "command", "hello.md"),
-      `---
-description: Test command
----
-Hello from singular command`,
+      `---\ndescription: Test command\n---\nHello from singular command`,
     )
 
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "command", "nested", "child.md"),
-      `---
-description: Nested command
----
-Nested command template`,
+      `---\ndescription: Nested command\n---\nNested command template`,
     )
 
     const config = yield* Config.use.get()
@@ -862,18 +906,12 @@ it.instance("loads commands from .opencode/commands (plural)", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "commands", "hello.md"),
-      `---
-description: Test command
----
-Hello from plural commands`,
+      `---\ndescription: Test command\n---\nHello from plural commands`,
     )
 
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "commands", "nested", "child.md"),
-      `---
-description: Nested command
----
-Nested command template`,
+      `---\ndescription: Nested command\n---\nNested command template`,
     )
 
     const config = yield* Config.use.get()
@@ -1042,11 +1080,7 @@ it.instance("does not error when only custom agent is a subagent", () =>
     const test = yield* TestInstance
     yield* FSUtil.use.writeWithDirs(
       path.join(test.directory, ".opencode", "agent", "helper.md"),
-      `---
-model: test/model
-mode: subagent
----
-Helper subagent prompt`,
+      `---\nmodel: test/model\nmode: subagent\n---\nHelper subagent prompt`,
     )
 
     const config = yield* Config.use.get()
