@@ -52,10 +52,34 @@ Deliberately *kept* from upstream for compatibility and cheap merges:
 `OPENCODE_*` env vars, `opencode.json`/`opencode.jsonc` config file
 names, project `.opencode/` dirs, the `$schema` URL, and internal
 `@opencode-ai/*` package names. Known follow-ups: the npm-platform
-install path in `bin/norm` and `script/build.ts` still reference
-upstream's `opencode-*` platform packages, and `opencode upgrade`
-targets upstream releases — both need norm's own release pipeline
-(bare `v*` tags) before they're meaningful.
+install path in `bin/norm` still references upstream's `opencode-*`
+platform packages, and `norm upgrade` targets upstream releases —
+point both at norm's release artifacts.
+
+## Installing
+
+One-line install (root `install` script; downloads the platform binary
+from this repo's GitHub releases into `~/.norm/bin` and adds it to
+PATH):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/fathom-x/norm/main/install | bash
+```
+
+While the repo is private, both the script fetch and the release
+download need a token with repo read access:
+
+```bash
+curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+  https://raw.githubusercontent.com/fathom-x/norm/main/install \
+  | GITHUB_TOKEN=$GITHUB_TOKEN bash
+```
+
+Releases are produced by `.github/workflows/norm-release.yml` on bare
+`v*` tags: one ubuntu runner cross-compiles every target via
+`packages/opencode/script/build.ts` (artifacts `norm-<os>-<arch>[-baseline][-musl]`
+containing a `norm` binary) and uploads them to the tag's GitHub
+release. Tag flow: `git tag v0.1.1 && git push origin v0.1.1`.
 
 ## Syncing with upstreams
 
