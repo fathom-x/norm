@@ -79,7 +79,11 @@ Releases are produced by `.github/workflows/norm-release.yml` on bare
 `v*` tags: one ubuntu runner cross-compiles every target via
 `packages/opencode/script/build.ts` (artifacts `norm-<os>-<arch>[-baseline][-musl]`
 containing a `norm` binary) and uploads them to the tag's GitHub
-release. Tag flow: `git tag v0.1.1 && git push origin v0.1.1`.
+release. Three ways to cut one: `git tag v0.1.1 && git push origin
+v0.1.1`; the workflow_dispatch button (version input); or — from a
+remote session whose git proxy only allows branch pushes — `git push
+origin main:release/v0.1.1`, where the run mints the tag itself (the
+`release/*` branch can be deleted afterwards).
 
 ## Syncing with upstreams
 
