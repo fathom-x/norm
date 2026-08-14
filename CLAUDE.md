@@ -38,6 +38,25 @@ Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_URL`
 stderr). Tests: `packages/opencode/test/config/config.test.ts`
 (`norm defaults` describe block).
 
+## Rebrand
+
+The fork installs as **`norm`**, side-by-side-safe with a stock
+opencode: the binary is `norm` (`packages/opencode/package.json` bin →
+`bin/norm`, yargs `scriptName`), and the app identity in
+`packages/core/src/global.ts` is `norm`, so all XDG state is norm's
+own (`~/.config/norm`, `~/.local/share/norm` incl. `auth.json`, cache,
+state). The wordmark/TUI logo spell "norm" (`packages/tui/src/logo.ts`,
+`util/presentation.ts`, `cli/ui.ts`).
+
+Deliberately *kept* from upstream for compatibility and cheap merges:
+`OPENCODE_*` env vars, `opencode.json`/`opencode.jsonc` config file
+names, project `.opencode/` dirs, the `$schema` URL, and internal
+`@opencode-ai/*` package names. Known follow-ups: the npm-platform
+install path in `bin/norm` and `script/build.ts` still reference
+upstream's `opencode-*` platform packages, and `opencode upgrade`
+targets upstream releases — both need norm's own release pipeline
+(bare `v*` tags) before they're meaningful.
+
 ## Syncing with upstreams
 
 Both halves track a live upstream; keep norm's divergence surgical so
