@@ -35,6 +35,7 @@ import { ConfigPlugin } from "./plugin"
 import { ConfigVariable } from "./variable"
 import { Npm } from "@opencode-ai/core/npm"
 import { withTransientReadRetry } from "@/util/effect-http-client"
+import { Norm } from "@/norm/norm"
 
 // Custom merge function that concatenates array fields instead of replacing them
 // Keep remeda's deep conditional merge type out of hot config-loading paths; TS profiling showed it dominates here.
@@ -316,6 +317,10 @@ const layer = Layer.effect(
         const auth = yield* authSvc.all().pipe(Effect.orDie)
 
         let result: Info = {}
+        // norm: seed the Overpay provider + owallet MCP defaults at the very
+        // bottom of the precedence stack — every config source merged below
+        // (global, project, env) overrides them. NORM_DISABLE=1 opts out.
+        if (!Norm.disabled()) result = mergeConfigConcatArrays(result, Norm.defaults() as Info)
         const authEnv: Record<string, string> = {}
         const consoleManagedProviders = new Set<string>()
         let activeOrgName: string | undefined
