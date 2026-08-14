@@ -177,7 +177,9 @@ config file people commit and share — so `install` writing one there would
 either be ignored or, worse, override the real key with a stale value.
 
 Create the key under **OpenCode provider** in the local owallet dashboard
-(`/wallet`) and paste it at OpenCode's prompt. The raw key is shown once
+(`/wallet`) and paste it at OpenCode's prompt — or mint one
+non-interactively with `owallet provider-key create` (`--json` for
+machine consumers). The raw key is shown once
 only; owallet retains just a verifier, and each key is bound to the wallet
 whose merchant credits it may spend. (If you'd rather keep the key in the
 config file yourself, set `options.apiKey` by hand — `install` preserves a
@@ -222,6 +224,8 @@ request so a conversation that never converges can't spend without bound.
 | `send --to ADDR --amount N [--asset usdc\|zec]` | Sign + broadcast a USDC (EVM) or shielded ZEC (Orchard UA) transfer |
 | `sync` | Force-sync the default wallet's Zcash (Orchard) state; print height + balance (reads auto-sync, so this is for explicit/manual refresh) |
 | `install --{claude,opencode,codex}-{local,global}` | Register MCP entries |
+| `provider-key create [--label L --spend --budget-usd USD --json]` | Mint a `/v1` provider API key (raw key printed once) |
+| `provider-key list` | List the default wallet's provider keys |
 | `config [--mcp]` | Show env config (or print the `.mcp.json` blob) |
 
 Every command accepts `--prod` (built-in production defaults) or
