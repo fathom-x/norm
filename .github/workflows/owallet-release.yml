@@ -43,8 +43,10 @@ jobs:
             os: macos-14
             cross: false
             archive: tar.gz
+          # macos-13 (the last Intel runner image) is retired; build the
+          # x86_64 slice on the arm64 runner via cargo's cross-target support.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             cross: false
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
