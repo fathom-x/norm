@@ -190,7 +190,7 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   errors the model relays, not failed requests. The budget is set at mint
   time (dashboard create form / consent page — the user's choice alone,
   like the `spend` scope; `parse_budget_usd` in `dashboard/provider.rs`
-  is the one parser both use) and edited in place via
+  is the one parser all three surfaces use) and edited in place via
   `POST /wallet/provider-keys/budget` with immediate effect; today's
   spend is deliberately never reset by an edit. The wallet's on-chain
   balance stays the outer bound shared by every key. Per-task/session
@@ -251,7 +251,9 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   carry `scopes` ("chat" / "chat spend"; NULL rows from before the column
   are chat-only) — `spend` unlocks the wallet spending tools and is
   granted only by an explicit user choice: the dashboard create form's
-  checkbox, or the consent page's checkbox in the browser-login flow
+  checkbox, the consent page's checkbox in the browser-login flow, or the
+  CLI's `--spend` flag (`owallet provider-key create`, whose `--json`
+  output exists for norm's non-interactive bootstrap)
   (`consent_post` strips any client-*requested* `spend` scope, so an
   OAuth client can't pre-grant itself spending power).
   `install --opencode-*` also drops a **generated auth plugin**
