@@ -39,8 +39,9 @@ Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 the public release**, flip `DEFAULT_ENV` in `norm.ts` then),
 `NORM_OWALLET_URL` (explicit owallet URL, wins over the env default),
 `NORM_DEBUG=1` (bootstrap diagnostics on stderr). Staging/dev serve
-flags exist only in owallet's internal `dev-envs` builds, and staging
-needs `OVERPAY_RAILS_URL_STAGING` set. Tests:
+flags come from owallet's `dev-envs` feature — compiled into release
+binaries during the pre-release phase (staging Overpay URL baked in),
+see `owallet-release.yml`. Tests:
 `packages/opencode/test/config/config.test.ts` (`norm defaults`
 describe block).
 

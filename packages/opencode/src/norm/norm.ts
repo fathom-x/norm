@@ -36,10 +36,10 @@ const ENV_PORTS: Record<OwalletEnv, string> = { prod: "8765", dev: "8766", stagi
 /**
  * Which owallet environment norm targets. `NORM_OWALLET_ENV` overrides the
  * default; it picks the default port below and the `--<env>` flag passed to
- * an auto-started `owallet serve`. Note the staging/dev flags exist only in
- * owallet's internal `dev-envs` builds, and staging additionally needs
- * `OVERPAY_RAILS_URL_STAGING` in the environment — both true for the
- * intended pre-release audience.
+ * an auto-started `owallet serve`. The staging/dev flags come from owallet's
+ * `dev-envs` feature — compiled into the bundled release binaries during the
+ * pre-public-release phase (with the staging Overpay URL baked in), so a
+ * bare launch works with just OWALLET_PASSWORD.
  */
 export function owalletEnv(): OwalletEnv {
   const env = process.env.NORM_OWALLET_ENV

@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.81"
 license = "MIT"
@@ -22,14 +22,14 @@ authors = ["fathom-x"]
 homepage = "https://overpay.com"
 
 [workspace.dependencies]
-owallet-crypto = { path = "crates/owallet-crypto", version = "0.0.1" }
-owallet-db = { path = "crates/owallet-db", version = "0.0.1" }
-owallet-config = { path = "crates/owallet-config", version = "0.0.1" }
-owallet-overpay = { path = "crates/owallet-overpay", version = "0.0.1" }
-owallet-evm = { path = "crates/owallet-evm", version = "0.0.1" }
-owallet-zcash = { path = "crates/owallet-zcash", version = "0.0.1" }
-owallet-mcp = { path = "crates/owallet-mcp", version = "0.0.1" }
-owallet-http = { path = "crates/owallet-http", version = "0.0.1" }
+owallet-crypto = { path = "crates/owallet-crypto", version = "0.1.1" }
+owallet-db = { path = "crates/owallet-db", version = "0.1.1" }
+owallet-config = { path = "crates/owallet-config", version = "0.1.1" }
+owallet-overpay = { path = "crates/owallet-overpay", version = "0.1.1" }
+owallet-evm = { path = "crates/owallet-evm", version = "0.1.1" }
+owallet-zcash = { path = "crates/owallet-zcash", version = "0.1.1" }
+owallet-mcp = { path = "crates/owallet-mcp", version = "0.1.1" }
+owallet-http = { path = "crates/owallet-http", version = "0.1.1" }
 
 qrcode = "0.14"
 aes-gcm = "0.10"

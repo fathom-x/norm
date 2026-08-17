@@ -16,6 +16,12 @@ pub mod defaults {
     pub const OVERPAY_RAILS_URL: &str = "https://overpay.com";
     pub const OWALLET_PORT: u16 = 8765;
     pub const OWALLET_HOST: &str = "127.0.0.1";
+    /// Staging Overpay deployment (dev-envs builds only). Baked in so
+    /// `owallet --staging serve` needs no `OVERPAY_RAILS_URL_STAGING` —
+    /// norm's bundled owallet must come up in staging with zero setup
+    /// during the pre-public-release phase. Env vars still override.
+    #[cfg(feature = "dev-envs")]
+    pub const OVERPAY_RAILS_URL_STAGING: &str = "https://overpay-eykm.onrender.com";
 }
 
 /// Env var names that carry a per-environment `_<POSTFIX>` suffix as *inputs*
@@ -40,8 +46,8 @@ pub enum BuiltinEnv {
 /// Resolved values for a built-in environment.
 pub struct BuiltinDefaults {
     pub label: &'static str,
-    /// `None` for staging — the URL must be supplied via
-    /// `OVERPAY_RAILS_URL_STAGING` or `OVERPAY_RAILS_URL`.
+    /// Built-in Overpay API URL for the environment; `OVERPAY_RAILS_URL`
+    /// / `OVERPAY_RAILS_URL_<POSTFIX>` env vars always win over it.
     pub rails_url: Option<&'static str>,
     pub port: u16,
 }
@@ -74,7 +80,7 @@ impl BuiltinEnv {
             #[cfg(feature = "dev-envs")]
             BuiltinEnv::Staging => BuiltinDefaults {
                 label: "staging",
-                rails_url: None,
+                rails_url: Some(defaults::OVERPAY_RAILS_URL_STAGING),
                 port: 8767,
             },
         }
@@ -459,7 +465,10 @@ mod tests {
                 Some("http://localhost:3001")
             );
             assert_eq!(BuiltinEnv::Dev.config().port, 8766);
-            assert!(BuiltinEnv::Staging.config().rails_url.is_none());
+            assert_eq!(
+                BuiltinEnv::Staging.config().rails_url,
+                Some("https://overpay-eykm.onrender.com")
+            );
             assert_eq!(BuiltinEnv::Staging.config().port, 8767);
         }
     }

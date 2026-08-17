@@ -4,6 +4,19 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Staging-capable release binaries (pre-public-release)
+
+- **Release builds now compile with the `dev-envs` feature**
+  (`owallet-release.yml`), so the binaries norm bundles accept
+  `--dev`/`--staging`. Temporary for the pre-public-release phase —
+  drop the feature flag from the workflow at the public release.
+- **The staging environment has a built-in Overpay URL**
+  (`defaults::OVERPAY_RAILS_URL_STAGING`,
+  `https://overpay-eykm.onrender.com`), so `owallet --staging serve`
+  works with no `OVERPAY_RAILS_URL_STAGING` in the environment — and no
+  longer silently falls back to the **prod** Rails URL when that var is
+  missing. Env vars still override the built-in.
+
 ### Listing-backed provider tools on `/v1` (generalizing `run_python`)
 
 - **Any listing marked `metadata.provider_tool` is now a model-callable

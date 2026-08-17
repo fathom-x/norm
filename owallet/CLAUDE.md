@@ -470,6 +470,12 @@ land any of these:
   which builds the static matrix and attaches everything (+ SHA256SUMS)
   to a GitHub release. (Bare `v*` tags belong to the opencode fork at
   the repo root.)
+- **Pre-public-release:** the workflow builds with `--features dev-envs`
+  so the bundled binaries accept `--dev`/`--staging` and carry the
+  baked-in staging Overpay URL (`defaults::OVERPAY_RAILS_URL_STAGING`)
+  — norm defaults to staging until launch. Drop the feature flag from
+  both build steps (and flip norm's `DEFAULT_ENV`) at the public
+  release.
 - Update `CHANGELOG.md` + bump `[workspace.package].version` in
   `Cargo.toml` + run `cargo build` so `Cargo.lock` updates, all in the
   same commit, before tagging.
