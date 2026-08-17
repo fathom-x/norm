@@ -28,5 +28,8 @@ jobs:
 
       - uses: ./.github/actions/setup-bun
 
+      # Scoped to the packages norm ships (CLI, TUI, core, plugin, sdk).
+      # Upstream's cloud-app packages (console/stats/app/...) don't typecheck
+      # outside upstream's infra and aren't part of the fork's surface.
       - name: Typecheck
-        run: bun typecheck
+        run: bun turbo typecheck --filter=opencode --filter=@opencode-ai/tui --filter=@opencode-ai/core --filter=@opencode-ai/plugin --filter=@opencode-ai/sdk
