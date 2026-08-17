@@ -209,41 +209,48 @@ else
     # Asset id for this platform's archive (needed for authenticated download).
     asset_id=$(echo "$release_json" | tr ',' '\n' | grep -B 100 "\"name\": *\"$filename\"" | sed -n 's/.*"id": *\([0-9][0-9]*\).*/\1/p' | tail -1)
 
+    tmp_dir="${TMPDIR:-/tmp}/norm_install_$$"
+    mkdir -p "$tmp_dir"
+    trap 'rm -rf "$tmp_dir"' EXIT
+
     # --- skip when already current ------------------------------------------
+    # Only skips the norm binary itself: the owallet step below must still
+    # run — e.g. a first-run "bundled" choice recorded after norm was already
+    # current means owallet gets fetched on a re-run that updates nothing else.
+    norm_current=""
     if command -v "$APP" >/dev/null 2>&1; then
         installed_version=$("$APP" --version 2>/dev/null || echo "")
         if [[ "$installed_version" == "$specific_version" ]]; then
             print_message info "${MUTED}Version ${NC}$specific_version${MUTED} already installed${NC}"
-            exit 0
+            norm_current=1
         elif [ -n "$installed_version" ]; then
             print_message info "${MUTED}Installed version: ${NC}$installed_version"
         fi
     fi
 
     # --- download + install --------------------------------------------------
-    print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}version: ${NC}$specific_version ${MUTED}($target)${NC}"
-    tmp_dir="${TMPDIR:-/tmp}/norm_install_$$"
-    mkdir -p "$tmp_dir"
-    trap 'rm -rf "$tmp_dir"' EXIT
+    if [ -z "$norm_current" ]; then
+        print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}version: ${NC}$specific_version ${MUTED}($target)${NC}"
 
-    if [ -n "$token" ] && [ -n "$asset_id" ]; then
-        # Private repo: assets must be fetched through the API.
-        curl -fL -# -H "Authorization: Bearer $token" -H "Accept: application/octet-stream" \
-            -o "$tmp_dir/$filename" \
-            "https://api.github.com/repos/$REPO/releases/assets/$asset_id"
-    else
-        curl -fL -# -o "$tmp_dir/$filename" \
-            "https://github.com/$REPO/releases/download/v${specific_version}/$filename"
+        if [ -n "$token" ] && [ -n "$asset_id" ]; then
+            # Private repo: assets must be fetched through the API.
+            curl -fL -# -H "Authorization: Bearer $token" -H "Accept: application/octet-stream" \
+                -o "$tmp_dir/$filename" \
+                "https://api.github.com/repos/$REPO/releases/assets/$asset_id"
+        else
+            curl -fL -# -o "$tmp_dir/$filename" \
+                "https://github.com/$REPO/releases/download/v${specific_version}/$filename"
+        fi
+
+        if [ "$os" = "linux" ]; then
+            tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
+        else
+            unzip -q "$tmp_dir/$filename" -d "$tmp_dir"
+        fi
+
+        mv "$tmp_dir/$APP" "$INSTALL_DIR/"
+        chmod 755 "${INSTALL_DIR}/$APP"
     fi
-
-    if [ "$os" = "linux" ]; then
-        tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
-    else
-        unzip -q "$tmp_dir/$filename" -d "$tmp_dir"
-    fi
-
-    mv "$tmp_dir/$APP" "$INSTALL_DIR/"
-    chmod 755 "${INSTALL_DIR}/$APP"
 
     # --- owallet (best-effort) ---------------------------------------------
     # norm is built around a local owallet; pull the matching binary from the
@@ -289,6 +296,15 @@ else
             return 0
         fi
         owallet_ver="${owallet_tag#owallet-v}"
+
+        # Skip the ~60MB download when ours is already current.
+        if [ -x "$INSTALL_DIR/owallet" ]; then
+            installed_owallet=$("$INSTALL_DIR/owallet" --version 2>/dev/null | awk '{print $2}')
+            if [ "$installed_owallet" = "$owallet_ver" ]; then
+                print_message info "${MUTED}owallet ${NC}$owallet_ver${MUTED} already installed${NC}"
+                return 0
+            fi
+        fi
 
         local owallet_json owallet_file owallet_asset_id stage
         owallet_json=$(api "https://api.github.com/repos/$REPO/releases/tags/$owallet_tag") || return 0
