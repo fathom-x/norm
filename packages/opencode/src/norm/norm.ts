@@ -53,21 +53,123 @@ export function defaults(): ConfigV1.Info {
   } as ConfigV1.Info
 }
 
+// $HOME first (matching the install script and owallet itself), os.homedir()
+// as the fallback — the env var also keeps this testable, since bun caches
+// os.homedir() at process start.
+function homeDir() {
+  return process.env.HOME || os.homedir()
+}
+
 /** Where owallet keeps its encrypted DB (mirrors `owallet_db::default_db_path`). */
 function owalletDbPath() {
   if (process.env.OWALLET_DB_PATH) return process.env.OWALLET_DB_PATH
-  return path.join(os.homedir(), ".owallet", "owallet.db")
+  return path.join(homeDir(), ".owallet", "owallet.db")
 }
 
-/** Locate the owallet binary on PATH. */
-function owalletBinary(): string | undefined {
-  const name = process.platform === "win32" ? "owallet.exe" : "owallet"
+function owalletBinaryName() {
+  return process.platform === "win32" ? "owallet.exe" : "owallet"
+}
+
+/** The owallet the norm installer manages, alongside the norm binary itself. */
+export function bundledOwalletPath() {
+  return path.join(homeDir(), ".norm", "bin", owalletBinaryName())
+}
+
+/** First owallet on PATH that is NOT the bundled one — a pre-existing install. */
+export function systemOwalletPath(): string | undefined {
+  const bundled = bundledOwalletPath()
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
     if (!dir) continue
-    const candidate = path.join(dir, name)
+    const candidate = path.join(dir, owalletBinaryName())
+    if (candidate === bundled) continue
     if (existsSync(candidate)) return candidate
   }
   return undefined
+}
+
+export type OwalletChoice = "system" | "bundled"
+
+function choiceFile() {
+  return path.join(Global.Path.data, "owallet-binary.json")
+}
+
+export async function readOwalletChoice(): Promise<OwalletChoice | undefined> {
+  const parsed = await fs
+    .readFile(choiceFile(), "utf8")
+    .then((text) => JSON.parse(text))
+    .catch(() => undefined)
+  if (parsed?.choice === "system" || parsed?.choice === "bundled") return parsed.choice
+  return undefined
+}
+
+export async function recordOwalletChoice(choice: OwalletChoice): Promise<void> {
+  await fs.writeFile(choiceFile(), JSON.stringify({ choice }, null, 2) + "\n")
+}
+
+/**
+ * The owallet binary the bootstrap should use. A recorded first-run choice
+ * wins; without one (or when the chosen binary is gone) this falls back to
+ * whatever exists, preferring a pre-existing install over the bundled one —
+ * the same effective order as a plain PATH lookup, since the installer
+ * appends ~/.norm/bin behind existing entries.
+ */
+export function resolveOwalletBinary(choice?: OwalletChoice): string | undefined {
+  const bundled = existsSync(bundledOwalletPath()) ? bundledOwalletPath() : undefined
+  const system = systemOwalletPath()
+  if (choice === "bundled") return bundled ?? system
+  if (choice === "system") return system ?? bundled
+  return system ?? bundled
+}
+
+/**
+ * True when the first launch has a genuinely ambiguous owallet situation:
+ * both a pre-existing install and norm's bundled binary are present, and the
+ * user hasn't picked one yet. With only one (or neither) there is nothing to
+ * ask.
+ */
+export async function needsOwalletChoice(): Promise<boolean> {
+  if (disabled()) return false
+  if ((await readOwalletChoice()) !== undefined) return false
+  return systemOwalletPath() !== undefined && existsSync(bundledOwalletPath())
+}
+
+/**
+ * First-run prompt: an existing owallet was found next to norm's bundled
+ * one — ask which the bootstrap should use, and remember the answer. `ask`
+ * is injected by the CLI layer (UI.input) so this module stays UI-free.
+ * No-op outside a TTY or when there is nothing to decide. Either way the
+ * wallet database (~/.owallet) is shared — this only picks the server
+ * binary norm auto-starts.
+ */
+export async function firstRunOwalletChoice(ask: (prompt: string) => Promise<string>): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return
+  if (!(await needsOwalletChoice())) return
+  const system = systemOwalletPath()
+  process.stderr.write(
+    [
+      "",
+      "Found an existing owallet install:",
+      `  existing:  ${system}`,
+      `  bundled:   ${bundledOwalletPath()} (version-matched to norm)`,
+      `  wallet db: ${owalletDbPath()} — used either way`,
+      "",
+      "Which owallet should norm run?",
+      "  1) the existing install",
+      "  2) norm's bundled owallet (default)",
+      "",
+    ].join("\n"),
+  )
+  const answer = await ask("Choice [1/2]: ")
+  const choice: OwalletChoice = answer.trim() === "1" ? "system" : "bundled"
+  await recordOwalletChoice(choice)
+  process.stderr.write(
+    `Using ${choice === "system" ? system : bundledOwalletPath()} — change later in ${choiceFile()}\n`,
+  )
+}
+
+/** Locate the owallet binary honoring the recorded first-run choice. */
+async function owalletBinary(): Promise<string | undefined> {
+  return resolveOwalletBinary(await readOwalletChoice())
 }
 
 /** True if anything answers HTTP at `base` — any status counts, only a network error is "down". */
@@ -108,9 +210,9 @@ async function ensureServer(base: string): Promise<boolean> {
     debug(`owallet at ${base} is not reachable and not loopback — not spawning`)
     return false
   }
-  const bin = owalletBinary()
+  const bin = await owalletBinary()
   if (!bin) {
-    debug("owallet binary not on PATH — skipping auto-start")
+    debug("owallet binary not found — skipping auto-start")
     return false
   }
   if (!existsSync(owalletDbPath())) {
@@ -159,7 +261,7 @@ async function ensureProviderKey(): Promise<void> {
     .catch(() => ({}))
   if (store[PROVIDER_ID]) return
 
-  const bin = owalletBinary()
+  const bin = await owalletBinary()
   if (!bin) return
   if (!existsSync(owalletDbPath())) return
   if (!process.env.OWALLET_PASSWORD) {

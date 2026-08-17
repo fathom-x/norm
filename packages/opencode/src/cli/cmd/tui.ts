@@ -147,6 +147,14 @@ export const TuiThreadCommand = cmd({
       process.exitCode = 1
       return
     }
+
+    // norm: on first launch with both a pre-existing owallet and norm's
+    // bundled one present, ask which to use before the TUI owns the
+    // terminal. Never blocks startup on failure.
+    {
+      const { Norm } = await import("@/norm/norm")
+      await Norm.firstRunOwalletChoice(UI.input).catch(() => {})
+    }
     const noReplay = args.replay === false || args.noReplay === true
 
     if (args.mini) {

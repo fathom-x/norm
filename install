@@ -241,7 +241,16 @@ else
         if command -v owallet >/dev/null 2>&1; then
             case "$(command -v owallet)" in
                 "$INSTALL_DIR"/*) ;; # ours — refresh below
-                *) print_message info "${MUTED}owallet already installed elsewhere; leaving it alone${NC}"; return 0 ;;
+                *)
+                    # norm's first-run prompt records which owallet to use; a
+                    # "bundled" choice means install ours even though another
+                    # owallet exists on PATH.
+                    choice_file="${XDG_DATA_HOME:-$HOME/.local/share}/norm/owallet-binary.json"
+                    if ! grep -q '"bundled"' "$choice_file" 2>/dev/null; then
+                        print_message info "${MUTED}owallet already installed elsewhere; leaving it alone${NC}"
+                        return 0
+                    fi
+                    ;;
             esac
         fi
 
