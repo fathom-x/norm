@@ -69,6 +69,7 @@ export class UpgradeFailedError extends Schema.TaggedErrorClass<UpgradeFailedErr
 
 // Response schemas for external version APIs
 const GitHubRelease = Schema.Struct({ tag_name: Schema.String })
+const GitHubReleaseList = Schema.Array(GitHubRelease)
 const NpmPackage = Schema.Struct({ version: Schema.String })
 const BrewFormula = Schema.Struct({ versions: Schema.Struct({ stable: Schema.String }) })
 const BrewInfoV2 = Schema.Struct({
@@ -270,17 +271,22 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
         }
 
         // norm: version-check against the fork's own releases, not upstream
-        // opencode's. While the repo is private the anonymous request 404s and
+        // opencode's. `releases/latest` is unusable here: owallet-v* releases
+        // share this repo, and whichever release published most recently wins
+        // "latest" — so list releases (newest first) and take the newest bare
+        // v* tag. While the repo is private the anonymous request 404s and
         // the caller treats that as "no update info" — set GITHUB_TOKEN to
         // check against a private repo.
         const response = yield* httpOk.execute(
-          HttpClientRequest.get("https://api.github.com/repos/fathom-x/norm/releases/latest").pipe(
+          HttpClientRequest.get("https://api.github.com/repos/fathom-x/norm/releases?per_page=30").pipe(
             HttpClientRequest.acceptJson,
             HttpClientRequest.setHeaders(normReleaseAuthHeaders()),
           ),
         )
-        const data = yield* HttpClientResponse.schemaBodyJson(GitHubRelease)(response)
-        return data.tag_name.replace(/^v/, "")
+        const data = yield* HttpClientResponse.schemaBodyJson(GitHubReleaseList)(response)
+        const tag = data.find((release) => /^v\d/.test(release.tag_name))?.tag_name
+        if (!tag) return yield* Effect.die(new Error("no norm release found in fathom-x/norm"))
+        return tag.replace(/^v/, "")
       }, Effect.orDie),
       upgrade: Effect.fn("Installation.upgrade")(function* (m: Method, target: string) {
         let upgradeResult: { code: number; stdout: string; stderr: string } | undefined

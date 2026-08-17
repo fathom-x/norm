@@ -175,9 +175,21 @@ else
 
     # --- resolve release ---------------------------------------------------
     if [ -z "$requested_version" ]; then
-        release_json=$(api "https://api.github.com/repos/$REPO/releases/latest") || {
-            echo -e "${RED}Failed to fetch the latest release from $REPO${NC}"
+        # `releases/latest` is unusable here: owallet-v* releases share this
+        # repo, and whichever release published most recently wins "latest".
+        # List releases (newest first) and take the newest bare v* norm tag.
+        releases=$(api "https://api.github.com/repos/$REPO/releases?per_page=100") || {
+            echo -e "${RED}Failed to fetch releases from $REPO${NC}"
             [ -z "$token" ] && echo -e "${MUTED}If the repository is private, set GITHUB_TOKEN.${NC}"
+            exit 1
+        }
+        latest_tag=$(echo "$releases" | tr ',' '\n' | sed -n 's/.*"tag_name": *"\(v[0-9][^"]*\)".*/\1/p' | head -1)
+        if [ -z "$latest_tag" ]; then
+            echo -e "${RED}No norm release found in $REPO${NC}"
+            exit 1
+        fi
+        release_json=$(api "https://api.github.com/repos/$REPO/releases/tags/$latest_tag") || {
+            echo -e "${RED}Failed to fetch release $latest_tag from $REPO${NC}"
             exit 1
         }
     else
@@ -269,7 +281,9 @@ else
             print_message info "${MUTED}Could not list releases for owallet; skipping${NC}"
             return 0
         }
-        owallet_tag=$(echo "$releases" | sed -n 's/.*"tag_name": *"\(owallet-v[^"]*\)".*/\1/p' | head -1)
+        # tr first: the API returns one long line, and a greedy sed over it
+        # would match the LAST (oldest) owallet tag instead of the newest.
+        owallet_tag=$(echo "$releases" | tr ',' '\n' | sed -n 's/.*"tag_name": *"\(owallet-v[^"]*\)".*/\1/p' | head -1)
         if [ -z "$owallet_tag" ]; then
             print_message info "${MUTED}No owallet release yet; install it separately when one exists${NC}"
             return 0
