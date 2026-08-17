@@ -24,9 +24,33 @@ export function disabled() {
   return flag === "1" || flag === "true"
 }
 
+export type OwalletEnv = "prod" | "dev" | "staging"
+
+// Pre-public-release default: point at owallet's staging environment.
+// Flip to "prod" (and drop this comment) when Overpay opens to the public.
+const DEFAULT_ENV: OwalletEnv = "staging"
+
+// Mirrors owallet-config's built-in per-environment ports.
+const ENV_PORTS: Record<OwalletEnv, string> = { prod: "8765", dev: "8766", staging: "8767" }
+
+/**
+ * Which owallet environment norm targets. `NORM_OWALLET_ENV` overrides the
+ * default; it picks the default port below and the `--<env>` flag passed to
+ * an auto-started `owallet serve`. Note the staging/dev flags exist only in
+ * owallet's internal `dev-envs` builds, and staging additionally needs
+ * `OVERPAY_RAILS_URL_STAGING` in the environment — both true for the
+ * intended pre-release audience.
+ */
+export function owalletEnv(): OwalletEnv {
+  const env = process.env.NORM_OWALLET_ENV
+  if (env === "prod" || env === "dev" || env === "staging") return env
+  return DEFAULT_ENV
+}
+
 /** Base URL of the owallet server. `NORM_OWALLET_URL` overrides the default. */
 export function owalletUrl() {
-  return (process.env.NORM_OWALLET_URL ?? "http://127.0.0.1:8765").replace(/\/+$/, "")
+  if (process.env.NORM_OWALLET_URL) return process.env.NORM_OWALLET_URL.replace(/\/+$/, "")
+  return `http://127.0.0.1:${ENV_PORTS[owalletEnv()]}`
 }
 
 /**
@@ -240,14 +264,19 @@ async function ensureServer(base: string): Promise<boolean> {
     return false
   }
 
-  const port = new URL(base).port || "8765"
-  const child = spawn(bin, ["serve", "--port", port], {
+  const port = new URL(base).port || ENV_PORTS[owalletEnv()]
+  // prod is owallet's flagless default; staging/dev need their selector flag
+  // (dev-envs builds only — on a public build the child exits immediately
+  // with a usage error and the probe loop below reports the failure).
+  const envFlag = owalletEnv() === "prod" ? [] : [`--${owalletEnv()}`]
+  const args = [...envFlag, "serve", "--port", port]
+  const child = spawn(bin, args, {
     detached: true,
     stdio: "ignore",
     env: process.env,
   })
   child.unref()
-  debug(`started \`owallet serve --port ${port}\` (pid ${child.pid})`)
+  debug(`started \`owallet ${args.join(" ")}\` (pid ${child.pid})`)
 
   // The child unlocks the DB (PBKDF2) before binding; give it a few seconds.
   const deadline = Date.now() + 6000

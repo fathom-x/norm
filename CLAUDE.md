@@ -33,10 +33,16 @@ stay cheap:
   `OWALLET_PASSWORD` set). It also registers the manual
   paste-an-`owk_`-key auth method for `opencode auth login`.
 
-Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_URL`
-(non-default owallet), `NORM_DEBUG=1` (bootstrap diagnostics on
-stderr). Tests: `packages/opencode/test/config/config.test.ts`
-(`norm defaults` describe block).
+Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
+(`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
+`--<env>` flag for auto-started serves; **defaults to `staging` until
+the public release**, flip `DEFAULT_ENV` in `norm.ts` then),
+`NORM_OWALLET_URL` (explicit owallet URL, wins over the env default),
+`NORM_DEBUG=1` (bootstrap diagnostics on stderr). Staging/dev serve
+flags exist only in owallet's internal `dev-envs` builds, and staging
+needs `OVERPAY_RAILS_URL_STAGING` set. Tests:
+`packages/opencode/test/config/config.test.ts` (`norm defaults`
+describe block).
 
 ## Rebrand
 

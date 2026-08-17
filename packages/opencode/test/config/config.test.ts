@@ -420,21 +420,35 @@ describe("norm defaults", () => {
   // every other test; these tests lift that to exercise the norm layer.
   const withNorm = <A, E, R>(effect: Effect.Effect<A, E, R>) => withProcessEnv("NORM_DISABLE", undefined, effect)
 
-  it.instance("seeds the overpay provider and owallet mcp server", () =>
+  it.instance("seeds the overpay provider and owallet mcp server (staging by default, pre-release)", () =>
     withNorm(
       Effect.gen(function* () {
         const config = yield* Config.use.get()
         expect(config.provider?.overpay).toMatchObject({
           npm: "@ai-sdk/openai-compatible",
-          options: { baseURL: "http://127.0.0.1:8765/v1" },
+          options: { baseURL: "http://127.0.0.1:8767/v1" },
         })
         expect(config.provider?.overpay?.models).toHaveProperty("default")
         expect(config.mcp?.owallet).toMatchObject({
           type: "remote",
-          url: "http://127.0.0.1:8765/mcp",
+          url: "http://127.0.0.1:8767/mcp",
           enabled: true,
         })
       }),
+    ),
+  )
+
+  it.instance("NORM_OWALLET_ENV=prod targets owallet's prod port", () =>
+    withNorm(
+      withProcessEnv(
+        "NORM_OWALLET_ENV",
+        "prod",
+        Effect.gen(function* () {
+          const config = yield* Config.use.get()
+          expect(config.provider?.overpay?.options?.baseURL).toBe("http://127.0.0.1:8765/v1")
+          expect(config.mcp?.owallet).toMatchObject({ url: "http://127.0.0.1:8765/mcp" })
+        }),
+      ),
     ),
   )
 
@@ -450,7 +464,7 @@ describe("norm defaults", () => {
     {
       config: {
         provider: { overpay: { options: { baseURL: "http://10.1.2.3:9999/v1" } } },
-        mcp: { owallet: { type: "remote", url: "http://127.0.0.1:8765/mcp", enabled: false } },
+        mcp: { owallet: { type: "remote", url: "http://127.0.0.1:8767/mcp", enabled: false } },
       },
     },
   )
