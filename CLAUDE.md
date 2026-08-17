@@ -102,13 +102,16 @@ Run the relevant test suite after every sync.
 
 ## CI / releases
 
+- `.github/workflows/norm-ci.yml` — typecheck for the opencode half
+  (push to main + PRs).
 - `.github/workflows/owallet-ci.yml` — fmt/clippy/test + Docker build
   for `owallet/**`.
-- `.github/workflows/owallet-release.yml` — static `owallet` binaries
-  on `owallet-v*` tags. Bare `v*` tags are reserved for the fork's own
-  releases.
-- The remaining `.github/workflows/*.yml` came from upstream opencode
-  and target upstream's infra (publish, deploy, Discord, issue
-  triage…). They have not been audited for this repo — expect some to
-  fail or no-op without upstream's secrets; disabling/pruning them is a
-  known follow-up.
+- `.github/workflows/norm-release.yml` / `owallet-release.yml` — see
+  Installing above; bare `v*` tags are the fork's, `owallet-v*` are
+  owallet's.
+- Upstream opencode's workflows (hourly `beta`, publish/deploy, issue
+  triage, Blacksmith-runner CI…) are deliberately **deleted** — they
+  targeted upstream's infra/secrets/runners and queued or failed here.
+  An opencode sync that re-adds or modifies them shows modify/delete
+  conflicts: resolve by keeping them deleted (cherry-pick anything
+  genuinely useful into a `norm-*` workflow instead).

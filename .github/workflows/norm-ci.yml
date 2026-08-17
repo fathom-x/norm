@@ -1,0 +1,32 @@
+# Fork-owned CI for the opencode half of norm (owallet/** has its own
+# owallet-ci.yml). Deliberately small: typecheck is fast and catches most
+# sync/merge breakage; the full bun test suite is run manually or can be
+# promoted here later once its known flakes are triaged.
+name: norm-ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "owallet/**"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: norm-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Typecheck
+        run: bun typecheck
