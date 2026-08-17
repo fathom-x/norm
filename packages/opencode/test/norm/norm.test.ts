@@ -68,11 +68,18 @@ test("choice roundtrips through the state file", async () => {
   expect(await Norm.readOwalletChoice()).toBe("bundled")
 })
 
-test("needsOwalletChoice only when both binaries exist and nothing is recorded", async () => {
+test("needsOwalletChoice once a pre-existing install appears and nothing is recorded", async () => {
   delete process.env.NORM_DISABLE
   expect(await Norm.needsOwalletChoice()).toBe(false)
-  await makeBinary(system())
+  // A bundled copy alone is not a choice — it's the only option.
+  await makeBinary(bundled())
   expect(await Norm.needsOwalletChoice()).toBe(false)
+  // A pre-existing install is enough even without the bundled copy on disk:
+  // the installer only fetches the bundled one after a "bundled" choice is
+  // recorded, so the prompt must not wait for it.
+  await fs.rm(bundled())
+  await makeBinary(system())
+  expect(await Norm.needsOwalletChoice()).toBe(true)
   await makeBinary(bundled())
   expect(await Norm.needsOwalletChoice()).toBe(true)
   await Norm.recordOwalletChoice("system")

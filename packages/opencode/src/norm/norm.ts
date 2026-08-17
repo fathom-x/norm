@@ -110,8 +110,7 @@ export async function recordOwalletChoice(choice: OwalletChoice): Promise<void> 
  * The owallet binary the bootstrap should use. A recorded first-run choice
  * wins; without one (or when the chosen binary is gone) this falls back to
  * whatever exists, preferring a pre-existing install over the bundled one —
- * the same effective order as a plain PATH lookup, since the installer
- * appends ~/.norm/bin behind existing entries.
+ * least surprising for someone who was already running their own owallet.
  */
 export function resolveOwalletBinary(choice?: OwalletChoice): string | undefined {
   const bundled = existsSync(bundledOwalletPath()) ? bundledOwalletPath() : undefined
@@ -122,15 +121,18 @@ export function resolveOwalletBinary(choice?: OwalletChoice): string | undefined
 }
 
 /**
- * True when the first launch has a genuinely ambiguous owallet situation:
- * both a pre-existing install and norm's bundled binary are present, and the
- * user hasn't picked one yet. With only one (or neither) there is nothing to
- * ask.
+ * True when the first launch found a pre-existing owallet install and the
+ * user hasn't yet said whether norm should use it or its own bundled copy.
+ * The bundled binary need not be on disk — the installer deliberately skips
+ * it when another owallet exists, and only fetches it once a "bundled"
+ * choice is recorded — so requiring it here would make the prompt (and that
+ * installer branch) unreachable. With no pre-existing install there is
+ * nothing to ask: the bundled copy, when present, is the only option.
  */
 export async function needsOwalletChoice(): Promise<boolean> {
   if (disabled()) return false
   if ((await readOwalletChoice()) !== undefined) return false
-  return systemOwalletPath() !== undefined && existsSync(bundledOwalletPath())
+  return systemOwalletPath() !== undefined
 }
 
 /**
@@ -145,23 +147,37 @@ export async function firstRunOwalletChoice(ask: (prompt: string) => Promise<str
   if (!process.stdin.isTTY || !process.stdout.isTTY) return
   if (!(await needsOwalletChoice())) return
   const system = systemOwalletPath()
+  const bundledInstalled = existsSync(bundledOwalletPath())
+  // When the bundled copy isn't on disk (the installer leaves an existing
+  // owallet alone until told otherwise), default to the existing install —
+  // it's the only one that can run right now.
+  const fallback: OwalletChoice = bundledInstalled ? "bundled" : "system"
   process.stderr.write(
     [
       "",
       "Found an existing owallet install:",
       `  existing:  ${system}`,
-      `  bundled:   ${bundledOwalletPath()} (version-matched to norm)`,
+      `  bundled:   ${bundledOwalletPath()}${
+        bundledInstalled ? " (version-matched to norm)" : " (not installed yet)"
+      }`,
       `  wallet db: ${owalletDbPath()} — used either way`,
       "",
       "Which owallet should norm run?",
-      "  1) the existing install",
-      "  2) norm's bundled owallet (default)",
+      `  1) the existing install${fallback === "system" ? " (default)" : ""}`,
+      `  2) norm's bundled owallet${fallback === "bundled" ? " (default)" : ""}`,
       "",
     ].join("\n"),
   )
-  const answer = await ask("Choice [1/2]: ")
-  const choice: OwalletChoice = answer.trim() === "1" ? "system" : "bundled"
+  const answer = (await ask("Choice [1/2]: ")).trim()
+  const choice: OwalletChoice = answer === "1" ? "system" : answer === "2" ? "bundled" : fallback
   await recordOwalletChoice(choice)
+  if (choice === "bundled" && !bundledInstalled) {
+    process.stderr.write(
+      `Recorded — re-run the norm install one-liner to fetch the bundled owallet;\n` +
+        `until then norm keeps using ${system}. Change later in ${choiceFile()}\n`,
+    )
+    return
+  }
   process.stderr.write(
     `Using ${choice === "system" ? system : bundledOwalletPath()} — change later in ${choiceFile()}\n`,
   )
