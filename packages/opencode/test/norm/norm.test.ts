@@ -92,3 +92,16 @@ test("needsOwalletChoice respects NORM_DISABLE", async () => {
   await makeBinary(bundled())
   expect(await Norm.needsOwalletChoice()).toBe(false)
 })
+
+test("system prompt addendum rides overpay models only", async () => {
+  const { SystemPrompt } = await import("@/session/system")
+  const overpay = { providerID: "overpay", api: { id: "default" } } as any
+  const anthropic = { providerID: "anthropic", api: { id: "claude-sonnet-4" } } as any
+
+  delete process.env.NORM_DISABLE
+  expect(SystemPrompt.provider(overpay).some((part) => part.includes("Overpay marketplace"))).toBe(true)
+  expect(SystemPrompt.provider(anthropic).some((part) => part.includes("Overpay marketplace"))).toBe(false)
+
+  process.env.NORM_DISABLE = "1"
+  expect(SystemPrompt.provider(overpay).some((part) => part.includes("Overpay marketplace"))).toBe(false)
+})

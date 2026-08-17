@@ -212,6 +212,90 @@ async function owalletBinary(): Promise<string | undefined> {
   return resolveOwalletBinary(await readOwalletChoice())
 }
 
+/**
+ * System-prompt addendum appended (by `SystemPrompt.provider`) whenever the
+ * active model belongs to the overpay provider. The inherited opencode
+ * prompts tell the model to answer capability questions from the opencode
+ * docs — wrong for marketplace capabilities, which live in the tools the
+ * wallet attaches server-side.
+ */
+export function systemPrompt(): string {
+  return [
+    "# norm (Overpay marketplace)",
+    "",
+    "You are running inside norm, a fork of opencode preconfigured for the",
+    "Overpay marketplace. Requests to the `overpay` provider are served by the",
+    "user's local owallet server (an OpenAI-compatible endpoint): it routes",
+    "chat to a marketplace inference seller and executes tool calls",
+    "server-side as real, individually paid marketplace orders (code",
+    "execution, web fetch, image generation, wallet and order lookups, and",
+    "whatever else is currently listed).",
+    "",
+    "- The authoritative list of marketplace capabilities is the set of tools",
+    "  attached to your request by the wallet — NOT the opencode docs.",
+    "  https://opencode.ai documents only the client (TUI, config, keybinds).",
+    "  When asked what you can do on this provider, answer from your attached",
+    "  tools; do not fetch opencode docs for that.",
+    "- Every chat turn and every server-side tool execution spends real money",
+    "  from the user's wallet (bounded by per-key budgets and spend caps), so",
+    "  avoid redundant tool calls.",
+    "- The `owallet` MCP server is also attached client-side for wallet",
+    "  operations (balances, orders, marketplace browsing).",
+  ].join("\n")
+}
+
+/** The `overpay` API key from opencode's auth store, if one is stored. */
+export async function readProviderKey(): Promise<string | undefined> {
+  const store: Record<string, any> = await fs
+    .readFile(path.join(Global.Path.data, "auth.json"), "utf8")
+    .then((text) => JSON.parse(text))
+    .catch(() => ({}))
+  const entry = store[PROVIDER_ID]
+  if (entry?.type === "api" && typeof entry.key === "string") return entry.key
+  return undefined
+}
+
+let modelsPromise: Promise<string[] | undefined> | undefined
+
+/**
+ * The marketplace's live model list from `GET /v1/models` (needs the server
+ * up and a provider key — both normally arranged by `bootstrap`). Memoized
+ * per process on success; a failure resolves undefined and is retried on the
+ * next call. The norm plugin's `config` hook merges these into the overpay
+ * provider's model list so the picker offers more than `default`.
+ */
+export function marketplaceModels(): Promise<string[] | undefined> {
+  modelsPromise ??= (async () => {
+    try {
+      const key = await readProviderKey()
+      if (!key) {
+        debug("model discovery skipped — no overpay provider key yet")
+        return undefined
+      }
+      const res = await fetch(`${owalletUrl()}/v1/models`, {
+        headers: { authorization: `Bearer ${key}` },
+        signal: AbortSignal.timeout(3000),
+      })
+      if (!res.ok) {
+        debug(`model discovery: /v1/models responded ${res.status}`)
+        return undefined
+      }
+      const body: any = await res.json()
+      const ids = (Array.isArray(body?.data) ? body.data : [])
+        .map((entry: any) => entry?.id)
+        .filter((id: any): id is string => typeof id === "string" && id.length > 0)
+      return ids.length ? ids : undefined
+    } catch (error) {
+      debug("model discovery failed:", error)
+      return undefined
+    }
+  })().then((result) => {
+    if (!result) modelsPromise = undefined
+    return result
+  })
+  return modelsPromise
+}
+
 /** True if anything answers HTTP at `base` — any status counts, only a network error is "down". */
 async function probe(base: string, timeoutMs = 1500): Promise<boolean> {
   try {

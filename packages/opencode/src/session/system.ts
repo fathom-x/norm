@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Context, Effect, Layer } from "effect"
 
 import { InstanceState } from "@/effect/instance-state"
+import { Norm } from "@/norm/norm"
 
 import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
 import PROMPT_DEFAULT from "./prompt/default.txt"
@@ -25,6 +26,15 @@ import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 
 export function provider(model: Provider.Model) {
+  const parts = basePrompt(model)
+  // norm: models served by the overpay provider run against owallet's
+  // server-side marketplace tool loop — append the addendum that redirects
+  // capability questions from the opencode docs to the attached tools.
+  if (model.providerID === Norm.PROVIDER_ID && !Norm.disabled()) parts.push(Norm.systemPrompt())
+  return parts
+}
+
+function basePrompt(model: Provider.Model) {
   if (model.api.id.includes("muse")) {
     const name = model.api.id.includes("muse-glimmer") ? "Muse Glimmer" : "Muse Spark"
     return [PROMPT_META.replaceAll("{{MODEL_NAME}}", name)]

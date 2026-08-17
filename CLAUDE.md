@@ -18,7 +18,7 @@ up owallet and connect to Overpay's servers by default.
 ## The norm layer
 
 The fork's own behavior lives in `packages/opencode/src/norm/norm.ts`
-plus two surgical hook-ins, kept deliberately tiny so opencode syncs
+plus three surgical hook-ins, kept deliberately tiny so opencode syncs
 stay cheap:
 
 - `src/config/config.ts` seeds `Norm.defaults()` — the `overpay`
@@ -31,7 +31,14 @@ stay cheap:
   `owallet provider-key create --json`, when it can do so
   non-interactively (binary on PATH, wallet DB exists,
   `OWALLET_PASSWORD` set). It also registers the manual
-  paste-an-`owk_`-key auth method for `opencode auth login`.
+  paste-an-`owk_`-key auth method for `opencode auth login`, and its
+  `config` hook merges the marketplace's live model list
+  (`Norm.marketplaceModels()`, `GET /v1/models` with the stored key)
+  into the overpay provider so the picker offers more than `default`.
+- `src/session/system.ts` appends `Norm.systemPrompt()` to the system
+  prompt for overpay-provider models — the inherited opencode prompts
+  send capability questions to the opencode docs, but marketplace
+  capabilities live in the tools owallet attaches server-side.
 
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
