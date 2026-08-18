@@ -4,6 +4,27 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+## 0.1.2
+
+### Key budgets net out metered settlement refunds
+
+- **`/v1` place-and-pay now hands settlement refunds back to the
+  provider key's daily budget.** The marketplace's OpenRouter inference
+  listing meters each turn (OpenRouter cost + markup, settled against a
+  prepaid deposit; fathom-x/overpay#412), and the delivered payload
+  states the final `charged_cents`. Every pay site — buffered and
+  streaming chat turns, `run_python` and listing-tool sub-orders, and
+  the landing turn — releases the difference between the gross deposit
+  recorded at pay time and that final charge, so daily budgets bound
+  what a key actually cost instead of gross deposits. A failed turn
+  (upstream error, `charged_cents: 0` plus a credit refund) returns its
+  whole deposit; deliveries without `charged_cents` net nothing.
+- **`install` resolves the per-env Overpay URL the way `serve` does**
+  (synced from overpay), so `--staging`/`--dev` installs point the
+  OpenCode provider entry at the right marketplace.
+
+## 0.1.1
+
 ### Staging-capable release binaries (pre-public-release)
 
 - **Release builds now compile with the `dev-envs` feature**
