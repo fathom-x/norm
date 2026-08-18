@@ -612,7 +612,7 @@ async fn run_listing_tool(
     key_id: Option<&str>,
 ) -> Result<Value, OpenAiError> {
     let buyer_note = listing_tool_buyer_note(tool, arguments);
-    let order_id = place_and_pay_order(
+    let (order_id, redeemed_cents) = place_and_pay_order(
         state,
         auth,
         &tool.listing_id,
@@ -622,6 +622,7 @@ async fn run_listing_tool(
     )
     .await?;
     let snap = wait_for_order_terminal(state, auth, &order_id, timeout, poll).await?;
+    net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
     Ok(extract_listing_delivered(&order_id, &snap))
 }
 
@@ -1585,7 +1586,7 @@ async fn place_and_pay_order(
     seller_slug: &str,
     buyer_note: &Value,
     key_id: Option<&str>,
-) -> Result<String, OpenAiError> {
+) -> Result<(String, i64), OpenAiError> {
     // Strings pass through verbatim, matching the MCP `create_order`
     // convention — a `buyer_input :text` listing's bot reads the note as
     // plain text, and JSON-encoding would hand it literal quotes.
@@ -1630,15 +1631,57 @@ async fn place_and_pay_order(
     // budget too — a budget is a bound on what the key costs per day, not
     // just on what the wallet tools move. (The per-request SpendLedger
     // deliberately still excludes it: iterations bound per-request
-    // operating spend.) Recorded after the fact like a redemption.
+    // operating spend.) Recorded after the fact like a redemption — at
+    // the gross deposit, which is all that's knowable at pay time; a
+    // metered listing settles below it after delivery, so callers hand
+    // the returned cents to [`net_key_budget_from_delivery`] once they
+    // hold the terminal snapshot.
+    let mut redeemed_cents: i64 = 0;
     if let Some(cents) = redeem
         .pointer("/data/amount_redeemed_cents")
         .and_then(Value::as_f64)
     {
         record_key_budget(state, key_id, cents / 100.0);
+        redeemed_cents = cents.round() as i64;
     }
 
-    Ok(order_id)
+    Ok((order_id, redeemed_cents))
+}
+
+/// Net a metered order's settlement refund back out of the key's daily
+/// budget. The pay step records the gross deposit; a metered listing
+/// (OpenRouter inference) settles the order down to its actual cost
+/// right after delivery and states that final `charged_cents` in the
+/// delivered payload, so the difference goes back to the budget — the
+/// budget stays a bound on what the key actually cost, not on gross
+/// deposits. A delivery without `charged_cents` (run_python, listing
+/// tools, sellers that don't meter) nets nothing, which errs on the
+/// conservative side; the upstream-error payload carries
+/// `charged_cents: 0` alongside its credit refund, so a failed turn
+/// hands its whole deposit back here too.
+fn net_key_budget_from_delivery(
+    state: &McpState,
+    key_id: Option<&str>,
+    snap: &Value,
+    redeemed_cents: i64,
+) {
+    let Some(id) = key_id else { return };
+    if redeemed_cents <= 0 {
+        return;
+    }
+    let Ok(inner) = delivered_content_json(snap) else {
+        return;
+    };
+    let Some(charged) = inner.get("charged_cents").and_then(Value::as_i64) else {
+        return;
+    };
+    let refund = (redeemed_cents - charged.max(0)).clamp(0, redeemed_cents);
+    if refund <= 0 {
+        return;
+    }
+    if let Ok(db) = state.db.lock() {
+        let _ = db.release_provider_key_spend(id, refund);
+    }
 }
 
 /// Poll an order silently until it reaches a terminal status. Used by the
@@ -1806,7 +1849,7 @@ async fn run_python_tool(
     key_id: Option<&str>,
 ) -> Result<Value, OpenAiError> {
     let listing_id = resolve_python_listing_id(state).await?;
-    let order_id = place_and_pay_order(
+    let (order_id, redeemed_cents) = place_and_pay_order(
         state,
         auth,
         &listing_id,
@@ -1816,6 +1859,7 @@ async fn run_python_tool(
     )
     .await?;
     let snap = wait_for_order_terminal(state, auth, &order_id, timeout, poll).await?;
+    net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
     extract_python_delivered(&snap)
 }
 
@@ -1882,7 +1926,7 @@ async fn run_agentic_loop(
             "tools": defs,
             "tool_choice": "auto",
         });
-        let order_id = place_and_pay_order(
+        let (order_id, redeemed_cents) = place_and_pay_order(
             &ctx.mcp,
             auth,
             &listing_id,
@@ -1893,6 +1937,7 @@ async fn run_agentic_loop(
         .await?;
         let snap =
             wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
+        net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
         let delivered = extract_openrouter_delivered(&snap)?;
         if delivered.error {
             return Err(OpenAiError::UpstreamFailure(delivered.text));
@@ -1933,7 +1978,7 @@ async fn run_agentic_loop(
         "tools": defs,
         "tool_choice": "none",
     });
-    let order_id = place_and_pay_order(
+    let (order_id, redeemed_cents) = place_and_pay_order(
         &ctx.mcp,
         auth,
         &listing_id,
@@ -1943,6 +1988,7 @@ async fn run_agentic_loop(
     )
     .await?;
     let snap = wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
+    net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
     let delivered = extract_openrouter_delivered(&snap)?;
     if delivered.error {
         return Err(OpenAiError::UpstreamFailure(delivered.text));
@@ -2123,8 +2169,8 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 "tools": defs.clone(),
                 "tool_choice": "auto",
             });
-            let order_id = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
-                Ok(id) => id,
+            let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
+                Ok(placed) => placed,
                 Err(e) => {
                     let id = if response_id.is_empty() { "error" } else { response_id.as_str() };
                     for ev in error_events(id, &last_model, e) { yield Ok(ev); }
@@ -2165,6 +2211,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 }
                 tokio::time::sleep(ctx.poll).await;
             };
+            net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
 
             let delivered = match extract_openrouter_delivered(&snap) {
                 Ok(d) => d,
@@ -2242,8 +2289,8 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 // set off by blank lines.
                 if let Some(tool) = listing_tool {
                     yield Ok(Event::default().comment(format!("owallet: running {}", tool.name)));
-                    let order_id = match place_and_pay_order(&ctx.mcp, &auth, &tool.listing_id, &tool.seller_slug, &listing_tool_buyer_note(&tool, &arguments), ctx.key_id.as_deref()).await {
-                        Ok(id) => id,
+                    let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &tool.listing_id, &tool.seller_slug, &listing_tool_buyer_note(&tool, &arguments), ctx.key_id.as_deref()).await {
+                        Ok(placed) => placed,
                         Err(e) => {
                             let result_text = json!({"error": e.message()}).to_string();
                             messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
@@ -2275,6 +2322,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                         }
 
                         if is_terminal(order_status(&snap)) {
+                            net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
                             break extract_listing_delivered(&order_id, &snap).to_string();
                         }
                         if started.elapsed() >= ctx.timeout {
@@ -2292,8 +2340,8 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     continue 'tool_calls;
                 }
 
-                let python_order_id = match place_and_pay_order(&ctx.mcp, &auth, &python_listing_id, PYTHON_SELLER_SLUG, &arguments, ctx.key_id.as_deref()).await {
-                    Ok(id) => id,
+                let (python_order_id, py_redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &python_listing_id, PYTHON_SELLER_SLUG, &arguments, ctx.key_id.as_deref()).await {
+                    Ok(placed) => placed,
                     Err(e) => {
                         let result_text = json!({"error": e.message()}).to_string();
                         messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
@@ -2343,6 +2391,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 if fence_open {
                     yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n```\n"}), None));
                 }
+                net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &python_snap, py_redeemed_cents);
 
                 let result_text = match extract_python_delivered(&python_snap) {
                     Ok(result) => result.to_string(),
@@ -2361,8 +2410,8 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             "tools": defs.clone(),
             "tool_choice": "none",
         });
-        let order_id = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
-            Ok(id) => id,
+        let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
+            Ok(placed) => placed,
             Err(e) => {
                 let id = if response_id.is_empty() { "error" } else { response_id.as_str() };
                 for ev in error_events(id, &last_model, e) { yield Ok(ev); }
@@ -2400,6 +2449,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             }
             tokio::time::sleep(ctx.poll).await;
         };
+        net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
         let delivered = match extract_openrouter_delivered(&snap) {
             Ok(d) => d,
             Err(e) => {
@@ -4692,6 +4742,57 @@ mod tests {
             keys[0].spent_today_usd_cents(),
             2,
             "the turn's own redemption (2¢ mock) counts against the budget"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metered_delivery_nets_the_settlement_refund_out_of_the_key_budget() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        // A metered turn: pay time records the gross 2¢ deposit, but the
+        // seller settled the order down to 1¢ and states that final charge
+        // in the delivered payload — the other 1¢ goes back to the budget.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": serde_json::to_string(&json!({
+                        "description": "Hi.", "model": "openai/gpt-5-mini",
+                        "error": false, "credits_refunded": false,
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.008},
+                        "charged_cents": 1,
+                    }))
+                    .unwrap(),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let s = test_server_with_key(state.clone(), "chat", Some(500));
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hello"}],
+            }))
+            .await;
+        res.assert_status_ok();
+
+        let keys = state
+            .db
+            .lock()
+            .unwrap()
+            .list_provider_keys("npub1abandon")
+            .unwrap();
+        assert_eq!(
+            keys[0].spent_today_usd_cents(),
+            1,
+            "gross 2¢ at pay time, 1¢ handed back once the delivery stated its final charge"
         );
     }
 
