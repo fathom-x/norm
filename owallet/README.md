@@ -103,10 +103,168 @@ server (owallet no longer calls a hosted Overpay MCP).
 > their built-in defaults are gated behind the `dev-envs` Cargo feature
 > (`cargo build --features dev-envs`) and are **not present in public
 > release builds**. In those internal builds, combining flags runs one
-> server per environment (`owallet --dev --staging serve`), and a URL
-> override from the shell must carry the env suffix
-> (`OVERPAY_RAILS_URL_DEV`, `OVERPAY_RAILS_URL_STAGING`); a bare,
-> unsuffixed `OVERPAY_RAILS_URL` is ignored while a config is active.
+> server per environment (`owallet --dev --staging serve`). A URL override
+> from the shell should carry the env suffix
+> (`OVERPAY_RAILS_URL_DEV`, `OVERPAY_RAILS_URL_STAGING`) — that form wins,
+> and it's the only one that can address a single env when several are
+> active at once. A bare, unsuffixed `OVERPAY_RAILS_URL` is the next
+> fallback, ahead of the built-in default. `staging` ships **no** built-in
+> URL, so the suffixed var is effectively required there.
+
+## OpenCode as a custom provider
+
+`owallet serve` also exposes an OpenAI-compatible surface at
+`/v1/models` + `/v1/chat/completions`, so [OpenCode](https://opencode.ai) (or
+any client that speaks that API) can use Overpay for inference with no
+Claude/OpenAI/etc API key of its own — each request becomes a paid Overpay
+order, settled from the wallet's own merchant credits. This is a separate
+integration from the MCP registration `owallet install --opencode-*` also
+does: MCP gives OpenCode's agent *tool access* (`buy`, `send_usdc`, …); the
+provider entry gives it a *model* to talk to for the completions
+themselves. `install` wires up both — use either, or both.
+
+```bash
+owallet install --opencode-local
+```
+
+writes both blocks into `opencode.json` (checked against OpenCode's own
+[published config schema](https://opencode.ai/config.json); the `npm`
+package is the standard Vercel AI SDK OpenAI-compatible adapter):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "owallet": { "type": "remote", "url": "http://127.0.0.1:8765/mcp", "enabled": true }
+  },
+  "provider": {
+    "overpay": {
+      "npm": "@ai-sdk/openai-compatible",
+      "options": { "baseURL": "http://127.0.0.1:8765/v1" },
+      // Fetched live from the "OpenRouter Inference" listing's own schema
+      // at install time, not hardcoded — the catalog can grow without an
+      // owallet rebuild.
+      "models": {
+        "openai/gpt-5-mini": {},
+        "anthropic/claude-haiku-4.5": {}
+      }
+    }
+  }
+}
+```
+
+Editing an existing config is non-destructive: OpenCode's config is JSONC,
+and `install` edits it through a CST (the way the Codex target uses
+`toml_edit`), so comments, commented-out blocks, and unrelated keys survive
+untouched. Only `mcp.owallet*` and `provider.overpay*` are written.
+
+The `provider` block's model list is fetched straight from the "OpenRouter
+Inference" listing on Overpay (the same source `/v1/models` proxies), so
+`owallet serve` doesn't need to be running when `install` runs. If Overpay
+is unreachable — or no `OVERPAY_RAILS_URL` is configured for the active
+config — `install` writes a provider block with a single model,
+`"default"`:
+
+```jsonc
+"provider": { "overpay": { "npm": "@ai-sdk/openai-compatible",
+  "options": { "baseURL": "http://127.0.0.1:8765/v1" },
+  "models": { "default": {} } } }
+```
+
+### The provider key
+
+Note there is **no `apiKey` in the config**. OpenCode prompts for the key the
+first time you use the provider and stores it in its own auth store
+(`~/.local/share/opencode/auth.json`), deliberately keeping secrets out of a
+config file people commit and share — so `install` writing one there would
+either be ignored or, worse, override the real key with a stale value.
+
+Create the key under **OpenCode provider** in the local owallet dashboard
+(`/wallet`) and paste it at OpenCode's prompt. The raw key is shown once
+only; owallet retains just a verifier, and each key is bound to the wallet
+whose merchant credits it may spend. (If you'd rather keep the key in the
+config file yourself, set `options.apiKey` by hand — `install` preserves a
+key it finds there rather than overwriting it.)
+
+`"default"` isn't a real OpenRouter model id (every real one looks like
+`vendor/model-name`) — it's a sentinel `GET /v1/models` always lists first
+and `/v1/chat/completions` always accepts, without needing a live catalog
+fetch to validate it. The "OpenRouter Inference" listing's own
+`coerce_model` (Ruby) resolves it to a real, concrete model before ever
+calling OpenRouter, exactly the way it already treats any unrecognized or
+stale model id — see `MODEL_OPTIONS`'s doc comment in
+`openrouter_inference_listing.rb`. So `default` works as a request's model
+right away; rerun `install` once Overpay is reachable to get the real
+curated list instead. Merchant credits (`load_core_credits` MCP tool,
+or the dashboard) and `owallet authorize` still need to be in place before
+a completion request will actually settle.
+
+### Pointing OpenCode at staging (internal `dev-envs` builds)
+
+Each environment is a separate provider entry, a separate port, and a
+separate Overpay link — nothing carries over from prod or dev. Full
+sequence, from a clean machine:
+
+```bash
+# 1. Build with the internal selectors (`--staging` doesn't exist without this)
+cd owallet-rs && cargo install --path crates/owallet --features dev-envs
+
+# 2. staging declares no built-in Overpay URL, so name it (put this in your shell profile)
+export OVERPAY_RAILS_URL_STAGING=https://<staging-host>
+
+# 3. Start the server — staging binds :8767 (prod :8765, dev :8766)
+owallet --staging serve
+```
+
+The banner confirms both halves of the wiring before you go further:
+
+```
+[staging] http://127.0.0.1:8767 (dashboard /wallet · MCP /mcp · OAuth /oauth/*)
+[staging]   Overpay = https://<staging-host> · EVM = …
+```
+
+Then, in a second shell:
+
+```bash
+# 4. Write the opencode.json provider + MCP entries and the auth plugin
+owallet --staging install --opencode-global
+
+# 5. In OpenCode: `opencode auth login` → overpay-staging → "Browser login"
+```
+
+Two steps in the middle are easy to miss, and both fail in ways that don't
+name themselves:
+
+**Link the wallet to a staging Overpay account first.** Bearer tokens are
+keyed by the Overpay API URL, so a wallet linked on prod or dev has nothing
+for staging. Open **http://127.0.0.1:8767/wallet** and click *Link Overpay
+account* (it reads *Re-link* once a token is stored), or run `owallet
+--staging authorize`. Without it, owallet falls back to NIP-98, which can
+read the marketplace but cannot create orders — every completion fails with
+`HTTP 401: {"error":"API token required"}`, because order creation requires
+a real API-token user. Browse the dashboard at the **same host the banner
+prints**: the OAuth `redirect_uri` is built from that URL, and starting the
+flow on `localhost` while the callback returns to `127.0.0.1` drops both the
+session and pending-auth cookies, which looks like an endless login loop.
+
+**Run `install` after the OpenRouter listing exists on staging.** The model
+catalog is read from that listing at install time; if it isn't published yet
+you get a provider with only `"default"` in it and a `warning:` on stderr.
+That's a usable entry, not a broken one (see the sentinel note above) — but
+you can't pick a model until you rerun `install`. Staging is typically
+deployed separately from prod, so its bots and listings may lag.
+
+Merchant credits are per-environment too: load them on the staging wallet
+before expecting a completion to settle.
+
+**Code execution works too, transparently.** Every chat completion can run
+Python — the model can call a `run_python` tool backed by the "Run Python
+Code" listing, which owallet executes server-side (a second, real, paid
+Overpay order) and feeds the result back for another turn. OpenCode never
+sees the tool call; it just gets a normal answer that happens to have run
+code along the way. Each iteration that calls the tool is a separate paid
+order on top of the chat completion itself, capped at 10 iterations per
+request so a conversation that never converges can't spend without bound.
 
 ## OpenCode as a custom provider
 
