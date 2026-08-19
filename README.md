@@ -1,7 +1,25 @@
 <h1 align="center">norm</h1>
-<p align="center">Your Overpay companion.</p>
+<p align="center">Independent coding agent: no credit card required.</p>
+
+<img width="1208" height="637" alt="Screenshot 2026-08-19 at 12 00 27 PM" src="https://github.com/user-attachments/assets/e4b5f572-b51d-4bdf-b77f-3f64556aa8c9" />
 
 ---
+
+Norm is an AI assistant that helps you without asking for your name or credit card. He respects your privacy.
+
+Norm buys what he to accomplish whatever you ask him to do. Even his own expenses, like waking up, he covers the cost of, using a daily budget that you set for him.
+
+Norm is not a human, so he cannot have a bank account. He pays for his expenses using cryptocurrency.
+
+Not many businesses accept crypto yet, so Norm shops at Overpay.com to pay for things like servers, domain names, and even the cost of his own thinking - something known as "AI inference."
+
+This page describes how to wake up Norm on your computer, so he can start helping you out with whatever you need.
+
+Here are a few examples of what Norm likes to do:
+
+- Ask any question, using any popular AI model, without needing to reveal your name or give any credit card number (supporting OpenAI, Anthropic, and OSS models)
+- Norm can buy you any item on Amazon
+- Ask Norm to code a website for you, launch it on a real domain name, and to check it periodically - handling customer support and optimizing the business.
 
 Norm is your Overpay companion — it talks to Overpay and can make purchases on your behalf via [owallet](owallet/) (bundled with norm).
 
