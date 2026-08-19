@@ -213,6 +213,146 @@ async function owalletBinary(): Promise<string | undefined> {
 }
 
 /**
+ * `--staging`/`--dev` selector for spawned owallet commands; prod is
+ * owallet's flagless default. The staging/dev flags exist in dev-envs
+ * builds only — on a public build the child exits immediately with a usage
+ * error, which the callers surface as a failed step.
+ */
+function envFlagArgs(): string[] {
+  return owalletEnv() === "prod" ? [] : [`--${owalletEnv()}`]
+}
+
+function walletSetupFile() {
+  return path.join(Global.Path.data, "owallet-setup.json")
+}
+
+/** True when the user answered "no" to the first-run wallet setup offer. */
+export async function readWalletSetupDeclined(): Promise<boolean> {
+  const parsed = await fs
+    .readFile(walletSetupFile(), "utf8")
+    .then((text) => JSON.parse(text))
+    .catch(() => undefined)
+  return parsed?.declined === true
+}
+
+export async function recordWalletSetupDeclined(): Promise<void> {
+  await fs.writeFile(walletSetupFile(), JSON.stringify({ declined: true }, null, 2) + "\n")
+}
+
+/**
+ * True when the first-run wallet setup should be offered: the norm layer is
+ * on, no wallet database exists yet, an owallet binary is available to
+ * create one, and the user hasn't previously declined the offer.
+ */
+export async function needsWalletSetup(): Promise<boolean> {
+  if (disabled()) return false
+  if (existsSync(owalletDbPath())) return false
+  if (await readWalletSetupDeclined()) return false
+  return (await owalletBinary()) !== undefined
+}
+
+/** Run an owallet subcommand on the caller's terminal — prompts, seed-phrase output and all. */
+function runInteractive(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { stdio: "inherit", env })
+    child.on("error", () => resolve(1))
+    child.on("exit", (code) => resolve(code ?? 1))
+  })
+}
+
+/**
+ * First-run wallet setup: an owallet binary is present but there is no
+ * wallet database, so the bootstrap could neither start `owallet serve` nor
+ * mint a provider key — a fresh install would sit at "cannot connect" with
+ * no hint. Offer to run `owallet init` + `owallet generate` right here,
+ * before the TUI owns the terminal.
+ *
+ * The database password is collected once (an exported OWALLET_PASSWORD
+ * wins) and handed to the child commands, then kept in this process's env
+ * so the bootstrap that runs moments later can auto-start the server and
+ * mint the overpay key for this very session. `ask`/`askSecret` are
+ * injected by the CLI layer (UI.input / UI.inputSecret) so this module
+ * stays UI-free. A decline is recorded and not asked again; an aborted or
+ * failed setup is re-offered on the next launch.
+ */
+export async function firstRunWalletSetup(
+  ask: (prompt: string) => Promise<string>,
+  askSecret: (prompt: string) => Promise<string>,
+): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return
+  if (!(await needsWalletSetup())) return
+  const bin = (await owalletBinary())!
+  process.stderr.write(
+    [
+      "",
+      "norm routes the overpay provider through a local owallet server, but",
+      `there is no wallet database yet (${owalletDbPath()}).`,
+      "",
+      "Setting one up runs `owallet init` (choose the database password that",
+      "encrypts everything at rest) and `owallet generate` (mint a seed",
+      "phrase — write it down).",
+      "",
+    ].join("\n"),
+  )
+  const answer = (await ask("Set up the wallet now? [Y/n]: ")).trim().toLowerCase()
+  if (answer === "n" || answer === "no") {
+    await recordWalletSetupDeclined()
+    process.stderr.write(
+      `Skipping — run \`owallet init\` and \`owallet generate\` yourself when ready.\n` +
+        `(Delete ${walletSetupFile()} to see this offer again.)\n`,
+    )
+    return
+  }
+
+  let password = process.env.OWALLET_PASSWORD
+  if (!password) {
+    for (let attempt = 0; ; attempt++) {
+      const first = await askSecret("Choose a database password (encrypts the wallet at rest): ")
+      if (first) {
+        const confirm = await askSecret("Confirm database password: ")
+        if (confirm === first) {
+          password = first
+          break
+        }
+      }
+      if (attempt >= 2) {
+        process.stderr.write("Giving up — norm will offer wallet setup again on the next launch.\n")
+        return
+      }
+      process.stderr.write(first ? "Passwords did not match, try again.\n" : "Password cannot be empty, try again.\n")
+    }
+  }
+
+  // OWALLET_PASSWORD makes `init` non-interactive and unlocks the DB for
+  // `generate`; generate still prompts for the separate per-wallet (web
+  // admin) password and prints the seed phrase on the inherited terminal.
+  const env = { ...process.env, OWALLET_PASSWORD: password }
+  for (const step of ["init", "generate"]) {
+    const args = [...envFlagArgs(), step]
+    process.stderr.write(`\nRunning \`owallet ${args.join(" ")}\`...\n`)
+    const code = await runInteractive(bin, args, env)
+    if (code !== 0) {
+      process.stderr.write(
+        `\`owallet ${step}\` exited with code ${code} — norm will offer setup again on the next launch.\n`,
+      )
+      return
+    }
+  }
+
+  // Keep the password in this process's env: the bootstrap that runs next
+  // picks it up to start `owallet serve` and mint the provider key. It is
+  // not persisted anywhere — export it in the shell to keep auto-start
+  // working across launches.
+  process.env.OWALLET_PASSWORD = password
+  process.stderr.write(
+    "\nWallet ready. norm will now start `owallet serve` and mint an overpay\n" +
+      "provider key for this session. To keep that automatic across launches,\n" +
+      "export OWALLET_PASSWORD in your shell profile (or run `owallet serve`\n" +
+      "yourself before starting norm).\n",
+  )
+}
+
+/**
  * System-prompt addendum appended (by `SystemPrompt.provider`) whenever the
  * active model belongs to the overpay provider. The inherited opencode
  * prompts tell the model to answer capability questions from the opencode
@@ -461,11 +601,7 @@ async function ensureServer(base: string): Promise<boolean> {
   }
 
   const port = new URL(base).port || ENV_PORTS[owalletEnv()]
-  // prod is owallet's flagless default; staging/dev need their selector flag
-  // (dev-envs builds only — on a public build the child exits immediately
-  // with a usage error and the probe loop below reports the failure).
-  const envFlag = owalletEnv() === "prod" ? [] : [`--${owalletEnv()}`]
-  const args = [...envFlag, "serve", "--port", port]
+  const args = [...envFlagArgs(), "serve", "--port", port]
   const child = spawn(bin, args, {
     detached: true,
     stdio: "ignore",

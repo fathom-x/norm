@@ -127,6 +127,42 @@ export async function input(prompt: string): Promise<string> {
   })
 }
 
+/**
+ * Like `input`, but with no echo — for passwords. Reads raw keystrokes so
+ * nothing (not even asterisks) hits the terminal; backspace edits, Enter
+ * submits, Ctrl-C re-raises SIGINT after restoring the terminal.
+ */
+export function inputSecret(prompt: string): Promise<string> {
+  process.stdout.write(prompt)
+  const stdin = process.stdin
+  const wasRaw = stdin.isRaw
+  stdin.setRawMode?.(true)
+  stdin.resume()
+  return new Promise((resolve) => {
+    let value = ""
+    const finish = (result: string, signal?: NodeJS.Signals) => {
+      stdin.off("data", onData)
+      stdin.setRawMode?.(wasRaw ?? false)
+      stdin.pause()
+      process.stdout.write(EOL)
+      if (signal) process.kill(process.pid, signal)
+      resolve(result)
+    }
+    const onData = (chunk: Buffer) => {
+      for (const char of chunk.toString("utf8")) {
+        if (char === "\r" || char === "\n") return finish(value)
+        if (char === "\u0003") return finish("", "SIGINT")
+        if (char === "\u007f" || char === "\b") {
+          value = value.slice(0, -1)
+          continue
+        }
+        if (char >= " ") value += char
+      }
+    }
+    stdin.on("data", onData)
+  })
+}
+
 export function error(message: string) {
   if (message.startsWith("Error: ")) {
     message = message.slice("Error: ".length)
