@@ -11,6 +11,7 @@ pub mod progress;
 pub mod projection;
 pub mod render;
 pub mod state;
+pub mod timefmt;
 pub mod tools;
 pub mod transport;
 

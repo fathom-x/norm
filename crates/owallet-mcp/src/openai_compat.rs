@@ -705,7 +705,10 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
                       merchant-credit balances per seller, this request's remaining \
                       spending allowance, and this key's remaining daily budget \
                       (if one is set; it resets at midnight in the wallet's configured \
-                      timezone).",
+                      timezone). Results are point-in-time (see their as_of field) and \
+                      change with every order — when asked for current balances or \
+                      budget, call this again rather than reusing an earlier result \
+                      from the conversation.",
         spend: false,
         parameters: || json!({"type": "object", "properties": {}, "additionalProperties": false}),
     },
@@ -748,7 +751,9 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
         description: "List the wallet's recent orders, newest first — use this to find an \
                       order id when the user refers to an order without one (\"my pending \
                       order\"). Optional payment_status / fulfillment_status filters; pass \
-                      the returned next_cursor to page further back.",
+                      the returned next_cursor to page further back. Results are \
+                      point-in-time (see as_of) — re-call rather than reusing an earlier \
+                      result when asked for the current list.",
         spend: false,
         parameters: || {
             json!({
@@ -766,7 +771,9 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
     WalletToolSpec {
         name: GET_ORDER_STATUS_TOOL,
         description: "Check an order's payment and fulfillment status by order id — use \
-                      this to confirm a payment landed. Once the order is delivered, the \
+                      this to confirm a payment landed. Statuses are point-in-time (see \
+                      as_of); re-call for the current state rather than reusing an \
+                      earlier result. Once the order is delivered, the \
                       result includes the delivered content (the deliverable the buyer \
                       paid for), truncated if very large. URLs inside delivered content \
                       (images, downloads) are minted by the buyer's own marketplace host \
@@ -1036,6 +1043,26 @@ fn release_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) {
 /// Record key-budget spend knowable only after the fact (credit
 /// redemptions). Best-effort in the same direction as the in-memory
 /// ledger: an overshoot just makes the key refuse everything after.
+/// Stamp a projected wallet-tool result with the moment it was read, in
+/// the wallet's timezone. The /v1 conversation resends its full history
+/// every turn, so old tool results ride along forever — and a model with
+/// a balances snapshot in context will happily present it as current
+/// instead of re-calling the tool. A visible read-time makes staleness
+/// legible to the model and, when it slips through anyway, to the user
+/// reading the relayed answer.
+fn stamp_as_of(state: &McpState, mut out: Value) -> Value {
+    let tz_name = state
+        .db
+        .lock()
+        .ok()
+        .and_then(|db| db.read_timezone().ok().flatten());
+    let tz = crate::timefmt::wallet_tz(tz_name.as_deref());
+    if let Some(map) = out.as_object_mut() {
+        map.insert("as_of".into(), json!(crate::timefmt::as_of_now(tz)));
+    }
+    out
+}
+
 fn record_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) {
     let Some(id) = key_id else { return };
     let cents = usd_to_cents(amount_usd);
@@ -1151,6 +1178,9 @@ fn project_order_status(data: &Value) -> Value {
         "payment_status",
         "fulfillment_status",
         "total_usd",
+        // What the buyer actually paid after settlement refunds — a metered
+        // order's total_usd stays at the deposit, so show this alongside it.
+        "settled_amount_cents",
     ] {
         if let Some(v) = order.get(key) {
             out.insert(key.into(), v.clone());
@@ -1269,7 +1299,8 @@ async fn execute_wallet_tool(
             match crate::tools::dispatch(state, "get_account_info", json!({}), None).await {
                 Ok(out) => {
                     let key = read_key(state, key_id);
-                    project_balances(&out.data, ledger, key.as_ref()).to_string()
+                    stamp_as_of(state, project_balances(&out.data, ledger, key.as_ref()))
+                        .to_string()
                 }
                 Err(e) => json!({"error": e.to_string()}).to_string(),
             }
@@ -1289,7 +1320,7 @@ async fn execute_wallet_tool(
         LIST_ORDERS_TOOL => {
             match crate::tools::dispatch(state, "get_wallet_orders", arguments.clone(), None).await
             {
-                Ok(out) => project_orders_list(&out.data).to_string(),
+                Ok(out) => stamp_as_of(state, project_orders_list(&out.data)).to_string(),
                 Err(e) => json!({"error": e.to_string()}).to_string(),
             }
         }
@@ -1302,7 +1333,7 @@ async fn execute_wallet_tool(
                 obj.insert("include_delivered_content".into(), json!(true));
             }
             match crate::tools::dispatch(state, "get_order_status", dispatch_args, None).await {
-                Ok(out) => project_order_status(&out.data).to_string(),
+                Ok(out) => stamp_as_of(state, project_order_status(&out.data)).to_string(),
                 Err(e) => json!({"error": e.to_string()}).to_string(),
             }
         }
@@ -4125,6 +4156,18 @@ mod tests {
             assert!(!projected.contains(leak), "leaked {leak}: {projected}");
         }
         assert!(projected.contains("12.0"), "balances survive: {projected}");
+        {
+            // Volatile results carry the moment they were read, so a model
+            // resending history can't mistake an old snapshot for current.
+            let tmp = TempDir::new().unwrap();
+            let state = seeded_state("http://unused.test", &tmp);
+            let stamped = stamp_as_of(&state, project_balances(&account, &ledger, None));
+            let as_of = stamped.get("as_of").and_then(Value::as_str).unwrap_or("");
+            assert!(
+                as_of.ends_with("UTC"),
+                "as_of stamped in the wallet zone (UTC default): {stamped}"
+            );
+        }
         assert!(
             projected.contains("acme"),
             "credit holders survive: {projected}"
@@ -4136,7 +4179,7 @@ mod tests {
 
         let order = json!({"data": {
             "id": "ORD-1", "payment_status": "paid", "fulfillment_status": "delivered",
-            "total_usd": "$1.00",
+            "total_usd": "$1.00", "settled_amount_cents": 1,
             "settlement_tx_hash": "0xfeedface",
             "order_url": "https://overpay.example/orders/ORD-1",
         }});
@@ -4144,11 +4187,16 @@ mod tests {
         assert!(!projected.contains("0xfeedface"), "{projected}");
         assert!(!projected.contains("order_url"), "{projected}");
         assert!(projected.contains("ORD-1") && projected.contains("paid"));
+        assert!(
+            projected.contains("settled_amount_cents"),
+            "the settled charge survives: {projected}"
+        );
 
         let orders = json!({
             "data": [{
                 "id": "ORD-9", "product_title": "Widget", "payment_status": "pending",
                 "fulfillment_status": "pending", "total_usd": "$2.00",
+                "settled_amount_cents": 200,
                 "created_at": "2026-08-11T00:00:00Z",
                 "settlement_tx_hash": "0xcafebabe",
                 "order_url": "https://overpay.example/orders/ORD-9",

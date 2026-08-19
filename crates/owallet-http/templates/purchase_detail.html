@@ -44,7 +44,7 @@
   <h1>{{ title }} <span class="badge {{ badge_class }}">{{ status_label }}</span></h1>
   <table>
     {% for kv in meta %}
-      <tr><td>{{ kv.0 }}</td><td><code>{{ kv.1 }}</code></td></tr>
+      <tr><td>{{ kv.0 }}</td><td><code{% if !kv.2.is_empty() %} title="{{ kv.2 }}"{% endif %}>{{ kv.1 }}</code></td></tr>
     {% endfor %}
   </table>
 </div>

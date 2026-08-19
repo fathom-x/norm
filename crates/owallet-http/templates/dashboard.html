@@ -94,7 +94,7 @@
                   <button type="submit" class="button secondary">Update</button>
                 </form>
               </td>
-              <td>{{ key.created }}</td>
+              <td>{% if !key.created_age.is_empty() %}<span title="{{ key.created_age }}">{{ key.created }}</span>{% else %}{{ key.created }}{% endif %}</td>
               <td>
                 <form method="POST" action="/wallet/provider-keys/revoke" style="margin:0;"
                       onsubmit="return confirm('Revoke this provider API key?');">
