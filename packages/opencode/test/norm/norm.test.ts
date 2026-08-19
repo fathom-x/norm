@@ -25,6 +25,7 @@ beforeEach(async () => {
   process.env.HOME = home
   process.env.PATH = path.join(home, "elsewhere")
   await fs.rm(path.join(Global.Path.data, "owallet-binary.json"), { force: true })
+  await fs.rm(path.join(Global.Path.data, "owallet-setup.json"), { force: true })
 })
 
 afterEach(async () => {
@@ -35,6 +36,7 @@ afterEach(async () => {
   if (originalDisable === undefined) delete process.env.NORM_DISABLE
   else process.env.NORM_DISABLE = originalDisable
   await fs.rm(path.join(Global.Path.data, "owallet-binary.json"), { force: true })
+  await fs.rm(path.join(Global.Path.data, "owallet-setup.json"), { force: true })
   await fs.rm(home, { recursive: true, force: true })
 })
 
@@ -84,6 +86,31 @@ test("needsOwalletChoice once a pre-existing install appears and nothing is reco
   expect(await Norm.needsOwalletChoice()).toBe(true)
   await Norm.recordOwalletChoice("system")
   expect(await Norm.needsOwalletChoice()).toBe(false)
+})
+
+test("needsWalletSetup wants a binary, no DB, and no prior decline", async () => {
+  delete process.env.NORM_DISABLE
+  // No owallet binary anywhere: nothing could create the wallet.
+  expect(await Norm.needsWalletSetup()).toBe(false)
+  await makeBinary(bundled())
+  expect(await Norm.needsWalletSetup()).toBe(true)
+  // An existing wallet database means there is nothing to set up.
+  const db = path.join(home, ".owallet", "owallet.db")
+  await fs.mkdir(path.dirname(db), { recursive: true })
+  await fs.writeFile(db, "")
+  expect(await Norm.needsWalletSetup()).toBe(false)
+  // A recorded decline silences the offer for good.
+  await fs.rm(db)
+  expect(await Norm.needsWalletSetup()).toBe(true)
+  await Norm.recordWalletSetupDeclined()
+  expect(await Norm.needsWalletSetup()).toBe(false)
+  expect(await Norm.readWalletSetupDeclined()).toBe(true)
+})
+
+test("needsWalletSetup respects NORM_DISABLE", async () => {
+  process.env.NORM_DISABLE = "1"
+  await makeBinary(bundled())
+  expect(await Norm.needsWalletSetup()).toBe(false)
 })
 
 test("needsOwalletChoice respects NORM_DISABLE", async () => {
