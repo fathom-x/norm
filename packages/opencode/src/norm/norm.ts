@@ -238,7 +238,11 @@ export function systemPrompt(): string {
     "  tools; do not fetch opencode docs for that.",
     "- Every chat turn and every server-side tool execution spends real money",
     "  from the user's wallet (bounded by per-key budgets and spend caps), so",
-    "  avoid redundant tool calls.",
+    "  avoid redundant tool calls — but a fresh read of volatile state is not",
+    "  redundant: wallet balances, budgets, and order statuses change with",
+    "  every order, and results in earlier turns are stale (each carries an",
+    "  as_of timestamp). When the user asks for current values, call the tool",
+    "  again; never answer from a previous tool result.",
     "- The `owallet` MCP server is also attached client-side for wallet",
     "  operations (balances, orders, marketplace browsing).",
   ].join("\n")
@@ -319,6 +323,108 @@ function isLoopback(base: string) {
   }
 }
 
+/** "owallet 0.1.2" → [0, 1, 2]; undefined for anything unparsable. */
+function parseVersion(s: string | undefined): number[] | undefined {
+  const m = s?.match(/(\d+)\.(\d+)\.(\d+)/)
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : undefined
+}
+
+function versionLess(a: number[], b: number[]): boolean {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] < b[i]
+  }
+  return false
+}
+
+/** The local binary's version via `owallet --version`. */
+function binaryVersion(bin: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    execFile(bin, ["--version"], { timeout: 10_000 }, (error, stdout) => {
+      resolve(error ? undefined : stdout.trim())
+    })
+  })
+}
+
+/** The running serve's version via GET /health; undefined for serves predating the endpoint. */
+async function serveVersion(base: string, timeoutMs = 1500): Promise<string | undefined> {
+  try {
+    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(timeoutMs) })
+    if (!res.ok) return undefined
+    const body: any = await res.json().catch(() => undefined)
+    return typeof body?.version === "string" ? body.version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** PIDs listening on a local TCP port (POSIX only — lsof). */
+function portListeners(port: string): Promise<number[]> {
+  return new Promise((resolve) => {
+    execFile("lsof", ["-ti", `tcp:${port}`, "-sTCP:LISTEN"], { timeout: 5_000 }, (error, stdout) => {
+      if (error) {
+        resolve([])
+        return
+      }
+      resolve(
+        stdout
+          .split("\n")
+          .map((line) => Number(line.trim()))
+          .filter((pid) => Number.isInteger(pid) && pid > 0),
+      )
+    })
+  })
+}
+
+/**
+ * A serve that's already answering may be running an *older* binary than the
+ * one on disk: the installer replaces the file, but a running process keeps
+ * executing the old code, and the reuse check in `ensureServer` would keep
+ * picking it forever (this is how a 0.1.1 serve kept mis-counting budgets
+ * after the 0.1.2 upgrade). When the running serve reports a version older
+ * than the local binary — or none at all, which means it predates the
+ * /health endpoint — bring it down so the normal spawn path below starts
+ * the current binary.
+ *
+ * Only attempted when this bootstrap could actually respawn afterwards
+ * (loopback URL, binary + DB + OWALLET_PASSWORD present, POSIX for lsof);
+ * otherwise killing would trade a stale serve for none. Returns true when
+ * the old serve was brought down and the port is free again.
+ */
+async function restartIfStale(base: string): Promise<boolean> {
+  if (!isLoopback(base)) return false
+  if (process.platform === "win32") return false
+  const bin = await owalletBinary()
+  if (!bin || !existsSync(owalletDbPath()) || !process.env.OWALLET_PASSWORD) return false
+
+  const binVer = parseVersion(await binaryVersion(bin))
+  if (!binVer) return false
+  const runningVer = parseVersion(await serveVersion(base))
+  if (runningVer && !versionLess(runningVer, binVer)) return false
+
+  const port = new URL(base).port || ENV_PORTS[owalletEnv()]
+  const pids = await portListeners(port)
+  if (!pids.length) {
+    debug(`owallet at ${base} looks stale but no listener found on port ${port} — leaving it`)
+    return false
+  }
+  debug(
+    `owallet serve at ${base} is ${runningVer ? runningVer.join(".") : "pre-/health (old)"} ` +
+      `but the binary is ${binVer.join(".")} — restarting (pids ${pids.join(", ")})`,
+  )
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM")
+    } catch {}
+  }
+  const deadline = Date.now() + 4000
+  while (Date.now() < deadline) {
+    if (!(await probe(base, 400))) return true
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+  debug("old owallet serve did not exit within 4s — leaving it running")
+  return false
+}
+
 /**
  * Bring up `owallet serve` when it isn't running. Only possible when all of:
  * the URL is loopback (spawning locally for a remote URL makes no sense), the
@@ -326,10 +432,16 @@ function isLoopback(base: string) {
  * one), and OWALLET_PASSWORD is set — without it the child would try to
  * prompt on /dev/tty and fight the TUI for the terminal.
  *
+ * A serve that is already answering is reused — unless it turns out to be
+ * running an older version than the binary on disk, in which case
+ * `restartIfStale` brings it down first and the spawn path below replaces it.
+ *
  * Returns whether owallet is reachable afterwards.
  */
 async function ensureServer(base: string): Promise<boolean> {
-  if (await probe(base)) return true
+  if (await probe(base)) {
+    if (!(await restartIfStale(base))) return true
+  }
   if (!isLoopback(base)) {
     debug(`owallet at ${base} is not reachable and not loopback — not spawning`)
     return false
