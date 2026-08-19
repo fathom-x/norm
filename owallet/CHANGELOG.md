@@ -4,6 +4,28 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+## 0.1.3
+
+### Buyer-facing polish for metered orders (fathom-x/overpay#413)
+
+- **`GET /health`** — unauthenticated liveness + version probe. norm's
+  bootstrap compares it against the on-disk binary to restart a stale
+  running serve (replacing the binary never touched the running
+  process); serves predating the endpoint read as stale by the same
+  logic.
+- **`as_of` stamps on volatile `/v1` wallet-tool results**
+  (`get_balances` / `list_orders` / `get_order_status`), in the
+  wallet's timezone, plus point-in-time wording in the tool
+  descriptions — so a model resending conversation history stops
+  presenting an old balances snapshot as current.
+- **Dashboard timestamps render in the wallet's timezone** with the
+  zone abbreviation and a "3 minutes ago" hover title (purchases list,
+  order detail, provider keys). The `timefmt` helpers live in
+  owallet-mcp, shared by the dashboard and the `/v1` projections.
+- **`settled_amount_cents` passes through the order projections** — a
+  metered order's face value stays at the deposit, so wallets can now
+  show what the buyer actually paid after settlement refunds.
+
 ## 0.1.2
 
 ### Key budgets net out metered settlement refunds

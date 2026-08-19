@@ -56,8 +56,10 @@ pub struct ProviderKeyListRow {
     pub key: String,
     /// Who minted it: "dashboard" / "browser login" ("—" when unknown).
     pub label: String,
-    /// Pre-formatted `YYYY-MM-DD HH:MM UTC`.
+    /// Pre-formatted `YYYY-MM-DD HH:MM <zone>` in the wallet's timezone.
     pub created: String,
+    /// "3 days ago" hover title for `created`; empty when unknown.
+    pub created_age: String,
     /// Capability badge: "chat" or "chat + spend".
     pub scopes: String,
     /// Pre-formatted daily-budget summary: "no limit" or
@@ -134,6 +136,8 @@ pub struct PurchaseListRow {
     pub status_label: String,
     pub amount: String,
     pub when: String,
+    /// "3 minutes ago" hover title for `when`; empty when unknown.
+    pub when_age: String,
 }
 
 #[derive(Template)]
@@ -152,7 +156,9 @@ pub struct PurchaseDetailTemplate {
     pub title: String,
     pub badge_class: String,
     pub status_label: String,
-    pub meta: Vec<(String, String)>,
+    /// (label, value, hover title) — the title carries "how long ago" for
+    /// timestamp rows and is empty (attribute skipped) everywhere else.
+    pub meta: Vec<(String, String, String)>,
     /// Pre-rendered, escaped buyer-note HTML (what the buyer submitted with
     /// the order) — injected with `|safe`; empty when the snapshot has none.
     pub buyer_input_html: String,

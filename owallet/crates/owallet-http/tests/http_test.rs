@@ -79,6 +79,16 @@ async fn wallet_redirects_to_login_when_anonymous() {
 }
 
 #[tokio::test]
+async fn health_reports_name_and_version_without_auth() {
+    let h = harness();
+    let res = h.server.get("/health").await;
+    res.assert_status_ok();
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["name"], "owallet");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[tokio::test]
 async fn login_page_renders() {
     let h = harness();
     let res = h.server.get("/wallet/login").await;
