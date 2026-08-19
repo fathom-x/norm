@@ -1,105 +1,72 @@
-<p align="center">
-  <a href="https://opencode.ai">
-    <picture>
-      <source srcset="packages/console/app/src/asset/logo-ornate-dark.svg" media="(prefers-color-scheme: dark)">
-      <source srcset="packages/console/app/src/asset/logo-ornate-light.svg" media="(prefers-color-scheme: light)">
-      <img src="packages/console/app/src/asset/logo-ornate-light.svg" alt="OpenCode logo">
-    </picture>
-  </a>
-</p>
-<p align="center">The open source AI coding agent.</p>
-<p align="center">
-  <a href="https://opencode.ai/discord"><img alt="Discord" src="https://img.shields.io/discord/1391832426048651334?style=flat-square&label=discord" /></a>
-  <a href="https://www.npmjs.com/package/opencode-ai"><img alt="npm" src="https://img.shields.io/npm/v/opencode-ai?style=flat-square" /></a>
-  <a href="https://github.com/anomalyco/opencode/actions/workflows/publish.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/anomalyco/opencode/publish.yml?style=flat-square&branch=dev" /></a>
-</p>
+<h1 align="center">norm</h1>
+<p align="center">Independent coding agent: no credit card required.</p>
 
-<p align="center">
-  <a href="README.md">English</a> |
-  <a href="README.zh.md">简体中文</a> |
-  <a href="README.zht.md">繁體中文</a> |
-  <a href="README.ko.md">한국어</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.es.md">Español</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.it.md">Italiano</a> |
-  <a href="README.da.md">Dansk</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.pl.md">Polski</a> |
-  <a href="README.ru.md">Русский</a> |
-  <a href="README.bs.md">Bosanski</a> |
-  <a href="README.ar.md">العربية</a> |
-  <a href="README.no.md">Norsk</a> |
-  <a href="README.br.md">Português (Brasil)</a> |
-  <a href="README.th.md">ไทย</a> |
-  <a href="README.tr.md">Türkçe</a> |
-  <a href="README.uk.md">Українська</a> |
-  <a href="README.bn.md">বাংলা</a> |
-  <a href="README.gr.md">Ελληνικά</a> |
-  <a href="README.vi.md">Tiếng Việt</a>
-</p>
-
-[![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://opencode.ai)
+<img width="1208" height="637" alt="Screenshot 2026-08-19 at 12 00 27 PM" src="https://github.com/user-attachments/assets/e4b5f572-b51d-4bdf-b77f-3f64556aa8c9" />
 
 ---
+
+Norm is an AI assistant that helps you without asking for your name or credit card. He respects your privacy.
+
+Norm buys what he needs to accomplish whatever you ask him to do. Even his own expenses, like waking up, he covers the cost of, using a daily budget that you set for him.
+
+Norm is not a human, so he cannot have a bank account. He pays for his expenses using cryptocurrency.
+
+Not many businesses accept crypto yet, so Norm shops at Overpay.com to pay for things like servers, domain names, and even the cost of his own thinking - something known as "AI inference."
+
+This page describes how to wake up Norm on your computer, so he can start helping you out with whatever you need.
+
+Here are a few examples of what Norm likes to do:
+
+- Ask any question, using any popular AI model, without needing to reveal your name or give any credit card number (supporting OpenAI, Anthropic, and OSS models)
+- Norm can buy you any item on Amazon
+- Ask Norm to code a website for you, launch it on a real domain name, and to check it periodically - handling customer support and optimizing the business.
+
+Norm is a fork of [opencode](https://opencode.ai), the open source AI coding agent, so everything opencode can do, norm can do too. His purchases go through [owallet](owallet/), which comes bundled with norm.
 
 ### Installation
 
 ```bash
-# YOLO
-curl -fsSL https://opencode.ai/install | bash
-
-# Package managers
-npm i -g opencode-ai@latest        # or bun/pnpm/yarn
-scoop install opencode             # Windows
-choco install opencode             # Windows
-brew install anomalyco/tap/opencode # macOS and Linux (recommended, always up to date)
-brew install opencode              # macOS and Linux (official brew formula, updated less)
-sudo pacman -S opencode            # Arch Linux (Stable)
-paru -S opencode-bin               # Arch Linux (Latest from AUR)
-mise use -g opencode               # Any OS
-nix run nixpkgs#opencode           # or github:anomalyco/opencode for latest dev branch
+curl -fsSL https://raw.githubusercontent.com/fathom-x/norm/main/install | bash
 ```
 
-> [!TIP]
-> Remove versions older than 0.1.x before installing.
+> [!NOTE]
+> While this repo is private, both the script fetch and the release download need a token with repo read access:
+>
+> ```bash
+> curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+>   https://raw.githubusercontent.com/fathom-x/norm/main/install \
+>   | GITHUB_TOKEN=$GITHUB_TOKEN bash
+> ```
 
-### Desktop App (BETA)
+### Getting started
 
-OpenCode is also available as a desktop application. Download directly from the [releases page](https://github.com/anomalyco/opencode/releases) or [opencode.ai/download](https://opencode.ai/download).
-
-| Platform              | Download                           |
-| --------------------- | ---------------------------------- |
-| macOS (Apple Silicon) | `opencode-desktop-mac-arm64.dmg`   |
-| macOS (Intel)         | `opencode-desktop-mac-x64.dmg`     |
-| Windows               | `opencode-desktop-windows-x64.exe` |
-| Linux                 | `.deb`, `.rpm`, or `.AppImage`     |
+After norm is installed, initialize owallet:
 
 ```bash
-# macOS (Homebrew)
-brew install --cask opencode-desktop
-# Windows (Scoop)
-scoop bucket add extras; scoop install extras/opencode-desktop
+owallet init
 ```
 
-#### Installation Directory
+That will set up your `OWALLET_PASSWORD`, which is used to unlock and authorize funds.
 
-The install script respects the following priority order for the installation path:
-
-1. `$OPENCODE_INSTALL_DIR` - Custom installation directory
-2. `$XDG_BIN_DIR` - XDG Base Directory Specification compliant path
-3. `$HOME/bin` - Standard user binary directory (if it exists or can be created)
-4. `$HOME/.opencode/bin` - Default fallback
+Then create a spending account:
 
 ```bash
-# Examples
-OPENCODE_INSTALL_DIR=/usr/local/bin curl -fsSL https://opencode.ai/install | bash
-XDG_BIN_DIR=$HOME/.local/bin curl -fsSL https://opencode.ai/install | bash
+owallet generate
+```
+
+That generates a seed phrase which you **must write down!**
+
+Now you're ready to use norm:
+
+```bash
+export OWALLET_PASSWORD=...
+
+norm
 ```
 
 ### Agents
 
-OpenCode includes two built-in agents you can switch between with the `Tab` key.
+Norm includes two built-in agents you can switch between with the `Tab` key.
 
 - **build** - Default, full-access agent for development work
 - **plan** - Read-only agent for analysis and code exploration
@@ -110,20 +77,10 @@ OpenCode includes two built-in agents you can switch between with the `Tab` key.
 Also included is a **general** subagent for complex searches and multistep tasks.
 This is used internally and can be invoked using `@general` in messages.
 
-Learn more about [agents](https://opencode.ai/docs/agents).
-
 ### Documentation
 
-For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).
+Norm keeps opencode's configuration surface (`opencode.json`, `.opencode/` dirs, `OPENCODE_*` env vars), so the [opencode docs](https://opencode.ai/docs) apply. For the norm layer itself — the Overpay provider, the owallet MCP server, and its env knobs — see [CLAUDE.md](CLAUDE.md) and [owallet/README.md](owallet/).
 
 ### Contributing
 
-If you're interested in contributing to OpenCode, please read our [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
-
-### Building on OpenCode
-
-If you are working on a project that's related to OpenCode and is using "opencode" as part of its name, for example "opencode-dashboard" or "opencode-mobile", please add a note to your README to clarify that it is not built by the OpenCode team and is not affiliated with us in any way.
-
----
-
-**Join our community** [Discord](https://discord.gg/opencode) | [X.com](https://x.com/opencode)
+If you're interested in contributing, please read the [contributing docs](./CONTRIBUTING.md) before submitting a pull request.
