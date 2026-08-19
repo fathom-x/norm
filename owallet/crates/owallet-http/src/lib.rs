@@ -44,7 +44,9 @@ use owallet_mcp::McpState;
 /// Build the axum router with just the dashboard routes. The same router
 /// can be driven from `axum_test::TestServer` in integration tests.
 pub fn build_router(state: AppState) -> Router {
-    dashboard_routes(state.clone()).with_state(state)
+    dashboard_routes(state.clone())
+        .with_state(state)
+        .route("/health", get(health))
 }
 
 /// EVM config injected into [`build_full_router`]. The MCP `send_usdc`
@@ -116,11 +118,23 @@ pub fn build_full_router(state: AppState, issuer_url: String) -> Router {
         None => AuthResult::Anonymous,
     });
 
-    dashboard_routes(state.clone())
-        .with_state(state)
+    build_router(state)
         .merge(oauth_as::router(oauth))
         .nest("/v1", owallet_mcp::openai_compat::router(mcp.clone()))
         .nest("/mcp", mcp_router_with_auth(mcp, auth))
+}
+
+/// Unauthenticated liveness + version probe. norm's bootstrap uses the
+/// reported version to decide whether an already-running serve is older
+/// than the binary on disk (replacing the file doesn't touch the running
+/// process) and should be restarted; serves predating this endpoint are
+/// treated as stale by the same logic. Name and version only — nothing
+/// wallet-specific leaks here.
+async fn health() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "name": "owallet",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 fn dashboard_routes(state: AppState) -> Router<AppState> {

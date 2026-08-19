@@ -89,6 +89,7 @@ pub(crate) fn order_summary_row(order: &Value) -> Value {
         "payment_status",
         "fulfillment_status",
         "total_usd",
+        "settled_amount_cents",
         "created_at",
     ] {
         if let Some(v) = order.get(key) {
@@ -114,6 +115,7 @@ pub(crate) fn order_detail(order: &Value) -> Value {
         "payment_status",
         "fulfillment_status",
         "total_usd",
+        "settled_amount_cents",
         "created_at",
         "paid_at",
         "delivered_at",
