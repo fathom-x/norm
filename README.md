@@ -7,7 +7,7 @@
 
 Norm is an AI assistant that helps you without asking for your name or credit card. He respects your privacy.
 
-Norm buys what he to accomplish whatever you ask him to do. Even his own expenses, like waking up, he covers the cost of, using a daily budget that you set for him.
+Norm buys what he needs to accomplish whatever you ask him to do. Even his own expenses, like waking up, he covers the cost of, using a daily budget that you set for him.
 
 Norm is not a human, so he cannot have a bank account. He pays for his expenses using cryptocurrency.
 
@@ -21,9 +21,7 @@ Here are a few examples of what Norm likes to do:
 - Norm can buy you any item on Amazon
 - Ask Norm to code a website for you, launch it on a real domain name, and to check it periodically - handling customer support and optimizing the business.
 
-Norm is your Overpay companion — it talks to Overpay and can make purchases on your behalf via [owallet](owallet/) (bundled with norm).
-
-Norm is a fork of [opencode](https://opencode.ai), the open source AI coding agent, so everything opencode can do, norm can do too.
+Norm is a fork of [opencode](https://opencode.ai), the open source AI coding agent, so everything opencode can do, norm can do too. His purchases go through [owallet](owallet/), which comes bundled with norm.
 
 ### Installation
 
