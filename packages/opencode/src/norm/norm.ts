@@ -238,7 +238,11 @@ export function systemPrompt(): string {
     "  tools; do not fetch opencode docs for that.",
     "- Every chat turn and every server-side tool execution spends real money",
     "  from the user's wallet (bounded by per-key budgets and spend caps), so",
-    "  avoid redundant tool calls.",
+    "  avoid redundant tool calls — but a fresh read of volatile state is not",
+    "  redundant: wallet balances, budgets, and order statuses change with",
+    "  every order, and results in earlier turns are stale (each carries an",
+    "  as_of timestamp). When the user asks for current values, call the tool",
+    "  again; never answer from a previous tool result.",
     "- The `owallet` MCP server is also attached client-side for wallet",
     "  operations (balances, orders, marketplace browsing).",
   ].join("\n")
