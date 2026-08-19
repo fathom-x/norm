@@ -47,6 +47,9 @@ pub async fn dashboard(
             SessionRole::Admin => default_npub.clone(),
         };
 
+        let timezone = db.read_timezone()?.unwrap_or_else(|| "UTC".to_string());
+        let tz = owallet_mcp::timefmt::wallet_tz(Some(&timezone));
+        let now = time::OffsetDateTime::now_utc();
         let provider_keys = active_npub
             .as_deref()
             .map(|npub| db.list_provider_keys(npub))
@@ -61,7 +64,8 @@ pub async fn dashboard(
                     .map(|p| format!("{p}…"))
                     .unwrap_or_else(|| "—".to_string()),
                 label: key.label.clone().unwrap_or_else(|| "—".to_string()),
-                created: format_timestamp(key.created_at),
+                created: owallet_mcp::timefmt::format_in_tz(Some(key.created_at), tz),
+                created_age: owallet_mcp::timefmt::relative_age(Some(key.created_at), now),
                 scopes: if key.can_spend() {
                     "chat + spend".to_string()
                 } else {
@@ -84,7 +88,6 @@ pub async fn dashboard(
             })
             .collect();
 
-        let timezone = db.read_timezone()?.unwrap_or_else(|| "UTC".to_string());
         let spend_cap_input = db
             .read_spend_cap_usd_cents()?
             .map(|c| format!("{}.{:02}", c / 100, (c % 100).abs()))
@@ -234,17 +237,5 @@ async fn fetch_balance_strings(evm: &crate::EvmConfig, address: &str) -> Balance
         chain_name: Some(chain.name.to_string()),
         eth: Some(eth),
         usdc: Some(usdc),
-    }
-}
-
-// Same rendering as the purchases page's timestamps.
-fn format_timestamp(ts: i64) -> String {
-    use time::macros::format_description;
-    match time::OffsetDateTime::from_unix_timestamp(ts).ok() {
-        Some(dt) => {
-            let fmt = format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
-            dt.format(&fmt).unwrap_or_else(|_| "—".to_string())
-        }
-        None => "—".to_string(),
     }
 }

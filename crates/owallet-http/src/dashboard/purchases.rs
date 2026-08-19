@@ -14,7 +14,6 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use owallet_db::PurchaseRow;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use time::macros::format_description;
 use time::OffsetDateTime;
 
 use super::{current_session, redirect_to_login};
@@ -65,7 +64,7 @@ pub async fn list_get(
         );
     };
 
-    let (purchases, count) = {
+    let (purchases, count, timezone) = {
         let db = state
             .db
             .lock()
@@ -73,13 +72,17 @@ pub async fn list_get(
         (
             db.list_purchases(&npub, 200, 0, None)?,
             db.count_purchases(&npub)?,
+            db.read_timezone()?,
         )
     };
 
+    let tz = owallet_mcp::timefmt::wallet_tz(timezone.as_deref());
+    let now = OffsetDateTime::now_utc();
     let rows: Vec<PurchaseListRow> = purchases
         .iter()
         .map(|p| {
             let (badge_class, status_label) = status_badge(p.fulfillment_status.as_deref());
+            let when_ts = p.delivered_at.or(p.paid_at).or(Some(p.cached_at));
             PurchaseListRow {
                 order_id: p.order_id.clone(),
                 title: p.title.clone().unwrap_or_else(|| p.order_id.clone()),
@@ -87,7 +90,8 @@ pub async fn list_get(
                 badge_class,
                 status_label,
                 amount: format_dollars(p.total_usd_cents),
-                when: format_timestamp(p.delivered_at.or(p.paid_at).or(Some(p.cached_at))),
+                when: owallet_mcp::timefmt::format_in_tz(when_ts, tz),
+                when_age: owallet_mcp::timefmt::relative_age(when_ts, now),
             }
         })
         .collect();
@@ -168,12 +172,12 @@ pub async fn detail_get(
         return Ok(Html("<h2>No active wallet.</h2>".to_string()).into_response());
     };
 
-    let record = {
+    let (record, timezone) = {
         let db = state
             .db
             .lock()
             .map_err(|e| AppError::Internal(format!("db mutex poisoned: {e}")))?;
-        db.read_purchase(&npub, &order_id)?
+        (db.read_purchase(&npub, &order_id)?, db.read_timezone()?)
     };
     let Some(record) = record else {
         return Ok(Html(
@@ -185,14 +189,25 @@ pub async fn detail_get(
     };
 
     let (badge_class, status_label) = status_badge(record.fulfillment_status.as_deref());
+    let tz = owallet_mcp::timefmt::wallet_tz(timezone.as_deref());
+    let now = OffsetDateTime::now_utc();
+    let timestamp_row = |label: &str, ts: Option<i64>| {
+        (
+            label.to_string(),
+            owallet_mcp::timefmt::format_in_tz(ts, tz),
+            owallet_mcp::timefmt::relative_age(ts, now),
+        )
+    };
     let meta = vec![
         (
             "Seller".into(),
             record.seller.clone().unwrap_or_else(|| "—".into()),
+            String::new(),
         ),
         (
             "Payment status".into(),
             record.payment_status.clone().unwrap_or_else(|| "—".into()),
+            String::new(),
         ),
         (
             "Fulfillment status".into(),
@@ -200,11 +215,16 @@ pub async fn detail_get(
                 .fulfillment_status
                 .clone()
                 .unwrap_or_else(|| "—".into()),
+            String::new(),
         ),
-        ("Amount".into(), format_dollars(record.total_usd_cents)),
-        ("Paid at".into(), format_timestamp(record.paid_at)),
-        ("Delivered at".into(), format_timestamp(record.delivered_at)),
-        ("Order ID".into(), record.order_id.clone()),
+        (
+            "Amount".into(),
+            format_dollars(record.total_usd_cents),
+            String::new(),
+        ),
+        timestamp_row("Paid at", record.paid_at),
+        timestamp_row("Delivered at", record.delivered_at),
+        ("Order ID".into(), record.order_id.clone(), String::new()),
     ];
 
     let tpl = PurchaseDetailTemplate {
@@ -250,16 +270,6 @@ fn status_badge(status: Option<&str>) -> (String, String) {
 fn format_dollars(cents: Option<i64>) -> String {
     match cents {
         Some(c) => format!("${:.2}", c as f64 / 100.0),
-        None => "—".to_string(),
-    }
-}
-
-fn format_timestamp(ts: Option<i64>) -> String {
-    match ts.and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok()) {
-        Some(dt) => {
-            let fmt = format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
-            dt.format(&fmt).unwrap_or_else(|_| "—".to_string())
-        }
         None => "—".to_string(),
     }
 }

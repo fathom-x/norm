@@ -163,8 +163,10 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   `timezone`, IANA name, default UTC; `time-tz` bundles the tz database
   and is compatible with the workspace's `time =0.3.37` pin) — set from
   the dashboard's "Time zone" card (`POST /wallet/settings/timezone`),
-  validated by `owallet_db::timezone_is_valid`; it currently governs only
-  the budget window, while timestamp display stays UTC. Rows are
+  validated by `owallet_db::timezone_is_valid`; it governs the budget
+  window and dashboard timestamp display (`owallet-http/src/timefmt.rs`
+  renders wallet-local times with the zone abbreviation and a relative-age
+  hover title). Rows are
   normalized at read time (the SELECT zeroes spend from a past window),
   so `spent_usd_cents` on a `ProviderKeyRow` is always *today's* spend —
   but keep call sites on `spent_today_usd_cents()` /
@@ -311,8 +313,9 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   `delivered_content` >2 KB; `list/get/sync_purchases` tools + the
   `/wallet/purchases` dashboard read it. Timestamp coercion (int or
   ISO-8601 → unix) uses the `time` crate (parsing feature) in
-  owallet-db; owallet-http uses `time` (formatting) for the
-  `YYYY-MM-DD HH:MM UTC` display.
+  owallet-db; owallet-http formats dashboard
+  timestamps in the wallet's timezone via `timefmt.rs` (`time` +
+  `time-tz`).
 
 ## Zcash (owallet-zcash)
 
