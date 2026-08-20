@@ -12,6 +12,10 @@ const id = "internal:sidebar-owallet"
 // free on the owallet side (EVM RPC + a live Overpay fetch + a Zcash
 // sync-on-read), so this stays on the order of a minute.
 const POLL_MS = 60_000
+// Until the first successful read, failures retry faster: the bootstrap
+// may still be starting the serve / minting the provider key when this
+// widget mounts, and none of the failure modes below cost a status read.
+const RETRY_MS = 10_000
 const FETCH_TIMEOUT_MS = 15_000
 
 // Deliberately duplicated from packages/opencode/src/norm/norm.ts
@@ -60,15 +64,52 @@ type OwalletStatus = {
   }
 }
 
-async function fetchStatus(base: string): Promise<OwalletStatus | undefined> {
+/** Why the last status read produced no data — each failure mode renders
+ * its own hint line so a blank widget is never a mystery. */
+type FetchOutcome =
+  | { kind: "ok"; status: OwalletStatus }
+  | { kind: "no-key" }
+  | { kind: "http"; code: number }
+  | { kind: "invalid" }
+  | { kind: "timeout" }
+  | { kind: "unreachable" }
+
+async function fetchStatus(base: string): Promise<FetchOutcome> {
   const key = await readProviderKey()
-  if (!key) return undefined
-  const response = await fetch(`${base}/v1/status`, {
-    headers: { Authorization: `Bearer ${key}` },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  }).catch(() => undefined)
-  if (!response?.ok) return undefined
-  return response.json().catch(() => undefined)
+  if (!key) return { kind: "no-key" }
+  let response: Response
+  try {
+    response = await fetch(`${base}/v1/status`, {
+      headers: { Authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    })
+  } catch (error) {
+    return (error as Error)?.name === "TimeoutError" ? { kind: "timeout" } : { kind: "unreachable" }
+  }
+  if (!response.ok) return { kind: "http", code: response.status }
+  const body = await response.json().catch(() => undefined)
+  if (!body || typeof body !== "object") return { kind: "invalid" }
+  return { kind: "ok", status: body }
+}
+
+function stateLine(outcome: FetchOutcome | undefined): string | undefined {
+  if (!outcome) return undefined
+  switch (outcome.kind) {
+    case "ok":
+      return undefined
+    case "no-key":
+      return "no provider key — norm auth login"
+    case "http":
+      if (outcome.code === 401 || outcome.code === 403) return "provider key rejected — norm auth login"
+      if (outcome.code === 404) return "status needs owallet ≥ 0.1.4"
+      return `status error (HTTP ${outcome.code})`
+    case "invalid":
+      return "unexpected status response"
+    case "timeout":
+      return "status timed out — will retry"
+    case "unreachable":
+      return "owallet not reachable"
+  }
 }
 
 function usd(value: number | null | undefined) {
@@ -80,15 +121,33 @@ function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const base = owalletUrl()
   const dashboard = `${base}/wallet`
+  // The last successful read survives later failures, so stale data stays
+  // on screen (with the failure line under it) instead of vanishing.
   const [status, setStatus] = createSignal<OwalletStatus | undefined>(undefined)
+  const [outcome, setOutcome] = createSignal<FetchOutcome | undefined>(undefined)
 
-  const refresh = () => void fetchStatus(base).then((next) => next && setStatus(next))
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let disposed = false
+  const refresh = () =>
+    void fetchStatus(base).then((next) => {
+      if (disposed) return
+      setOutcome(next)
+      if (next.kind === "ok") setStatus(next.status)
+      // A timeout means the serve is mid-read (Zcash sync) — hammering it
+      // with retries only queues more of the same expensive read.
+      const failedCheaply = next.kind !== "ok" && next.kind !== "timeout"
+      timer = setTimeout(refresh, failedCheaply && !status() ? RETRY_MS : POLL_MS)
+    })
   refresh()
-  const timer = setInterval(refresh, POLL_MS)
-  onCleanup(() => clearInterval(timer))
+  onCleanup(() => {
+    disposed = true
+    if (timer) clearTimeout(timer)
+  })
 
   const credits = () => status()?.merchant_credits?.filter((row) => (row.balance_cents ?? 0) > 0) ?? []
   const budget = () => status()?.key_budget
+  const waiting = () => status() === undefined
+  const error = () => stateLine(outcome())
 
   return (
     <box>
@@ -97,6 +156,9 @@ function View(props: { api: TuiPluginApi }) {
       </text>
       <Show when={status()?.usdc_balance !== undefined}>
         <text fg={theme().textMuted}>{status()!.usdc_balance} USDC</text>
+      </Show>
+      <Show when={status()?.eth_balance !== undefined}>
+        <text fg={theme().textMuted}>{status()!.eth_balance} ETH</text>
       </Show>
       <Show when={status()?.zec_balance !== undefined}>
         <text fg={theme().textMuted}>{String(status()!.zec_balance)} ZEC</text>
@@ -112,11 +174,33 @@ function View(props: { api: TuiPluginApi }) {
           </text>
         )}
       </For>
-      <Show when={budget()?.daily_budget_usd != null}>
-        <text fg={theme().textMuted}>
-          budget <span style={{ fg: theme().text }}>{usd(budget()!.spent_today_usd ?? 0)}</span> /{" "}
-          {usd(budget()!.daily_budget_usd)} today
-        </text>
+      <Show when={status()?.merchant_credits !== undefined && credits().length === 0}>
+        <text fg={theme().textMuted}>no merchant credits</text>
+      </Show>
+      <Show when={budget()}>
+        <Show
+          when={budget()!.daily_budget_usd != null}
+          fallback={
+            <text fg={theme().textMuted}>
+              budget <span style={{ fg: theme().text }}>{usd(budget()!.spent_today_usd ?? 0)}</span> today · no limit
+            </text>
+          }
+        >
+          <text fg={theme().textMuted}>
+            budget <span style={{ fg: theme().text }}>{usd(budget()!.spent_today_usd ?? 0)}</span> /{" "}
+            {usd(budget()!.daily_budget_usd)} today
+          </text>
+        </Show>
+      </Show>
+      {/* Nothing yet: name what the widget is waiting on instead of
+          rendering an unexplained blank section (fathom-x/norm#9 follow-up). */}
+      <Show when={waiting()}>
+        <text fg={theme().textMuted}>balances …</text>
+        <text fg={theme().textMuted}>credits …</text>
+        <text fg={theme().textMuted}>budget …</text>
+      </Show>
+      <Show when={error()}>
+        <text fg={theme().warning}>{error()}</text>
       </Show>
       <Show when={status()?.overpay_url}>
         <text fg={theme().textMuted} onMouseDown={() => void open(status()!.overpay_url!).catch(() => {})}>
