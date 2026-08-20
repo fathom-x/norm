@@ -2160,3 +2160,80 @@ fn parse_last_sse_json(body: &str) -> Value {
         .unwrap_or_else(|| panic!("no SSE data line in body:\n{body}"));
     serde_json::from_str(last).unwrap_or_else(|e| panic!("bad SSE json {last:?}: {e}"))
 }
+
+// ---------------------------------------------------------------------------
+// Provider keys as /mcp credentials (client-side tools work)
+// ---------------------------------------------------------------------------
+
+/// An `owk_` provider key doubles as an /mcp bearer: it binds the session
+/// to the key's wallet, and the key's scopes govern the money tools — a
+/// chat-scoped key is refused spending with the scope message, before any
+/// marketplace traffic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_accepts_a_provider_key_bearer_and_enforces_its_scopes() {
+    let overpay = MockServer::start().await;
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    seed_abandon_wallet(&tmp.path().join("test.db"));
+    let (chat_key_secret, spend_key_secret) = {
+        let mut db = Database::open(&tmp.path().join("test.db")).unwrap();
+        assert!(db.unlock("master-pw").unwrap());
+        let chat = db
+            .create_provider_key("npub1evm", "chat-only", "chat", None)
+            .unwrap()
+            .1;
+        let spend = db
+            .create_provider_key("npub1evm", "spender", "chat spend", None)
+            .unwrap()
+            .1;
+        (chat, spend)
+    };
+
+    // A bogus owk_ bearer is rejected outright.
+    let bad = s
+        .post("/mcp")
+        .add_header("authorization", "Bearer owk_bogus")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+        .await;
+    bad.assert_status(StatusCode::UNAUTHORIZED);
+
+    // A real key authenticates.
+    let ok = s
+        .post("/mcp")
+        .add_header("authorization", format!("Bearer {chat_key_secret}"))
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+        .await;
+    ok.assert_status_ok();
+
+    // Chat-scoped key: pay_order refuses on scope (no Overpay mock is
+    // mounted for orders — a network call would surface differently).
+    let refused = s
+        .post("/mcp")
+        .add_header("authorization", format!("Bearer {chat_key_secret}"))
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "pay_order", "arguments": {"order_id": "ORD-1"}}
+        }))
+        .await;
+    refused.assert_status_ok();
+    let body: Value = refused.json();
+    let text = body.to_string();
+    assert!(
+        text.contains("chat-scoped"),
+        "scope refusal expected: {text}"
+    );
+
+    // Spend-scoped key: raw-address sends stay refused regardless.
+    let sends = s
+        .post("/mcp")
+        .add_header("authorization", format!("Bearer {spend_key_secret}"))
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "send_usdc", "arguments": {"to": "0x1", "amount": "1"}}
+        }))
+        .await;
+    sends.assert_status_ok();
+    let body: Value = sends.json();
+    let text = body.to_string();
+    assert!(text.contains("dashboard"), "send refusal expected: {text}");
+}

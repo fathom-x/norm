@@ -34,6 +34,15 @@ pub struct McpState {
     pub zcash_lightwalletd: String,
     /// Zcash network name (`mainnet`/`testnet`).
     pub zcash_network: String,
+    /// Set when the request authenticated with a `/v1`-style `owk_`
+    /// provider key rather than an OAuth token or dashboard session.
+    /// Purchases made by such a session are gated on the key's scopes and
+    /// recorded against its daily budget, exactly as `/v1` does — one
+    /// credential, one budget, both surfaces.
+    pub provider_key_id: Option<String>,
+    /// Whether that provider key's scopes include `spend`. Meaningless
+    /// unless [`Self::provider_key_id`] is set.
+    pub provider_key_can_spend: bool,
 }
 
 /// An owned auth strategy with its data living long enough for one tool
@@ -82,6 +91,8 @@ impl McpState {
             evm_network: "eip155:8453".to_string(),
             zcash_lightwalletd: "zecrocks".to_string(),
             zcash_network: "mainnet".to_string(),
+            provider_key_id: None,
+            provider_key_can_spend: false,
         }
     }
 
@@ -129,7 +140,19 @@ impl McpState {
             evm_network: self.evm_network.clone(),
             zcash_lightwalletd: self.zcash_lightwalletd.clone(),
             zcash_network: self.zcash_network.clone(),
+            provider_key_id: self.provider_key_id.clone(),
+            provider_key_can_spend: self.provider_key_can_spend,
         }
+    }
+
+    /// Returns a clone of this state bound to a provider key: requests
+    /// run as the key's wallet, and purchase tools account against the
+    /// key's daily budget under its scopes.
+    pub fn with_provider_key(&self, key_id: String, can_spend: bool) -> Self {
+        let mut state = self.clone();
+        state.provider_key_id = Some(key_id);
+        state.provider_key_can_spend = can_spend;
+        state
     }
 
     /// Resolve the npub this tool call should sign as: the auth-bound npub
