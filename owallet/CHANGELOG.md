@@ -4,7 +4,7 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
-## 0.1.5
+## 0.1.6
 
 ### Client-side tools (the norm agent work)
 
@@ -51,6 +51,12 @@ All notable changes to the Rust port of `owallet` are documented here.
   same delivery, so the reported cost and the budget can never tell the
   user different stories about what a turn cost. A delivery that states
   no usage contributes zero rather than a guess.
+
+## 0.1.5
+
+No changes of its own. The `owallet-v0.1.5` tag was cut from 0.1.4's
+tree, so its binaries report `0.1.4` — the version numbering resumes at
+0.1.6 rather than reusing a published tag.
 
 ## 0.1.4
 
