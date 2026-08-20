@@ -50,6 +50,8 @@ type OwalletStatus = {
   eth_balance?: string
   zec_balance?: number | string
   balance_error?: string
+  /** The marketplace this wallet points at (env-resolved server-side). */
+  overpay_url?: string
   merchant_credits?: Array<{ seller_slug?: string; organization_slug?: string; balance_cents?: number }>
   key_budget?: {
     daily_budget_usd?: number | null
@@ -114,6 +116,11 @@ function View(props: { api: TuiPluginApi }) {
         <text fg={theme().textMuted}>
           budget <span style={{ fg: theme().text }}>{usd(budget()!.spent_today_usd ?? 0)}</span> /{" "}
           {usd(budget()!.daily_budget_usd)} today
+        </text>
+      </Show>
+      <Show when={status()?.overpay_url}>
+        <text fg={theme().textMuted} onMouseDown={() => void open(status()!.overpay_url!).catch(() => {})}>
+          {status()!.overpay_url}
         </text>
       </Show>
       {/* The dashboard link doubles as the headless port view
