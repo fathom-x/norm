@@ -4,6 +4,33 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+## 0.1.5
+
+### Real usage and cost on `/v1` chat completions (fathom-x/norm#14)
+
+- **`usage` on every chat completion**, buffered and streamed: OpenAI's
+  `prompt_tokens` / `completion_tokens` / `total_tokens`, plus `cost`
+  (USD, the convention OpenRouter set) and `charged_cents`, the
+  authoritative integer — real money should not round-trip through a
+  float. Streams emit it as a final choices-less chunk just before
+  `[DONE]`, the same shape `stream_options.include_usage` produces, so
+  an unmodified OpenAI-compatible client parses it without special
+  casing. Previously the endpoint reported no usage at all, leaving a
+  client to estimate cost from a token price list it has no way to know
+  (norm's sidebar showed a flat `$0.00 spent`).
+- **Cost covers the whole turn, not just the model calls.** Every order
+  a completion places is charged against it — the OpenRouter turns *and*
+  each tool call, which is a separately paid marketplace order. A tool
+  call can cost far more than the inference around it (image
+  generation), so a total that counted only model turns would understate
+  real spend badly.
+- The figure is the **settled** charge: a seller that meters and states
+  `charged_cents` is billed at that, not at the gross deposit, mirroring
+  the refund that already goes back to the key budget. The two read the
+  same delivery, so the reported cost and the budget can never tell the
+  user different stories about what a turn cost. A delivery that states
+  no usage contributes zero rather than a guess.
+
 ## 0.1.4
 
 ### Wallet status for norm's sidebar (fathom-x/overpay#415, fathom-x/norm#9)
