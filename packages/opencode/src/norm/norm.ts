@@ -497,6 +497,18 @@ async function serveVersion(base: string, timeoutMs = 1500): Promise<string | un
   }
 }
 
+/**
+ * owallet ≥ 0.1.5 accepts `owk_` provider keys as `/mcp` bearers (scopes +
+ * daily budget carried onto MCP purchases). Older serves 401 them, which
+ * would sever the MCP connection entirely — so the header is only injected
+ * once the running serve proves new enough. Unreachable or pre-/health
+ * serves read as "no": the anonymous connection keeps working either way.
+ */
+export async function mcpAcceptsProviderKeys(): Promise<boolean> {
+  const version = parseVersion(await serveVersion(owalletUrl()))
+  return version !== undefined && !versionLess(version, [0, 1, 5])
+}
+
 /** PIDs listening on a local TCP port (POSIX only — lsof). */
 function portListeners(port: string): Promise<number[]> {
   return new Promise((resolve) => {

@@ -6,6 +6,27 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## 0.1.5
 
+### Client-side tools (the norm agent work)
+
+- **`/v1` client tool passthrough** — a chat request carrying its own
+  `tools` runs in passthrough mode: the server roster is not advertised,
+  the caller's definitions and `tool_choice` ride the listing verbatim,
+  and the model's `tool_calls` return unexecuted with
+  `finish_reason: "tool_calls"` (buffered and streaming). No `tools`
+  field (or an empty array) keeps the original transparent server-side
+  loop unchanged.
+- **One-shot purchase tools on `/mcp`** — `tools/list` now also
+  advertises `run_python` and every `provider_tool`-marked listing, and
+  a call is one complete purchase (place, pay, poll, deliverable),
+  mirroring `/v1`'s roster via the same helpers. Sanitized like every
+  externally-reachable result.
+- **Provider keys as `/mcp` bearers** — an `owk_` key authenticates
+  `/mcp`, binding the session to its wallet and carrying `/v1`'s money
+  rules: `spend` scope gates the explicit money tools, raw-address sends
+  refuse for any provider key, and the key's daily budget covers `/mcp`
+  purchases (up-front exhaustion gate, after-the-fact recording,
+  settlement netting, atomic `buy` reservation). OAuth and local
+  sessions are unchanged.
 ### Real usage and cost on `/v1` chat completions (fathom-x/norm#14)
 
 - **`usage` on every chat completion**, buffered and streamed: OpenAI's

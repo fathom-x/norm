@@ -316,9 +316,40 @@ pub fn sanitize(tool: &str, data: &Value) -> Value {
                 "hint",
             ],
         ),
-        // Unknown tool (dispatch already rejected it, but stay total):
-        // keep only universally-safe keys.
-        _ => copy_fields(data, &["error", "hint", "status", "message", "order_id"]),
+        // The one-shot run_python purchase tool: the Python listing's
+        // documented delivered shape, nothing else.
+        "run_python" => copy_fields(
+            data,
+            &[
+                "stdout",
+                "stderr",
+                "exit_code",
+                "duration_ms",
+                "timed_out",
+                "error",
+                "hint",
+            ],
+        ),
+        // Any other name reaching here is a dynamic one-shot listing tool
+        // (dispatch rejects truly unknown names before sanitization): keep
+        // the `extract_listing_delivered` envelope — the deliverable and
+        // its order id — plus the universally-safe keys the old catch-all
+        // kept, and nothing a listing snapshot could smuggle beyond it.
+        _ => copy_fields(
+            data,
+            &[
+                "order_id",
+                "fulfillment_status",
+                "delivered_content",
+                "delivered_content_truncated",
+                "delivered_content_type",
+                "delivered_content_url",
+                "error",
+                "hint",
+                "status",
+                "message",
+            ],
+        ),
     }
 }
 

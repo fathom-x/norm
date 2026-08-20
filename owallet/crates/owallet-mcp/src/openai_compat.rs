@@ -88,7 +88,7 @@ const OPENROUTER_SELLER_SLUG: &str = "openrouter-bot";
 const OPENROUTER_LISTING_TITLE: &str = "OpenRouter Inference";
 const PYTHON_SELLER_SLUG: &str = "exec";
 const PYTHON_LISTING_TITLE: &str = "Run Python Code";
-const RUN_PYTHON_TOOL_NAME: &str = "run_python";
+pub(crate) const RUN_PYTHON_TOOL_NAME: &str = "run_python";
 
 // Model-facing wallet tool names. `buy_credits` (not the MCP tool's `buy`)
 // because to the model it buys *merchant credits*, not products — the name
@@ -147,11 +147,11 @@ const MAX_TOOL_ITERATIONS: u32 = 10;
 /// server-advertised timeout (that's a client-side concern), but
 /// *something* has to bound how long we hold the HTTP connection open for
 /// a stuck order.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Poll cadence, matching `wait_for_order`'s own floor/default — see that
 /// tool's docs for why 1s: the marketplace's own broadcast fan-out
 /// (Solid Cable) polls at roughly the same granularity today.
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Resolved listing ids, process-wide. Each id is derived from its bot's
 /// private key (`Overpay::Uuid.derive_listing_id`) and so differs per
@@ -272,7 +272,7 @@ async fn wallet_status(
 // unmodified OpenAI-compatible client's error handling still works.
 // ---------------------------------------------------------------------------
 
-enum OpenAiError {
+pub(crate) enum OpenAiError {
     InvalidRequest(String),
     Unauthorized(String),
     PaymentRequired(String),
@@ -295,7 +295,7 @@ impl OpenAiError {
         }
     }
 
-    fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         match self {
             Self::InvalidRequest(m)
             | Self::Unauthorized(m)
@@ -462,7 +462,7 @@ async fn resolve_listing_id_cached(
 /// field expects (`{code, stdin, requirements, requirements_lock}`), so
 /// this can't drift from what the listing actually accepts the way a
 /// hand-duplicated schema could.
-async fn run_python_tool_def(state: &McpState) -> Result<Value, OpenAiError> {
+pub(crate) async fn run_python_tool_def(state: &McpState) -> Result<Value, OpenAiError> {
     let listing_id = resolve_python_listing_id(state).await?;
     let listing = state.overpay.get_listing_value(&listing_id).await?;
     let inner = listing.get("data").unwrap_or(&listing);
@@ -497,12 +497,12 @@ async fn run_python_tool_def(state: &McpState) -> Result<Value, OpenAiError> {
 /// the listing and returns the delivered content — the generalization of
 /// the hardcoded `run_python` path sketched in PR #383.
 #[derive(Clone)]
-struct ListingTool {
-    name: String,
+pub(crate) struct ListingTool {
+    pub(crate) name: String,
     listing_id: String,
     seller_slug: String,
-    description: String,
-    parameters: Value,
+    pub(crate) description: String,
+    pub(crate) parameters: Value,
     /// True when the listing's schema was a bare (non-object) type —
     /// OpenAI tool parameters must be an object, so the schema is offered
     /// wrapped as `{input: <schema>}` and the execution unwraps
@@ -536,7 +536,7 @@ async fn listing_tools(ctx: &Ctx) -> Vec<ListingTool> {
     }
 }
 
-async fn fetch_listing_tools(state: &McpState) -> Result<Vec<ListingTool>, OpenAiError> {
+pub(crate) async fn fetch_listing_tools(state: &McpState) -> Result<Vec<ListingTool>, OpenAiError> {
     let page = state
         .overpay
         .list_listings_value(&ListingFilters {
@@ -641,7 +641,7 @@ fn listing_tool_def(tool: &ListingTool) -> Value {
 /// Execute one listing-tool call: a real, separately-paid order against
 /// the tool's listing, exactly like `run_python`.
 #[allow(clippy::too_many_arguments)]
-async fn run_listing_tool(
+pub(crate) async fn run_listing_tool(
     state: &McpState,
     auth: &OwnedAuth,
     tool: &ListingTool,
@@ -987,13 +987,16 @@ fn usd_to_cents(usd: f64) -> i64 {
     (usd * 100.0).round() as i64
 }
 
-fn cents_to_usd(cents: i64) -> f64 {
+pub(crate) fn cents_to_usd(cents: i64) -> f64 {
     cents as f64 / 100.0
 }
 
 /// Read the authenticated key's row for budget display / gating. `None`
 /// when there is no key context (or the key was revoked mid-request).
-fn read_key(state: &McpState, key_id: Option<&str>) -> Option<owallet_db::ProviderKeyRow> {
+pub(crate) fn read_key(
+    state: &McpState,
+    key_id: Option<&str>,
+) -> Option<owallet_db::ProviderKeyRow> {
     let id = key_id?;
     state.db.lock().ok()?.read_provider_key(id).ok()?
 }
@@ -1033,7 +1036,11 @@ fn exhausted_key_budget(state: &McpState, key_id: Option<&str>) -> Option<OpenAi
 /// Reserve `amount_usd` against the key's persistent budget, atomically.
 /// `Ok` when no key is being tracked (shouldn't happen for spend tools) or
 /// the amount fit; `Err` carries the model-facing refusal.
-fn reserve_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) -> ReserveResult {
+pub(crate) fn reserve_key_budget(
+    state: &McpState,
+    key_id: Option<&str>,
+    amount_usd: f64,
+) -> ReserveResult {
     let Some(id) = key_id else {
         return Ok(());
     };
@@ -1066,11 +1073,11 @@ fn reserve_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) -
     }
 }
 
-type ReserveResult = std::result::Result<(), String>;
+pub(crate) type ReserveResult = std::result::Result<(), String>;
 
 /// Hand back a key-budget reservation whose payment never moved funds.
 /// Best-effort: a failure here strands allowance (safe direction).
-fn release_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) {
+pub(crate) fn release_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) {
     let Some(id) = key_id else { return };
     let cents = usd_to_cents(amount_usd);
     if cents <= 0 {
@@ -1104,7 +1111,7 @@ fn stamp_as_of(state: &McpState, mut out: Value) -> Value {
     out
 }
 
-fn record_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) {
+pub(crate) fn record_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) {
     let Some(id) = key_id else { return };
     let cents = usd_to_cents(amount_usd);
     if cents <= 0 {
@@ -1492,11 +1499,31 @@ struct ChatCompletionRequest {
     messages: Vec<Value>,
     #[serde(default)]
     stream: bool,
-    // Caller-supplied `tools`/`tool_choice` are deliberately not read: this
-    // endpoint decides its own tool roster (`run_python` plus the wallet
-    // tools the key's scopes allow) and executes every call itself — see
-    // the module doc. A caller's own tool definitions would produce
-    // tool_calls nothing here knows how to run.
+    /// Caller-supplied tool definitions switch the request into
+    /// **passthrough mode**: the server-side roster (`run_python`, wallet
+    /// tools, listing tools) is not advertised, the caller's definitions
+    /// are forwarded to the listing verbatim, and any tool_calls the model
+    /// emits come back to the caller unexecuted (`finish_reason:
+    /// "tool_calls"`) — the caller owns the conversation history, so it
+    /// must own tool execution too, or rounds it never witnessed would
+    /// vanish from every later request. Absent (or empty), the endpoint
+    /// keeps its original transparent server-side loop.
+    #[serde(default)]
+    tools: Option<Vec<Value>>,
+    /// Forwarded with the caller's tools; ignored without them (the
+    /// server-side loop sets its own).
+    #[serde(default)]
+    tool_choice: Option<Value>,
+}
+
+impl ChatCompletionRequest {
+    /// Passthrough mode is opted into by sending a non-empty `tools` array
+    /// — the shape every OpenAI-style agent client (opencode/norm included)
+    /// produces when it has an executor of its own. A bare `tools: []`
+    /// stays in server mode: some SDKs emit the empty array for plain chat.
+    fn client_tools(&self) -> Option<&[Value]> {
+        self.tools.as_deref().filter(|t| !t.is_empty())
+    }
 }
 
 /// `content` is a bare string in the common case, but some OpenAI-compatible
@@ -1816,7 +1843,7 @@ fn net_charged_cents(snap: &Value, redeemed_cents: i64) -> i64 {
 /// actually cost instead of estimating tokens × a list price it has no
 /// way to know (norm's sidebar does exactly this).
 #[derive(Default, Clone, Copy, Debug)]
-struct TurnUsage {
+pub(crate) struct TurnUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
     charged_cents: i64,
@@ -1997,7 +2024,7 @@ async fn execute_tool_call(
     }
 }
 
-async fn run_python_tool(
+pub(crate) async fn run_python_tool(
     state: &McpState,
     auth: &OwnedAuth,
     arguments: &Value,
@@ -2045,16 +2072,22 @@ struct ChatCompletionChoice {
 #[derive(Serialize)]
 struct ChatMessageOut {
     role: &'static str,
-    content: String,
+    /// `null` (not `""`) on a pure tool-call turn — OpenAI clients switch
+    /// on that distinction when deciding whether the turn carried prose.
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<Value>>,
 }
 
 /// One OpenRouter turn's outcome once the agentic loop is done: either a
 /// final answer, or (internally, before the loop decides) a tool call to
-/// execute and feed back.
+/// execute and feed back. `tool_calls` is non-empty only in passthrough
+/// mode, where the caller executes them.
 struct AgentResult {
     text: String,
     model: String,
     order_id: String,
+    tool_calls: Vec<Value>,
     usage: TurnUsage,
 }
 
@@ -2116,6 +2149,7 @@ async fn run_agentic_loop(
                 text: delivered.text,
                 model: last_model,
                 order_id,
+                tool_calls: Vec::new(),
                 usage,
             });
         }
@@ -2175,6 +2209,63 @@ async fn run_agentic_loop(
         text: delivered.text,
         model: last_model,
         order_id,
+        tool_calls: Vec::new(),
+        usage,
+    })
+}
+
+/// One passthrough-mode turn: the caller's tool definitions forwarded to
+/// the listing verbatim, and whatever the model does — prose, tool_calls,
+/// or both — handed straight back. No server roster, no execution, no
+/// iteration cap: the caller runs the loop, so each request is exactly one
+/// paid turn (still recorded against the key's daily budget like any
+/// other).
+async fn run_passthrough_turn(
+    ctx: &Ctx,
+    auth: &OwnedAuth,
+    messages: Vec<Value>,
+    requested_model: &str,
+    tools: &[Value],
+    tool_choice: Option<&Value>,
+) -> Result<AgentResult, OpenAiError> {
+    let listing_id = resolve_openrouter_listing_id(&ctx.mcp).await?;
+    let mut buyer_note = json!({
+        "model": requested_model,
+        "messages": messages,
+        "tools": tools,
+    });
+    // Only forwarded when the caller set one — the listing (and OpenRouter
+    // beneath it) default to "auto" on their own.
+    if let Some(choice) = tool_choice {
+        buyer_note["tool_choice"] = choice.clone();
+    }
+    let (order_id, redeemed_cents) = place_and_pay_order(
+        &ctx.mcp,
+        auth,
+        &listing_id,
+        OPENROUTER_SELLER_SLUG,
+        &buyer_note,
+        ctx.key_id.as_deref(),
+    )
+    .await?;
+    let snap = wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
+    net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
+    let mut usage = TurnUsage::default();
+    usage.add_order(&snap, redeemed_cents);
+    let delivered = extract_openrouter_delivered(&snap)?;
+    if delivered.error {
+        return Err(OpenAiError::UpstreamFailure(delivered.text));
+    }
+    usage.add_tokens(&delivered);
+    Ok(AgentResult {
+        text: delivered.text,
+        model: if delivered.model.is_empty() {
+            requested_model.to_string()
+        } else {
+            delivered.model
+        },
+        order_id,
+        tool_calls: delivered.tool_calls,
         usage,
     })
 }
@@ -2185,8 +2276,22 @@ async fn buffered_chat_completion(
 ) -> Result<ChatCompletionResponse, OpenAiError> {
     let (_npub, auth) = ctx.mcp.resolve_owned_auth()?;
     let messages = normalize_messages(&req.messages)?;
-    let result = run_agentic_loop(ctx, &auth, messages, &req.model).await?;
+    let result = match req.client_tools() {
+        Some(tools) => {
+            run_passthrough_turn(
+                ctx,
+                &auth,
+                messages,
+                &req.model,
+                tools,
+                req.tool_choice.as_ref(),
+            )
+            .await?
+        }
+        None => run_agentic_loop(ctx, &auth, messages, &req.model).await?,
+    };
 
+    let has_calls = !result.tool_calls.is_empty();
     Ok(ChatCompletionResponse {
         id: format!("chatcmpl-{}", result.order_id),
         object: "chat.completion",
@@ -2196,9 +2301,14 @@ async fn buffered_chat_completion(
             index: 0,
             message: ChatMessageOut {
                 role: "assistant",
-                content: result.text,
+                content: if result.text.is_empty() && has_calls {
+                    None
+                } else {
+                    Some(result.text)
+                },
+                tool_calls: has_calls.then_some(result.tool_calls),
             },
-            finish_reason: "stop",
+            finish_reason: if has_calls { "tool_calls" } else { "stop" },
         }],
         usage: result.usage.to_json(),
     })
@@ -2219,6 +2329,24 @@ fn chunk_event(id: &str, model: &str, delta: Value, finish_reason: Option<&str>)
         }],
     });
     Event::default().data(payload.to_string())
+}
+
+/// Streaming clients reassemble tool_calls by each entry's `index` field
+/// (deltas may arrive fragmented, so ids alone can't group them). The
+/// listing delivers whole calls, so each gets its position stamped in and
+/// ships as one fragment.
+fn indexed_tool_calls(calls: &[Value]) -> Vec<Value> {
+    calls
+        .iter()
+        .enumerate()
+        .map(|(i, call)| {
+            let mut call = call.clone();
+            if let Some(obj) = call.as_object_mut() {
+                obj.entry("index").or_insert(json!(i));
+            }
+            call
+        })
+        .collect()
 }
 
 /// The turn's final `usage` frame: a chunk with **no** choices, which is
@@ -2325,6 +2453,89 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 return;
             }
         };
+
+        // Passthrough mode: one turn with the caller's tools, partials
+        // streamed as they arrive, and any tool_calls handed back in the
+        // final chunks for the caller to execute. The server-side roster
+        // (and the loop below that runs it) never engages. The polling
+        // shape mirrors the loop body's, per this generator's convention.
+        if let Some(tools) = req.client_tools() {
+            let mut buyer_note = json!({
+                "model": requested_model,
+                "messages": messages,
+                "tools": tools,
+            });
+            if let Some(choice) = req.tool_choice.as_ref() {
+                buyer_note["tool_choice"] = choice.clone();
+            }
+            let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
+                Ok(placed) => placed,
+                Err(e) => {
+                    for ev in error_events("error", &requested_model, e) { yield Ok(ev); }
+                    return;
+                }
+            };
+            yield Ok(chunk_event(&order_id, &requested_model, json!({"role": "assistant"}), None));
+
+            let mut streamed = 0usize;
+            let start = Instant::now();
+            let snap = loop {
+                let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        for ev in error_events(&order_id, &requested_model, OpenAiError::from(e)) { yield Ok(ev); }
+                        return;
+                    }
+                };
+                let (partial, _seq) = partial_output(&snap);
+                match new_output_since(partial, &mut streamed) {
+                    Some(delta) => yield Ok(chunk_event(&order_id, &requested_model, json!({"content": delta}), None)),
+                    None => yield Ok(Event::default().comment("owallet: waiting on the model")),
+                }
+                if is_terminal(order_status(&snap)) {
+                    break snap;
+                }
+                if start.elapsed() >= ctx.timeout {
+                    let err = OpenAiError::UpstreamFailure(format!(
+                        "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
+                    ));
+                    for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
+                    return;
+                }
+                tokio::time::sleep(ctx.poll).await;
+            };
+            net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
+            let mut usage = TurnUsage::default();
+            usage.add_order(&snap, redeemed_cents);
+
+            let delivered = match extract_openrouter_delivered(&snap) {
+                Ok(d) => d,
+                Err(e) => {
+                    for ev in error_events(&order_id, &requested_model, e) { yield Ok(ev); }
+                    return;
+                }
+            };
+            if delivered.error {
+                let err = OpenAiError::UpstreamFailure(delivered.text);
+                for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
+                return;
+            }
+            usage.add_tokens(&delivered);
+            let model = if delivered.model.is_empty() { requested_model.clone() } else { delivered.model.clone() };
+            if let Some(tail) = catch_up(&delivered.text, streamed) {
+                yield Ok(chunk_event(&order_id, &model, json!({"content": tail}), None));
+            }
+            if delivered.tool_calls.is_empty() {
+                yield Ok(chunk_event(&order_id, &model, json!({}), Some("stop")));
+            } else {
+                yield Ok(chunk_event(&order_id, &model, json!({"tool_calls": indexed_tool_calls(&delivered.tool_calls)}), None));
+                yield Ok(chunk_event(&order_id, &model, json!({}), Some("tool_calls")));
+            }
+            yield Ok(usage_event(&order_id, &model, usage));
+            yield Ok(Event::default().data("[DONE]"));
+            return;
+        }
+
         let python_listing_id = match resolve_python_listing_id(&ctx.mcp).await {
             Ok(id) => id,
             Err(e) => {
@@ -3130,6 +3341,8 @@ mod tests {
             model: DEFAULT_MODEL.to_string(),
             messages: vec![json!({"role": "user", "content": "hi"})],
             stream: false,
+            tools: None,
+            tool_choice: None,
         };
         assert!(validate_request(&state, &req).await.is_ok());
     }
@@ -3621,6 +3834,9 @@ mod tests {
         /// The buyer_note of the last forecast order, for verbatim-string
         /// assertions (a `buyer_input :text` note must arrive unquoted).
         forecast_note: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+        /// The buyer_note of the last OpenRouter order — passthrough tests
+        /// assert the caller's tools rode it verbatim.
+        openrouter_note: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
     }
     impl Respond for OrderCreateRouter {
         fn respond(&self, req: &Request) -> ResponseTemplate {
@@ -3630,6 +3846,7 @@ mod tests {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             let id = if listing_id == OPENROUTER_ID {
+                *self.openrouter_note.lock().unwrap() = body.get("buyer_note").cloned();
                 format!(
                     "OR-{}",
                     self.openrouter_calls.fetch_add(1, Ordering::SeqCst)
@@ -3661,6 +3878,25 @@ mod tests {
             .and(path("/api/v1/orders"))
             .respond_with(OrderCreateRouter {
                 forecast_note: note.clone(),
+                ..Default::default()
+            })
+            .mount(overpay)
+            .await;
+        mount_redeem_fully_paid(overpay, "openrouter-bot").await;
+        mount_redeem_fully_paid(overpay, "exec").await;
+        note
+    }
+
+    /// Like [`mount_order_router`] but hands back the last OpenRouter
+    /// order's buyer_note (a JSON-encoded string — parse before asserting).
+    async fn mount_order_router_capturing_openrouter(
+        overpay: &MockServer,
+    ) -> std::sync::Arc<std::sync::Mutex<Option<Value>>> {
+        let note = std::sync::Arc::new(std::sync::Mutex::new(None));
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(OrderCreateRouter {
+                openrouter_note: note.clone(),
                 ..Default::default()
             })
             .mount(overpay)
@@ -3782,6 +4018,233 @@ mod tests {
         assert_eq!(body["usage"]["prompt_tokens"], json!(0), "body: {body}");
         assert_eq!(body["usage"]["completion_tokens"], json!(0), "body: {body}");
         assert_eq!(body["usage"]["total_tokens"], json!(0), "body: {body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn passthrough_returns_client_tool_calls_instead_of_executing() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        let note = mount_order_router_capturing_openrouter(&overpay).await;
+
+        // The model calls the *caller's* tool. In server mode this name
+        // would be rejected as unknown and looped on; in passthrough it
+        // must come back unexecuted — as the only order placed.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_ld", "list_dir", r#"{"path": "."}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let client_tools = json!([{
+            "type": "function",
+            "function": {
+                "name": "list_dir",
+                "description": "List a directory",
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}
+            }
+        }]);
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "what's in the cwd?"}],
+                "tools": client_tools,
+                "tool_choice": "auto",
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
+        let message = &body["choices"][0]["message"];
+        assert_eq!(
+            message["content"],
+            Value::Null,
+            "pure tool-call turn: {body}"
+        );
+        assert_eq!(message["tool_calls"][0]["id"], "call_ld");
+        assert_eq!(message["tool_calls"][0]["function"]["name"], "list_dir");
+        // One order, unexecuted — the id proves no second turn ran.
+        assert_eq!(body["id"], "chatcmpl-OR-0");
+
+        // The caller's definitions rode the buyer_note verbatim; the
+        // server roster did not.
+        let captured = note.lock().unwrap().clone().expect("buyer_note captured");
+        let inner: Value = serde_json::from_str(captured.as_str().unwrap()).unwrap();
+        assert_eq!(inner["tools"], client_tools);
+        assert_eq!(inner["tool_choice"], "auto");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn passthrough_round_trips_tool_results_to_a_final_answer() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        let note = mount_order_router_capturing_openrouter(&overpay).await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content("Two files: a and b.", "openai/gpt-5-mini", false),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+        // The continuation request an OpenAI client sends after executing
+        // the call: its history carries the assistant tool_calls turn and
+        // the tool result.
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [
+                    {"role": "user", "content": "what's in the cwd?"},
+                    {"role": "assistant", "content": null, "tool_calls": [{
+                        "id": "call_ld", "type": "function",
+                        "function": {"name": "list_dir", "arguments": "{\"path\": \".\"}"}
+                    }]},
+                    {"role": "tool", "tool_call_id": "call_ld", "content": "a\nb\n"},
+                ],
+                "tools": [{"type": "function", "function": {"name": "list_dir", "parameters": {}}}],
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["choices"][0]["finish_reason"], "stop");
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "Two files: a and b."
+        );
+        assert!(body["choices"][0]["message"].get("tool_calls").is_none());
+
+        // The tool round survived normalization into the buyer_note.
+        let captured = note.lock().unwrap().clone().expect("buyer_note captured");
+        let inner: Value = serde_json::from_str(captured.as_str().unwrap()).unwrap();
+        let messages = inner["messages"].as_array().unwrap();
+        assert_eq!(messages[1]["tool_calls"][0]["id"], "call_ld");
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_call_id"], "call_ld");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_empty_tools_array_stays_in_server_mode() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        let note = mount_order_router_capturing_openrouter(&overpay).await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content("Hi.", "openai/gpt-5-mini", false),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [],
+            }))
+            .await;
+
+        res.assert_status_ok();
+        // Server mode advertised its own roster despite the empty array —
+        // some SDKs send `tools: []` for plain chat.
+        let captured = note.lock().unwrap().clone().expect("buyer_note captured");
+        let inner: Value = serde_json::from_str(captured.as_str().unwrap()).unwrap();
+        let names: Vec<&str> = inner["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(
+            names.contains(&"run_python"),
+            "server roster expected: {names:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_passthrough_hands_back_tool_call_chunks() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_ld", "list_dir", r#"{"path": "."}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "what's in the cwd?"}],
+                "tools": [{"type": "function", "function": {"name": "list_dir", "parameters": {}}}],
+                "stream": true,
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let text = res.text();
+        let chunks: Vec<Value> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|l| *l != "[DONE]")
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .collect();
+
+        let call_chunk = chunks
+            .iter()
+            .find(|c| c["choices"][0]["delta"].get("tool_calls").is_some())
+            .unwrap_or_else(|| panic!("no tool_calls delta in stream:\n{text}"));
+        let call = &call_chunk["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(call["index"], 0, "streaming fragments group by index");
+        assert_eq!(call["id"], "call_ld");
+        assert_eq!(call["function"]["name"], "list_dir");
+
+        let finish = chunks
+            .iter()
+            .filter_map(|c| c["choices"][0]["finish_reason"].as_str())
+            .next_back();
+        assert_eq!(finish, Some("tool_calls"), "stream:\n{text}");
+        assert!(
+            text.contains("data: [DONE]"),
+            "stream ends with DONE:\n{text}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5397,6 +5860,282 @@ mod tests {
             Some(json!("Galveston")),
             "buyer_note must be the verbatim location string"
         );
+    }
+
+    // ---- one-shot marketplace tools on the MCP surface ----
+    // These exercise crate::tools' dynamic roster, which reuses this
+    // module's purchase helpers — hence they live beside its mocks.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_marketplace_specs_advertise_run_python_and_marked_listings() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_listing_tool_catalog(&overpay).await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let specs = crate::tools::marketplace_specs(&state).await;
+        let names: Vec<&str> = specs
+            .iter()
+            .filter_map(|s| s.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(names.contains(&"run_python"), "specs: {names:?}");
+        assert!(names.contains(&"forecast"), "specs: {names:?}");
+        for spec in &specs {
+            assert!(
+                spec.get("inputSchema").is_some_and(Value::is_object),
+                "every spec carries an object schema: {spec}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_run_python_is_a_one_shot_sanitized_purchase() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        // Delivered content stuffed with a field outside the documented
+        // shape — the projection must strip it.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/PY-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "PY-0", "fulfillment_status": "delivered",
+                    "delivered_content":
+                        "{\"stdout\":\"2\\n\",\"stderr\":\"\",\"exit_code\":0,\"txid\":\"0xdeadbeef\"}",
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let out = crate::tools::dispatch_sanitized(
+            &state,
+            "run_python",
+            json!({"code": "print(1+1)"}),
+            None,
+        )
+        .await
+        .expect("one-shot run_python");
+        assert_eq!(out.data["stdout"], "2\n");
+        assert_eq!(out.data["exit_code"], 0);
+        assert!(
+            out.data.get("txid").is_none(),
+            "undocumented delivered fields must not survive sanitization: {}",
+            out.data
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_marked_listing_tool_is_a_one_shot_purchase() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        let note_slot = mount_order_router_capturing(&overpay).await;
+        mount_listing_tool_catalog(&overpay).await;
+        mount_redeem_fully_paid(&overpay, "weather").await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/F-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "F-0", "fulfillment_status": "delivered",
+                    "delivered_content": "{\"description\":\"Galveston steams.\"}",
+                    "delivered_content_type": "application/json",
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let out = crate::tools::dispatch_sanitized(
+            &state,
+            "forecast",
+            json!({"input": "Galveston"}),
+            None,
+        )
+        .await
+        .expect("one-shot forecast");
+        assert_eq!(out.data["order_id"], "F-0");
+        assert!(
+            out.data["delivered_content"]
+                .as_str()
+                .unwrap()
+                .contains("Galveston steams."),
+            "deliverable survives sanitization: {}",
+            out.data
+        );
+        // Wrapped bare-schema unwrap still applies on this surface.
+        assert_eq!(*note_slot.lock().unwrap(), Some(json!("Galveston")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_provider_key_session_carries_v1_money_rules() {
+        let overpay = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (chat_key, _) = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "chat-only", "chat", None)
+            .unwrap();
+        let (spend_key, _) = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "spender", "chat spend", None)
+            .unwrap();
+
+        // Chat-scoped key: spending tools refuse on scope, before any
+        // marketplace traffic (no mocks mounted — a network call would 404
+        // into a different error).
+        let chat_state = state.with_provider_key(chat_key.id.clone(), false);
+        for tool in ["create_order", "pay_order", "buy", "load_core_credits"] {
+            let err = crate::tools::dispatch(&chat_state, tool, json!({}), None)
+                .await
+                .expect_err("chat-scoped key must not spend");
+            assert!(err.to_string().contains("chat-scoped"), "{tool}: {err}");
+        }
+
+        // Raw-address sends refuse for ANY provider key, spend scope
+        // included — they belong to the wallet owner's own hands.
+        let spend_state = state.with_provider_key(spend_key.id.clone(), true);
+        for tool in ["send_usdc", "send_zcash"] {
+            let err = crate::tools::dispatch(&spend_state, tool, json!({}), None)
+                .await
+                .expect_err("provider keys must not reach raw sends");
+            assert!(err.to_string().contains("dashboard"), "{tool}: {err}");
+        }
+
+        // Sessions without a provider key (OAuth / local) are untouched:
+        // the same call proceeds past the gate (and fails later on the
+        // unmocked marketplace instead — proving the gate didn't fire).
+        let err = crate::tools::dispatch(&state, "pay_order", json!({"order_id": "X"}), None)
+            .await
+            .expect_err("unmocked marketplace");
+        assert!(
+            !err.to_string().contains("chat-scoped"),
+            "no scope gate without a key: {err}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_one_shot_purchase_records_against_the_key_budget() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/PY-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "PY-0", "fulfillment_status": "delivered",
+                    "delivered_content": python_delivered_content("2\n", 0),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        // Chat-scoped: one-shots are operating cost, allowed like /v1's
+        // own turns — but recorded.
+        let (key, _) = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "chat-only", "chat", Some(500))
+            .unwrap();
+        let key_state = state.with_provider_key(key.id.clone(), false);
+
+        crate::tools::dispatch_sanitized(&key_state, "run_python", json!({"code": "1"}), None)
+            .await
+            .expect("one-shot allowed for a chat key");
+        let keys = state
+            .db
+            .lock()
+            .unwrap()
+            .list_provider_keys("npub1abandon")
+            .unwrap();
+        let row = keys.iter().find(|k| k.id == key.id).unwrap();
+        assert_eq!(
+            row.spent_today_usd_cents(),
+            2,
+            "the 2¢ redeem must land on the key's budget"
+        );
+
+        // An exhausted budget refuses the next one-shot up front.
+        let (broke_key, _) = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "broke", "chat", Some(0))
+            .unwrap();
+        let broke_state = state.with_provider_key(broke_key.id, false);
+        let err = crate::tools::dispatch(&broke_state, "run_python", json!({"code": "1"}), None)
+            .await
+            .expect_err("exhausted budget refuses");
+        assert!(err.to_string().contains("budget"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_pay_order_records_the_redemption_on_the_key() {
+        let overpay = MockServer::start().await;
+        mount_redeem_fully_paid(&overpay, "acme").await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/ORD-77"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "ORD-77", "payment_status": "pending"}
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (key, _) = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "spender", "chat spend", Some(500))
+            .unwrap();
+        let key_state = state.with_provider_key(key.id.clone(), true);
+
+        let out = crate::tools::dispatch_sanitized(
+            &key_state,
+            "pay_order",
+            json!({"order_id": "ORD-77", "seller_slug": "acme"}),
+            None,
+        )
+        .await
+        .expect("spend key pays");
+        assert_eq!(out.data["status"], "fully_paid", "{}", out.data);
+
+        let keys = state
+            .db
+            .lock()
+            .unwrap()
+            .list_provider_keys("npub1abandon")
+            .unwrap();
+        let row = keys.iter().find(|k| k.id == key.id).unwrap();
+        assert_eq!(
+            row.spent_today_usd_cents(),
+            2,
+            "the redemption records against the key, same as /v1"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_unknown_tool_name_still_errors() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_listing_tool_catalog(&overpay).await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let err = crate::tools::dispatch(&state, "no_such_tool", json!({}), None)
+            .await
+            .expect_err("unknown names still reject");
+        assert!(err.to_string().contains("unknown tool"), "got: {err}");
     }
 
     #[test]

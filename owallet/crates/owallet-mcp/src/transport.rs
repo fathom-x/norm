@@ -37,6 +37,16 @@ pub enum AuthResult {
     Anonymous,
     /// Request is bound to this wallet npub.
     Wallet(String),
+    /// Request authenticated with a `/v1`-style `owk_` provider key:
+    /// bound to the key's wallet, with purchases gated on the key's
+    /// scopes and recorded against its daily budget (fathom-x/norm — the
+    /// client-side tools work: one credential, one budget, both
+    /// surfaces).
+    ProviderKey {
+        npub: String,
+        key_id: String,
+        can_spend: bool,
+    },
     /// Token was supplied but is invalid / expired / unknown.
     Invalid,
 }
@@ -95,6 +105,14 @@ async fn handle(
             }
             AuthResult::Anonymous => state.mcp.with_npub(None),
             AuthResult::Wallet(n) => state.mcp.with_npub(Some(n)),
+            AuthResult::ProviderKey {
+                npub,
+                key_id,
+                can_spend,
+            } => state
+                .mcp
+                .with_npub(Some(npub))
+                .with_provider_key(key_id, can_spend),
         }
     } else {
         state.mcp.clone()
@@ -117,7 +135,18 @@ async fn handle(
     let resp = match req.method.as_str() {
         "initialize" => initialize_result(),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools::catalog() })),
+        "tools/list" => {
+            // Static wallet tools plus the live one-shot marketplace tools
+            // (run_python + provider_tool-marked listings) — the same
+            // high-level purchase roster /v1 advertises, so a client-side
+            // agent buys inline instead of walking the order primitives.
+            let mut tools = tools::catalog()
+                .iter()
+                .map(|t| serde_json::to_value(t).unwrap_or_default())
+                .collect::<Vec<_>>();
+            tools.extend(tools::marketplace_specs(&mcp_state).await);
+            Ok(json!({ "tools": tools }))
+        }
         "tools/call" => match req.params {
             Some(p) => tools_call(&mcp_state, p).await,
             None => Err(JrpcError {
