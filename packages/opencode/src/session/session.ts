@@ -387,10 +387,23 @@ export const getUsage = (input: { model: Provider.Model; usage: Usage; metadata?
       ? input.model.cost.experimentalOver200K
       : input.model.cost)
   const totalNanoAiu = input.metadata?.["copilot"]?.["totalNanoAiu"]
+  // norm: the overpay provider reports what the marketplace actually
+  // charged the wallet, in cents (owallet >= 0.1.5). That is money already
+  // spent — settled, net of any seller refund — so it wins over the
+  // token x price arithmetic below, which for this provider has no price
+  // list to work from and would report $0.00 for a turn that cost real
+  // money. Same shape as the Copilot AIU branch it sits beside.
+  const overpayChargedCents = input.metadata?.["overpay"]?.["chargedCents"]
+  const providerReportedCost =
+    typeof overpayChargedCents === "number" && Number.isFinite(overpayChargedCents) && overpayChargedCents >= 0
+      ? new Decimal(overpayChargedCents).div(100).toNumber()
+      : typeof totalNanoAiu === "number" && Number.isFinite(totalNanoAiu) && totalNanoAiu >= 0
+        ? new Decimal(totalNanoAiu).div(100_000_000_000).toNumber()
+        : undefined
   return {
     cost:
-      typeof totalNanoAiu === "number" && Number.isFinite(totalNanoAiu) && totalNanoAiu >= 0
-        ? new Decimal(totalNanoAiu).div(100_000_000_000).toNumber()
+      providerReportedCost !== undefined
+        ? providerReportedCost
         : safe(
             new Decimal(0)
               .add(new Decimal(tokens.input).mul(costInfo?.input ?? 0).div(1_000_000))
