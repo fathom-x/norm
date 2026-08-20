@@ -22,6 +22,7 @@ import { EventV2 } from "@opencode-ai/core/event"
 import { Wildcard } from "@/util/wildcard"
 import { SessionID } from "@/session/schema"
 import { Auth } from "@/auth"
+import { Norm } from "@/norm/norm"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import * as Option from "effect/Option"
@@ -292,7 +293,11 @@ const live: Layer.Layer<
             )
           },
           // Copilot returns the authoritative billed amount only in provider-specific response fields.
-          includeRawChunks: input.model.providerID.includes("github-copilot"),
+          // norm: the overpay provider does the same — owallet reports what the marketplace
+          // actually charged the wallet in a `usage.charged_cents` extension the AI SDK's
+          // standard usage mapping drops, so those chunks have to arrive raw too.
+          includeRawChunks:
+            input.model.providerID.includes("github-copilot") || input.model.providerID === Norm.PROVIDER_ID,
           async experimental_repairToolCall(failed) {
             const lower = failed.toolCall.toolName.toLowerCase()
             if (lower !== failed.toolCall.toolName && prepared.tools[lower]) {

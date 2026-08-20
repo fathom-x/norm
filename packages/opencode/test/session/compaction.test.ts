@@ -1814,6 +1814,38 @@ describe("SessionNs.getUsage", () => {
     expect(result.cost).toBe(0.04473525)
   })
 
+  test("norm: uses the marketplace's settled charge for the overpay provider", () => {
+    // owallet reports what actually left the wallet, in cents. The model
+    // here carries a full price list purely to prove the reported charge
+    // wins over the token x price arithmetic — the marketplace's number is
+    // money already spent, not an estimate.
+    const result = SessionNs.getUsage({
+      model: createModel({
+        context: 100_000,
+        output: 32_000,
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 0.3 } },
+      }),
+      usage: usage({ inputTokens: 11_774, outputTokens: 39, totalTokens: 11_813 }),
+      metadata: { overpay: { chargedCents: 6 } },
+    })
+
+    expect(result.cost).toBe(0.06)
+  })
+
+  test("norm: overpay turn that charged nothing costs nothing, not a token estimate", () => {
+    const result = SessionNs.getUsage({
+      model: createModel({
+        context: 100_000,
+        output: 32_000,
+        cost: { input: 3, output: 15, cache: { read: 0.3, write: 0.3 } },
+      }),
+      usage: usage({ inputTokens: 11_774, outputTokens: 39, totalTokens: 11_813 }),
+      metadata: { overpay: { chargedCents: 0 } },
+    })
+
+    expect(result.cost).toBe(0)
+  })
+
   test("uses matching context cost tier before over-200k fallback", () => {
     const model = createModel({
       context: 1_000_000,

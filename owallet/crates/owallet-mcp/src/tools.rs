@@ -521,6 +521,10 @@ async fn marketplace_tool_call(
         }
     }
 
+    // A standalone MCP purchase has no chat turn to report usage on; the
+    // budget recording happens inside the shared place-and-pay path.
+    let mut usage = v1::TurnUsage::default();
+
     if name == v1::RUN_PYTHON_TOOL_NAME {
         let (_npub, auth) = state.resolve_owned_auth()?;
         let data = v1::run_python_tool(
@@ -530,6 +534,7 @@ async fn marketplace_tool_call(
             v1::REQUEST_TIMEOUT,
             v1::POLL_INTERVAL,
             key_id,
+            &mut usage,
         )
         .await
         .map_err(|e| ToolError::Internal(e.message().to_string()))?;
@@ -549,6 +554,7 @@ async fn marketplace_tool_call(
         v1::REQUEST_TIMEOUT,
         v1::POLL_INTERVAL,
         key_id,
+        &mut usage,
     )
     .await
     .map_err(|e| ToolError::Internal(e.message().to_string()))?;
