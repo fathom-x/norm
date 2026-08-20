@@ -4,6 +4,8 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+## 0.1.5
+
 ### Client-side tools (the norm agent work)
 
 - **`/v1` client tool passthrough** — a chat request carrying its own
