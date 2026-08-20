@@ -225,8 +225,46 @@ fn router_with_config(state: McpState, timeout: Duration, poll: Duration, cap: f
     };
     Router::new()
         .route("/models", get(list_models))
+        .route("/status", get(wallet_status))
         .route("/chat/completions", post(chat_completions))
         .with_state(ctx)
+}
+
+/// `GET /v1/status` — chain-free wallet status for norm's TUI sidebar
+/// (fathom-x/norm#9): balances, merchant credits, and the calling key's
+/// daily budget, stamped `as_of` in the wallet's timezone. Same
+/// provider-key auth and the same allowlist projection as the
+/// `get_balances` wallet tool, minus the per-request spend allowance —
+/// that ledger only exists inside a chat request. Poll-friendly but not
+/// free: the underlying account read hits the EVM RPC and Overpay live,
+/// so callers should poll on the order of a minute, not a second.
+async fn wallet_status(
+    State(ctx): State<Ctx>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, OpenAiError> {
+    let (state, _can_spend, key_id) = authenticate_provider_key(&ctx.mcp, &headers)?;
+    let out = crate::tools::dispatch(&state, "get_account_info", json!({}), None)
+        .await
+        .map_err(|e| OpenAiError::internal(format!("get_account_info: {e}")))?;
+    let mut map = crate::projection::balances_map(&out.data);
+    if let Some(key) = read_key(&state, key_id.as_deref()) {
+        map.insert("key_budget".into(), key_budget_json(&key));
+    }
+    // The marketplace this wallet is pointed at (env-resolved, so norm's
+    // sidebar links the right Overpay per staging/prod build without its
+    // own copy of the URL table).
+    map.insert(
+        "overpay_url".into(),
+        Value::String(
+            state
+                .overpay
+                .base_url()
+                .as_str()
+                .trim_end_matches('/')
+                .to_string(),
+        ),
+    );
+    Ok(Json(stamp_as_of(&state, Value::Object(map))))
 }
 
 // ---------------------------------------------------------------------------
@@ -1095,16 +1133,19 @@ fn project_balances(
     // midnight in the wallet's timezone). `null` budget/remaining means no
     // limit was set.
     if let Some(key) = key {
-        out.insert(
-            "key_budget".into(),
-            json!({
-                "daily_budget_usd": key.daily_budget_usd_cents.map(cents_to_usd),
-                "spent_today_usd": cents_to_usd(key.spent_today_usd_cents()),
-                "remaining_today_usd": key.remaining_today_usd_cents().map(cents_to_usd),
-            }),
-        );
+        out.insert("key_budget".into(), key_budget_json(key));
     }
     Value::Object(out)
+}
+
+/// The calling key's daily-budget block, shared by [`project_balances`]
+/// and the `/status` endpoint. `null` budget/remaining means no limit.
+fn key_budget_json(key: &owallet_db::ProviderKeyRow) -> Value {
+    json!({
+        "daily_budget_usd": key.daily_budget_usd_cents.map(cents_to_usd),
+        "spent_today_usd": cents_to_usd(key.spent_today_usd_cents()),
+        "remaining_today_usd": key.remaining_today_usd_cents().map(cents_to_usd),
+    })
 }
 
 /// Shared allowlist for one marketplace listing — see
@@ -2802,6 +2843,74 @@ mod tests {
         let mut server = TestServer::new(app).unwrap();
         server.add_header(header::AUTHORIZATION, format!("Bearer {key}"));
         server
+    }
+
+    #[tokio::test]
+    async fn status_requires_a_provider_key() {
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state("http://127.0.0.1:1", &tmp);
+        let server = TestServer::new(router(state)).unwrap();
+        let response = server.get("/status").await;
+        response.assert_status(StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn status_reports_projected_balances_credits_and_key_budget() {
+        let overpay = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/account"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "account_number": "1234567890123456"
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/merchant_credits"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": [{
+                    "holder_type": "user", "seller_slug": "openrouter-bot",
+                    "balance_cents": 480, "id": "MC1"
+                }]
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        // EVM RPC on a dead local port: the balance read fails fast into
+        // `balance_error` instead of reaching out to a real chain.
+        let state = seeded_state(&overpay.uri(), &tmp)
+            .with_evm("http://127.0.0.1:1".into(), "eip155:8453".into());
+        let server = test_server_with_key(state, "chat", Some(500));
+
+        let response = server.get("/status").await;
+        response.assert_status_ok();
+        let body: Value = response.json();
+
+        // Chain-free: the projection must drop identifiers the raw
+        // account payload carries.
+        for leak in ["address", "npub", "pubkey", "zcash_address"] {
+            assert!(body.get(leak).is_none(), "{leak} must not leak: {body}");
+        }
+        let credits = body["merchant_credits"].as_array().expect("credits");
+        assert_eq!(credits[0]["seller_slug"], "openrouter-bot");
+        assert_eq!(credits[0]["balance_cents"], 480);
+        assert!(
+            credits[0].get("id").is_none(),
+            "credit ids are not projected"
+        );
+        assert_eq!(body["key_budget"]["daily_budget_usd"], 5.0);
+        assert_eq!(body["key_budget"]["spent_today_usd"], 0.0);
+        assert_eq!(body["key_budget"]["remaining_today_usd"], 5.0);
+        assert!(
+            body["balance_error"].is_string(),
+            "dead RPC surfaces balance_error"
+        );
+        assert!(body["as_of"].is_string(), "as_of stamp present");
+        assert_eq!(
+            body["overpay_url"].as_str().expect("overpay_url"),
+            overpay.uri().trim_end_matches('/'),
+            "status reports the wallet's configured marketplace URL"
+        );
     }
 
     #[test]
