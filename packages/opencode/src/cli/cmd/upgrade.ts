@@ -6,6 +6,9 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 export const UpgradeCommand = {
   command: "upgrade [target]",
+  // norm: `update` is the same command — half of muscle memory types one,
+  // half the other (yargs aliases share the builder and handler).
+  aliases: ["update"],
   describe: "upgrade opencode to the latest or a specific version",
   builder: (yargs: Argv) => {
     return yargs
