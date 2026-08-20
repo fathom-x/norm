@@ -18,8 +18,8 @@ up owallet and connect to Overpay's servers by default.
 ## The norm layer
 
 The fork's own behavior lives in `packages/opencode/src/norm/norm.ts`
-plus three surgical hook-ins, kept deliberately tiny so opencode syncs
-stay cheap:
+plus a handful of surgical hook-ins, kept deliberately tiny so opencode
+syncs stay cheap:
 
 - `src/config/config.ts` seeds `Norm.defaults()` — the `overpay`
   provider (owallet's `/v1` OpenAI-compatible endpoint via
@@ -39,6 +39,19 @@ stay cheap:
   prompt for overpay-provider models — the inherited opencode prompts
   send capability questions to the opencode docs, but marketplace
   capabilities live in the tools owallet attaches server-side.
+- **Real spend in the cost display** (three one-spot edits, all beside
+  upstream's equivalent Copilot handling — keep them together when a
+  sync moves that code). opencode estimates cost as tokens x a list
+  price, but the overpay provider has no price list and the marketplace
+  *knows* the settled charge, so owallet (>= 0.1.5) reports it as a
+  `usage.charged_cents` extension and norm spends that number instead:
+  `src/session/llm.ts` turns on `includeRawChunks` for the provider (the
+  AI SDK's standard usage mapping drops the field, so only raw chunks
+  carry it), `src/session/llm/ai-sdk.ts` lifts it out of those chunks
+  into `providerMetadata.overpay.chargedCents`, and
+  `src/session/session.ts`'s `getUsage` prefers it over the token x price
+  arithmetic. Without these the sidebar reads `$0.00 spent` for turns
+  that spent real money.
 
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the

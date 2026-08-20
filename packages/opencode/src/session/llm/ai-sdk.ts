@@ -15,6 +15,7 @@ export function adapterState() {
     currentReasoningID: undefined as string | undefined,
     toolNames: {} as Record<string, string>,
     copilotTotalNanoAiu: undefined as number | undefined,
+    overpayChargedCents: undefined as number | undefined,
   }
 }
 
@@ -39,6 +40,23 @@ function copilotTotalNanoAiu(value: unknown) {
   const total = (usage as Record<string, unknown>).total_nano_aiu
   if (typeof total !== "number" || !Number.isFinite(total) || total < 0) return
   return total
+}
+
+// norm: owallet reports what the marketplace actually charged the wallet
+// for the turn as a `usage.charged_cents` extension (owallet >= 0.1.5) —
+// an integer, because it is real money. OpenAI's usage schema has no cost
+// field, so the AI SDK's standard mapping drops it and only the raw chunk
+// carries it. Same predicament as Copilot's AIU above, same treatment.
+function overpayChargedCents(value: unknown) {
+  if (!value || typeof value !== "object") return
+  const raw = value as Record<string, unknown>
+  const response =
+    raw.response && typeof raw.response === "object" ? (raw.response as Record<string, unknown>) : undefined
+  const usage = raw.usage ?? response?.usage
+  if (!usage || typeof usage !== "object") return
+  const cents = (usage as Record<string, unknown>).charged_cents
+  if (typeof cents !== "number" || !Number.isFinite(cents) || cents < 0) return
+  return cents
 }
 
 function usage(value: unknown) {
@@ -87,7 +105,7 @@ export function toLLMEvents(
     case "finish-step":
       return Effect.sync(() => {
         const original = providerMetadata(event.providerMetadata)
-        const metadata =
+        const withCopilot =
           state.copilotTotalNanoAiu === undefined
             ? original
             : {
@@ -97,7 +115,18 @@ export function toLLMEvents(
                   totalNanoAiu: state.copilotTotalNanoAiu,
                 },
               }
+        const metadata =
+          state.overpayChargedCents === undefined
+            ? withCopilot
+            : {
+                ...withCopilot,
+                overpay: {
+                  ...withCopilot?.overpay,
+                  chargedCents: state.overpayChargedCents,
+                },
+              }
         state.copilotTotalNanoAiu = undefined
+        state.overpayChargedCents = undefined
         return [
           LLMEvent.stepFinish({
             index: state.step++,
@@ -274,6 +303,7 @@ export function toLLMEvents(
     case "raw":
       return Effect.sync(() => {
         state.copilotTotalNanoAiu = copilotTotalNanoAiu(event.rawValue) ?? state.copilotTotalNanoAiu
+        state.overpayChargedCents = overpayChargedCents(event.rawValue) ?? state.overpayChargedCents
         return []
       })
 
