@@ -4,6 +4,19 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+## 0.1.4
+
+### Wallet status for norm's sidebar (fathom-x/overpay#415, fathom-x/norm#9)
+
+- **`GET /v1/status`** — chain-free wallet status beside `/v1/models`:
+  provider-key auth, balances and merchant credits projected through the
+  same allowlist as the `get_balances` wallet tool, the calling key's
+  daily-budget block, the wallet's configured `overpay_url`, and an
+  `as_of` stamp in the wallet's timezone. The per-request spend
+  allowance is deliberately absent — that ledger only exists inside a
+  chat request. Powers norm's sidebar widget; poll on the order of a
+  minute (the read hits the EVM RPC and Overpay live).
+
 ## 0.1.3
 
 ### Buyer-facing polish for metered orders (fathom-x/overpay#413)
