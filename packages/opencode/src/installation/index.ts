@@ -273,10 +273,24 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
         // norm: version-check against the fork's own releases, not upstream
         // opencode's. `releases/latest` is unusable here: owallet-v* releases
         // share this repo, and whichever release published most recently wins
-        // "latest" — so list releases (newest first) and take the newest bare
-        // v* tag. While the repo is private the anonymous request 404s and
-        // the caller treats that as "no update info" — set GITHUB_TOKEN to
-        // check against a private repo.
+        // "latest" — so read newest-first and take the newest bare v* tag.
+        // Prefer the releases.atom feed: it is served by github.com's web
+        // tier, not the REST API, so it doesn't consume the anonymous
+        // per-IP API quota (60/h — easily exhausted on a shared coworking
+        // or CI egress IP, and this very check used to contribute to that).
+        const atom = yield* httpOk
+          .execute(HttpClientRequest.get("https://github.com/fathom-x/norm/releases.atom"))
+          .pipe(
+            Effect.flatMap((feed) => feed.text),
+            Effect.orElseSucceed(() => ""),
+          )
+        const atomTag = atom.match(/\/releases\/tag\/(v\d[^"'<&]*)/)?.[1]
+        if (atomTag) return atomTag.replace(/^v/, "")
+
+        // Fallback: the REST API, which honors GITHUB_TOKEN — the atom feed
+        // 404s anonymously while the repo is private, and web-tier auth
+        // doesn't take a token. An anonymous API request against a private
+        // repo 404s too; the caller treats the failure as "no update info".
         const response = yield* httpOk.execute(
           HttpClientRequest.get("https://api.github.com/repos/fathom-x/norm/releases?per_page=30").pipe(
             HttpClientRequest.acceptJson,
