@@ -26,33 +26,37 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Pre-release: only the targets the team actually runs — the
+        # installer fetches x86_64-unknown-linux-musl for linux-x64 (static,
+        # works on glibc too) and aarch64-apple-darwin for Apple Silicon.
+        # Re-add the commented entries to restore the full matrix.
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             cross: true
             archive: tar.gz
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: false
-            archive: tar.gz
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            cross: true
-            archive: tar.gz
+          # - target: x86_64-unknown-linux-gnu
+          #   os: ubuntu-latest
+          #   cross: false
+          #   archive: tar.gz
+          # - target: aarch64-unknown-linux-musl
+          #   os: ubuntu-latest
+          #   cross: true
+          #   archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-14
             cross: false
             archive: tar.gz
           # macos-13 (the last Intel runner image) is retired; build the
           # x86_64 slice on the arm64 runner via cargo's cross-target support.
-          - target: x86_64-apple-darwin
-            os: macos-14
-            cross: false
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            cross: false
-            archive: zip
+          # - target: x86_64-apple-darwin
+          #   os: macos-14
+          #   cross: false
+          #   archive: tar.gz
+          # - target: x86_64-pc-windows-msvc
+          #   os: windows-latest
+          #   cross: false
+          #   archive: zip
 
     steps:
       - uses: actions/checkout@v4

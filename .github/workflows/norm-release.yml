@@ -64,4 +64,8 @@ jobs:
           OPENCODE_RELEASE: "1"
           OPENCODE_CHANNEL: latest
           OPENCODE_VERSION: ${{ steps.version.outputs.version }}
+          # Pre-release: only the targets the team actually runs (the
+          # installer's darwin-arm64 and glibc linux-x64 assets). Drop
+          # this line to build the full matrix again.
+          NORM_BUILD_TARGETS: "linux-x64,darwin-arm64"
         run: ./packages/opencode/script/build.ts

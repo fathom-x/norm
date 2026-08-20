@@ -113,8 +113,21 @@ const allTargets: {
   },
 ]
 
+// norm: NORM_BUILD_TARGETS="linux-x64,darwin-arm64" restricts a release
+// build to the named targets (keys are the asset suffix: os-arch plus
+// -musl/-baseline when set). Unset builds everything, same as upstream.
+const normTargetFilter = (process.env["NORM_BUILD_TARGETS"] ?? "")
+  .split(",")
+  .map((entry) => entry.trim())
+  .filter(Boolean)
+const targetKey = (item: (typeof allTargets)[number]) =>
+  [`${item.os}-${item.arch}`, item.avx2 === false ? "baseline" : undefined, item.abi].filter(Boolean).join("-")
+const buildableTargets = normTargetFilter.length
+  ? allTargets.filter((item) => normTargetFilter.includes(targetKey(item)))
+  : allTargets
+
 const targets = singleFlag
-  ? allTargets.filter((item) => {
+  ? buildableTargets.filter((item) => {
       if (item.os !== process.platform || item.arch !== process.arch) {
         return false
       }
@@ -132,7 +145,7 @@ const targets = singleFlag
 
       return true
     })
-  : allTargets
+  : buildableTargets
 
 await $`rm -rf dist`
 
