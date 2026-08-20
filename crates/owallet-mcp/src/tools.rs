@@ -51,6 +51,18 @@ pub enum ToolError {
     NotImplemented,
     #[error("wait_for_order: target {target} not reached within {seconds}s")]
     WaitTimeout { target: String, seconds: u64 },
+    #[error(
+        "this provider key is chat-scoped — spending tools need a key minted with the \
+         spend scope (owallet dashboard → provider keys)"
+    )]
+    ProviderKeyScope,
+    #[error(
+        "provider keys cannot use raw-address send tools — sends belong to the owallet \
+         dashboard, in the wallet owner's own hands"
+    )]
+    ProviderKeySends,
+    #[error("{0}")]
+    ProviderKeyBudget(String),
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -270,6 +282,7 @@ pub fn catalog() -> Vec<ToolSpec> {
 /// Handlers themselves still return a bare `Value`; [`dispatch`] renders
 /// the text and pairs the two together, so per-handler code stays a pure
 /// data fetch.
+#[derive(Debug)]
 pub struct ToolOutput {
     pub text: String,
     pub data: Value,
@@ -290,6 +303,12 @@ pub async fn dispatch(
     args: Value,
     progress: Option<&ProgressSink>,
 ) -> Result<ToolOutput, ToolError> {
+    // A provider-key session carries /v1's money rules onto this surface:
+    // scope-gate the explicit spending tools, refuse raw-address sends
+    // outright, and reserve `buy`'s up-front amount against the key's
+    // daily budget (released below if nothing left the wallet).
+    let buy_reservation_usd = gate_provider_key(state, name, &args)?;
+
     let data: Value = match name {
         "get_account_info" => get_account_info(state).await?,
         "list_marketplace" => list_marketplace(state, args).await?,
@@ -300,7 +319,21 @@ pub async fn dispatch(
         "wait_for_order" => wait_for_order(state, args, progress).await?,
         "redeem_merchant_credits" => redeem_merchant_credits(state, args).await?,
         "pay_order" => pay_order(state, args).await?,
-        "buy" => buy(state, args).await?,
+        // A hard error here means no payment was broadcast — hand a
+        // provider-key session's reservation back before propagating.
+        "buy" => match buy(state, args).await {
+            Ok(data) => data,
+            Err(e) => {
+                if let Some(usd) = buy_reservation_usd {
+                    crate::openai_compat::release_key_budget(
+                        state,
+                        state.provider_key_id.as_deref(),
+                        usd,
+                    );
+                }
+                return Err(e);
+            }
+        },
         "send_usdc" => send_usdc(state, args).await?,
         "send_zcash" => send_zcash(state, args).await?,
         "sync_zcash" => sync_zcash(state, args).await?,
@@ -308,15 +341,218 @@ pub async fn dispatch(
         "get_purchase" => get_purchase(state, args).await?,
         "sync_purchases" => sync_purchases(state, args).await?,
         "load_core_credits" => load_core_credits(state, args).await?,
-        other => {
-            return Err(ToolError::InvalidArg {
-                arg: "name",
-                reason: format!("unknown tool '{other}'"),
-            })
-        }
+        other => match marketplace_tool_call(state, other, &args).await? {
+            Some(data) => data,
+            None => {
+                return Err(ToolError::InvalidArg {
+                    arg: "name",
+                    reason: format!("unknown tool '{other}'"),
+                })
+            }
+        },
     };
+    if state.provider_key_id.is_some() {
+        settle_provider_key_budget(state, name, &data, buy_reservation_usd);
+    }
     let text = crate::render::render(name, &data);
     Ok(ToolOutput { text, data })
+}
+
+/// `/v1`'s money rules applied to a provider-key `/mcp` session, before
+/// the tool runs. Sessions without a provider key (OAuth token, local
+/// session) are untouched — this is about what a *key* may do, not a
+/// user. Returns the USD amount reserved up front for `buy`, if any.
+fn gate_provider_key(state: &McpState, name: &str, args: &Value) -> Result<Option<f64>, ToolError> {
+    use crate::openai_compat as v1;
+    let Some(key_id) = state.provider_key_id.as_deref() else {
+        return Ok(None);
+    };
+    // Raw-address sends stay out of a provider key's hands entirely, spend
+    // scope or not — same posture that keeps them off /v1.
+    if matches!(name, "send_usdc" | "send_zcash") {
+        return Err(ToolError::ProviderKeySends);
+    }
+    let spend_scoped = matches!(
+        name,
+        "create_order" | "pay_order" | "redeem_merchant_credits" | "buy" | "load_core_credits"
+    );
+    if spend_scoped && !state.provider_key_can_spend {
+        return Err(ToolError::ProviderKeyScope);
+    }
+    match name {
+        // A redemption's amount is knowable only after the fact, so an
+        // exhausted budget refuses up front and the actual amount is
+        // recorded after — the same soft gate as /v1's pay_order.
+        "pay_order" | "redeem_merchant_credits" => {
+            if let Some(key) = v1::read_key(state, Some(key_id)) {
+                if key.remaining_today_usd_cents() == Some(0) {
+                    return Err(exhausted_budget_error(&key));
+                }
+            }
+            Ok(None)
+        }
+        // `buy` states its amount in the arguments, so it reserves
+        // atomically up front, like /v1's buy_credits.
+        "buy" => {
+            let amount_usd = args
+                .get("amount_usd")
+                .and_then(Value::as_f64)
+                .unwrap_or(f64::NAN);
+            v1::reserve_key_budget(state, Some(key_id), amount_usd)
+                .map_err(ToolError::ProviderKeyBudget)?;
+            Ok(Some(amount_usd))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn exhausted_budget_error(key: &owallet_db::ProviderKeyRow) -> ToolError {
+    ToolError::ProviderKeyBudget(format!(
+        "key budget exhausted: this key's ${:.2} daily budget is spent — it resets at \
+         the wallet's local midnight, and the wallet owner can raise it from the wallet \
+         dashboard",
+        crate::openai_compat::cents_to_usd(key.daily_budget_usd_cents.unwrap_or(0))
+    ))
+}
+
+/// After-the-fact half of the provider-key budget rules: record what a
+/// redemption actually applied, and hand back a `buy` reservation whose
+/// payment never moved funds (`buy`'s soft-error shapes mean the order
+/// was created but not paid).
+fn settle_provider_key_budget(
+    state: &McpState,
+    name: &str,
+    data: &Value,
+    buy_reservation_usd: Option<f64>,
+) {
+    use crate::openai_compat as v1;
+    let key_id = state.provider_key_id.as_deref();
+    match name {
+        "pay_order" | "redeem_merchant_credits" => {
+            let cents = data
+                .get("amount_redeemed_cents")
+                .and_then(Value::as_f64)
+                .or_else(|| {
+                    data.pointer("/data/amount_redeemed_cents")
+                        .and_then(Value::as_f64)
+                });
+            if let Some(cents) = cents {
+                v1::record_key_budget(state, key_id, cents / 100.0);
+            }
+        }
+        "buy" if data.get("error").is_some() => {
+            if let Some(usd) = buy_reservation_usd {
+                v1::release_key_budget(state, key_id, usd);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One-shot marketplace purchase tools — /v1's high-level roster on /mcp
+// ---------------------------------------------------------------------------
+
+/// Marketplace-backed one-shot tools appended to `tools/list`:
+/// `run_python` plus every `provider_tool`-marked listing, mirroring the
+/// `/v1` endpoint's roster (and executed by the very same helpers). One
+/// tool call is one complete purchase — place, pay with merchant credits,
+/// poll to terminal, return the deliverable — so a client-side agent
+/// (norm) buys inline with its inference instead of walking the
+/// browse → create → pay → wait primitives one model turn at a time.
+///
+/// Fetched live, no cache: `tools/list` happens once per client session,
+/// and the marketplace fetch is dwarfed by any actual purchase. A failed
+/// fetch degrades to the static catalog alone — same posture as `/v1`'s
+/// "that request runs without listing tools".
+///
+/// A marketplace name colliding with a static catalog tool is skipped:
+/// [`dispatch`] matches static names first, so the listing could never be
+/// executed under that name anyway — advertising it would lie.
+pub async fn marketplace_specs(state: &McpState) -> Vec<Value> {
+    let static_names: Vec<&str> = catalog().iter().map(|t| t.name).collect();
+    let mut specs = Vec::new();
+    if let Ok(def) = crate::openai_compat::run_python_tool_def(state).await {
+        specs.push(json!({
+            "name": crate::openai_compat::RUN_PYTHON_TOOL_NAME,
+            "description": def.pointer("/function/description").cloned().unwrap_or_default(),
+            "inputSchema": def.pointer("/function/parameters").cloned()
+                .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+        }));
+    }
+    if let Ok(tools) = crate::openai_compat::fetch_listing_tools(state).await {
+        for tool in tools {
+            if static_names.contains(&tool.name.as_str())
+                || tool.name == crate::openai_compat::RUN_PYTHON_TOOL_NAME
+            {
+                continue;
+            }
+            specs.push(json!({
+                "name": tool.name,
+                "description": tool.description,
+                "inputSchema": tool.parameters,
+            }));
+        }
+    }
+    specs
+}
+
+/// Execute a one-shot marketplace tool by name, or `None` when the name
+/// is neither `run_python` nor a currently-marked listing (the caller
+/// falls through to its unknown-tool error). Purchase failures surface as
+/// [`ToolError::Internal`] with the `/v1` helper's own message — payment
+/// refusals included, since the fix (load credits) is the same either
+/// way.
+async fn marketplace_tool_call(
+    state: &McpState,
+    name: &str,
+    args: &Value,
+) -> Result<Option<Value>, ToolError> {
+    use crate::openai_compat as v1;
+
+    // One-shots are operating cost, allowed for chat-scoped keys like
+    // /v1's own turns — but an exhausted daily budget refuses up front,
+    // and every purchase below records (and settlement-nets) against the
+    // key via the shared place-and-pay path.
+    let key_id = state.provider_key_id.as_deref();
+    if let Some(key) = key_id.and_then(|id| v1::read_key(state, Some(id))) {
+        if key.remaining_today_usd_cents() == Some(0) {
+            return Err(exhausted_budget_error(&key));
+        }
+    }
+
+    if name == v1::RUN_PYTHON_TOOL_NAME {
+        let (_npub, auth) = state.resolve_owned_auth()?;
+        let data = v1::run_python_tool(
+            state,
+            &auth,
+            args,
+            v1::REQUEST_TIMEOUT,
+            v1::POLL_INTERVAL,
+            key_id,
+        )
+        .await
+        .map_err(|e| ToolError::Internal(e.message().to_string()))?;
+        return Ok(Some(data));
+    }
+
+    let tools = v1::fetch_listing_tools(state).await.unwrap_or_default();
+    let Some(tool) = tools.into_iter().find(|t| t.name == name) else {
+        return Ok(None);
+    };
+    let (_npub, auth) = state.resolve_owned_auth()?;
+    let data = v1::run_listing_tool(
+        state,
+        &auth,
+        &tool,
+        args,
+        v1::REQUEST_TIMEOUT,
+        v1::POLL_INTERVAL,
+        key_id,
+    )
+    .await
+    .map_err(|e| ToolError::Internal(e.message().to_string()))?;
+    Ok(Some(data))
 }
 
 /// [`dispatch`], then sanitize the result for transmission off-machine

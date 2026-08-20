@@ -81,6 +81,15 @@ pub fn render_error(e: &ToolError) -> String {
             "Next: check the recipient UA, that ZEC_LIGHTWALLETD_URL is reachable, and that the wallet holds enough spendable ZEC (run sync_zcash)."
         }
         ToolError::NotImplemented => "Next: this action isn't available in this build.",
+        ToolError::ProviderKeyScope => {
+            "Next: ask the wallet owner for a provider key minted with the spend scope, or do this from the owallet dashboard."
+        }
+        ToolError::ProviderKeySends => {
+            "Next: the wallet owner can send from the owallet dashboard's Send card."
+        }
+        ToolError::ProviderKeyBudget(_) => {
+            "Next: wait for the daily reset, or ask the wallet owner to raise this key's budget on the dashboard."
+        }
         ToolError::Internal(_) => "Next: this is an internal error — retry; if it persists, report it.",
     };
     format!("⚠️ {base}\n{hint}")
