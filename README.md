@@ -64,6 +64,26 @@ to offering the manual steps interactively (`owallet init` +
 `owallet generate`), and you can always run those — and
 `owallet authorize` — yourself.
 
+### Trying it without touching your wallet
+
+`NORM_HOME` puts everything norm owns — its own state, the owallet wallet
+database, the binaries, and the port owallet serves on — inside one
+directory, so you can run a completely fresh install next to your real one
+and throw it away afterwards:
+
+```bash
+export NORM_HOME=/tmp/example
+curl -fsSL https://raw.githubusercontent.com/fathom-x/norm/main/install | bash
+$NORM_HOME/bin/norm          # first-run setup, against a fresh wallet
+rm -rf $NORM_HOME            # gone, real wallet untouched
+```
+
+Export it before launching (it is read at startup). With `NORM_HOME` set,
+none of the state norm owns lives outside that directory: not the wallet
+database in `~/.owallet`, not `~/.norm`, not your shell config. (Your
+project files and project config are still read normally — it sandboxes
+norm's own footprint, not the editor.)
+
 ### Agents
 
 Norm includes two built-in agents you can switch between with the `Tab` key.

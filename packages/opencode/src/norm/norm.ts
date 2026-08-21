@@ -3,7 +3,7 @@ export * as Norm from "./norm"
 import path from "path"
 import os from "os"
 import fs from "fs/promises"
-import { existsSync } from "fs"
+import { existsSync, mkdirSync } from "fs"
 import { spawn, execFile } from "child_process"
 import { Global } from "@opencode-ai/core/global"
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
@@ -14,6 +14,9 @@ import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 // it will bring up `owallet serve` and mint a provider key when it can do so
 // non-interactively. Everything here is a *default*: any user or project
 // config merges over it, and NORM_DISABLE=1 turns the whole layer off.
+//
+// NORM_HOME=/tmp/example relocates everything norm owns — state, wallet DB,
+// binaries, serve port — under one throwaway directory (see `normHome`).
 
 export const PROVIDER_ID = "overpay"
 export const MCP_NAME = "owallet"
@@ -47,9 +50,73 @@ export function owalletEnv(): OwalletEnv {
   return DEFAULT_ENV
 }
 
-/** Base URL of the owallet server. `NORM_OWALLET_URL` overrides the default. */
+/**
+ * `NORM_HOME=/tmp/example` — the sandbox root. Everything norm owns moves
+ * under it: the XDG dirs (see `@opencode-ai/core/global`), the owallet wallet
+ * database and its state/config dirs, the bundled binaries, and the port the
+ * auto-started `owallet serve` listens on. It exists so a fresh install can be
+ * exercised end to end — first-run prompts, wallet setup, key mint and all —
+ * without touching the real ~/.owallet, ~/.norm or XDG dirs. Returns an
+ * absolute path (owallet children may run from another cwd), or undefined
+ * when unset.
+ */
+export function normHome(): string | undefined {
+  const value = process.env.NORM_HOME?.trim()
+  return value ? path.resolve(value) : undefined
+}
+
+/** Where a sandbox keeps owallet's DB, per-wallet state and `*.owallet` config. */
+function sandboxOwalletDir(root: string) {
+  return path.join(root, "owallet")
+}
+
+// Sandbox ports live above owallet's own 8765/8766/8767 so a sandbox never
+// lands on the prod/dev/staging default.
+const SANDBOX_PORT_BASE = 8800
+const SANDBOX_PORT_SPAN = 1000
+
+/**
+ * The port a sandboxed owallet serves on: derived from the root path, so it is
+ * stable across launches (the same sandbox reuses its own serve) and distinct
+ * per sandbox. A sandbox must NOT default to the ordinary port — `ensureServer`
+ * reuses whatever already answers there, which would quietly hand the sandbox
+ * the real wallet's running serve. `NORM_OWALLET_URL` still pins it explicitly.
+ */
+function sandboxPort(root: string): string {
+  let hash = 5381
+  for (let i = 0; i < root.length; i++) hash = ((hash * 33) ^ root.charCodeAt(i)) >>> 0
+  return String(SANDBOX_PORT_BASE + (hash % SANDBOX_PORT_SPAN))
+}
+
+/**
+ * Point owallet's own env vars at the sandbox, so every owallet norm runs —
+ * the auto-started `serve`, first-run `init`/`generate`, `authorize`,
+ * `provider-key create` — reads and writes inside `NORM_HOME`. setdefault
+ * semantics: an explicitly exported `OWALLET_*` always wins. No-op without a
+ * sandbox. Idempotent; called from every entry point that may spawn owallet.
+ */
+export function applySandboxEnv(): void {
+  const root = normHome()
+  if (!root) return
+  const dir = sandboxOwalletDir(root)
+  // `owallet init` creates the DB's parent itself, but the `*.owallet` config
+  // scaffolding it writes alongside does not.
+  try {
+    mkdirSync(dir, { recursive: true })
+  } catch {}
+  if (!process.env.OWALLET_HOME) process.env.OWALLET_HOME = dir
+  if (!process.env.OWALLET_DB_PATH) process.env.OWALLET_DB_PATH = path.join(dir, "owallet.db")
+  if (!process.env.OWALLET_CONFIG_DIR) process.env.OWALLET_CONFIG_DIR = dir
+}
+
+/**
+ * Base URL of the owallet server. `NORM_OWALLET_URL` overrides the default;
+ * under `NORM_HOME` the default port is the sandbox's own (see `sandboxPort`).
+ */
 export function owalletUrl() {
   if (process.env.NORM_OWALLET_URL) return process.env.NORM_OWALLET_URL.replace(/\/+$/, "")
+  const root = normHome()
+  if (root) return `http://127.0.0.1:${sandboxPort(root)}`
   return `http://127.0.0.1:${ENV_PORTS[owalletEnv()]}`
 }
 
@@ -85,8 +152,10 @@ function homeDir() {
 }
 
 /** Where owallet keeps its encrypted DB (mirrors `owallet_db::default_db_path`). */
-function owalletDbPath() {
+export function owalletDbPath() {
   if (process.env.OWALLET_DB_PATH) return process.env.OWALLET_DB_PATH
+  const root = normHome()
+  if (root) return path.join(sandboxOwalletDir(root), "owallet.db")
   return path.join(homeDir(), ".owallet", "owallet.db")
 }
 
@@ -96,6 +165,8 @@ function owalletBinaryName() {
 
 /** The owallet the norm installer manages, alongside the norm binary itself. */
 export function bundledOwalletPath() {
+  const root = normHome()
+  if (root) return path.join(root, "bin", owalletBinaryName())
   return path.join(homeDir(), ".norm", "bin", owalletBinaryName())
 }
 
@@ -139,6 +210,10 @@ export async function recordOwalletChoice(choice: OwalletChoice): Promise<void> 
 export function resolveOwalletBinary(choice?: OwalletChoice): string | undefined {
   const bundled = existsSync(bundledOwalletPath()) ? bundledOwalletPath() : undefined
   const system = systemOwalletPath()
+  // A sandbox is deterministic and prompt-free: its own binary if one was
+  // installed there, otherwise whatever is on PATH — which is the point of
+  // pointing NORM_HOME at an empty directory (fresh state, existing binary).
+  if (normHome()) return bundled ?? system
   if (choice === "bundled") return bundled ?? system
   if (choice === "system") return system ?? bundled
   return system ?? bundled
@@ -155,6 +230,8 @@ export function resolveOwalletBinary(choice?: OwalletChoice): string | undefined
  */
 export async function needsOwalletChoice(): Promise<boolean> {
   if (disabled()) return false
+  // Nothing to decide in a sandbox — `resolveOwalletBinary` picks for it.
+  if (normHome()) return false
   if ((await readOwalletChoice()) !== undefined) return false
   return systemOwalletPath() !== undefined
 }
@@ -163,11 +240,12 @@ export async function needsOwalletChoice(): Promise<boolean> {
  * First-run prompt: an existing owallet was found next to norm's bundled
  * one — ask which the bootstrap should use, and remember the answer. `ask`
  * is injected by the CLI layer (UI.input) so this module stays UI-free.
- * No-op outside a TTY or when there is nothing to decide. Either way the
- * wallet database (~/.owallet) is shared — this only picks the server
- * binary norm auto-starts.
+ * No-op outside a TTY, in a NORM_HOME sandbox, or when there is nothing to
+ * decide. Either way the wallet database (~/.owallet) is shared — this only
+ * picks the server binary norm auto-starts.
  */
 export async function firstRunOwalletChoice(ask: (prompt: string) => Promise<string>): Promise<void> {
+  applySandboxEnv()
   if (!process.stdin.isTTY || !process.stdout.isTTY) return
   if (!(await needsOwalletChoice())) return
   const system = systemOwalletPath()
@@ -408,6 +486,7 @@ export async function firstRunWalletSetup(
   ask: (prompt: string) => Promise<string>,
   askSecret: (prompt: string) => Promise<string>,
 ): Promise<void> {
+  applySandboxEnv()
   if (!process.stdin.isTTY || !process.stdout.isTTY) return
   if (!(await needsWalletSetup())) return
   const bin = (await owalletBinary())!
@@ -834,6 +913,15 @@ async function ensureProviderKey(): Promise<void> {
  */
 export async function bootstrap(): Promise<void> {
   if (disabled()) return
+  applySandboxEnv()
+  const sandbox = normHome()
+  if (sandbox) {
+    // Loud on purpose: a sandbox is opt-in, and the one thing its user needs
+    // to know is that this norm is nowhere near their real wallet.
+    process.stderr.write(
+      `[norm] NORM_HOME=${sandbox} — wallet db ${owalletDbPath()}, owallet ${owalletUrl()}\n`,
+    )
+  }
   await applyAutoSetupPassword().catch(() => {})
   await ensureServer(owalletUrl()).catch((error) => {
     debug("owallet auto-start failed:", error)

@@ -188,6 +188,11 @@ const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProcess.Serv
       }),
       method: Effect.fn("Installation.method")(function* () {
         if (process.execPath.includes(path.join(".norm", "bin"))) return "curl" as Method
+        // A NORM_HOME sandbox is a curl install too — the installer put the
+        // binary in <NORM_HOME>/bin, and inherits NORM_HOME on the way back
+        // out, so `upgrade` replaces the sandbox's copy and nothing else.
+        if (process.env["NORM_HOME"] && process.execPath.startsWith(path.resolve(process.env["NORM_HOME"])))
+          return "curl" as Method
         if (process.execPath.includes(path.join(".opencode", "bin"))) return "curl" as Method
         if (process.execPath.includes(path.join(".local", "bin"))) return "curl" as Method
         const exec = process.execPath.toLowerCase()
