@@ -379,6 +379,27 @@ export async function recordAutoSetup(defaultPassword: boolean): Promise<void> {
 }
 
 /**
+ * Overpay-connect state for wallets norm set up. `false` = the wallet was
+ * created but `owallet authorize` has not succeeded yet, so the launch
+ * sequence keeps re-offering it (connecting is part of getting started —
+ * norm is Overpay-preconfigured, and an unlinked wallet can't buy
+ * anything). Wallets that predate norm's setup are never marked and never
+ * nagged: they were "started" before this rule existed.
+ */
+export async function readOverpayAuthorized(): Promise<boolean | undefined> {
+  const state = await readWalletSetupState()
+  return typeof state?.authorized === "boolean" ? state.authorized : undefined
+}
+
+export async function recordOverpayAuthorized(authorized: boolean): Promise<void> {
+  const state = (await readWalletSetupState()) ?? {}
+  await fs.writeFile(
+    walletSetupFile(),
+    JSON.stringify({ ...state, authorized }, null, 2) + "\n",
+  )
+}
+
+/**
  * Make the auto-set-up wallet's default password available to this process
  * (serve auto-start, provider-key mint, CLI children) when the user hasn't
  * exported their own. Only applies to a DB the auto-setup created under the
@@ -483,21 +504,23 @@ async function autoWalletSetup(bin: string, ask: (prompt: string) => Promise<str
   // launches restore it from the setup marker via applyAutoSetupPassword.
   process.env.OWALLET_PASSWORD = password
 
+  // Connecting to Overpay is part of getting started, not an option: norm
+  // exists to route through the marketplace, and an unlinked wallet can't
+  // buy anything. The browser OAuth (PKCE) flow opens now; a failed or
+  // abandoned attempt is retried on every launch until it succeeds
+  // (`ensureOverpayConnected`).
   process.stderr.write(
-    "\nWallet ready. Connecting to Overpay links this wallet to your Overpay\n" +
-      "account (opens your browser to log in and authorize; norm's provider\n" +
-      "key is minted automatically afterwards).\n\n",
+    "\nWallet ready. Connecting to Overpay — this links the wallet to your\n" +
+      "Overpay account (your browser opens to log in and authorize; norm's\n" +
+      "provider key is minted automatically afterwards).\n\n",
   )
-  const answer = (await ask("Connect to Overpay now? [Y/n]: ")).trim().toLowerCase()
-  if (answer === "n" || answer === "no") {
-    process.stderr.write("Skipping — run `owallet authorize` anytime to link this wallet to Overpay.\n")
-    return
-  }
   const code = await runInteractive(bin, [...envFlagArgs(), "authorize"], env)
+  await recordOverpayAuthorized(code === 0)
   process.stderr.write(
     code === 0
       ? "Connected to Overpay.\n"
-      : "Overpay connect didn't complete — run `owallet authorize` anytime to retry.\n",
+      : "Overpay connect didn't complete — norm will retry on the next launch\n" +
+          "(or run `owallet authorize` yourself).\n",
   )
 }
 
@@ -593,11 +616,54 @@ export async function firstRunWalletSetup(
   // not persisted anywhere — export it in the shell to keep auto-start
   // working across launches.
   process.env.OWALLET_PASSWORD = password
+
+  // Same mandate as the auto path: a norm wallet gets started by
+  // connecting to Overpay. Failed attempts retry on later launches.
+  process.stderr.write("\nWallet ready. Connecting to Overpay (your browser opens to authorize)...\n")
+  const authCode = await runInteractive(bin, [...envFlagArgs(), "authorize"], env)
+  await recordOverpayAuthorized(authCode === 0)
   process.stderr.write(
-    "\nWallet ready. norm will now start `owallet serve` and mint an overpay\n" +
-      "provider key for this session. To keep that automatic across launches,\n" +
-      "export OWALLET_PASSWORD in your shell profile (or run `owallet serve`\n" +
+    authCode === 0
+      ? "Connected to Overpay.\n"
+      : "Overpay connect didn't complete — norm will retry on the next launch.\n",
+  )
+  process.stderr.write(
+    "\nnorm will now start `owallet serve` and mint an overpay provider key\n" +
+      "for this session. To keep that automatic across launches, export\n" +
+      "OWALLET_PASSWORD in your shell profile (or run `owallet serve`\n" +
       "yourself before starting norm).\n",
+  )
+}
+
+/**
+ * Retry the mandatory Overpay connect on launch: a wallet norm set up whose
+ * `owallet authorize` hasn't succeeded yet (browser closed, no browser,
+ * OAuth abandoned) gets the flow re-run before the TUI takes the terminal,
+ * every launch, until it lands. Only wallets carrying the setup marker are
+ * eligible — a pre-existing wallet norm didn't create is never nagged.
+ * TTY-only (the flow needs a browser and a terminal).
+ */
+export async function ensureOverpayConnected(): Promise<void> {
+  if (disabled()) return
+  applySandboxEnv()
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return
+  if ((await readOverpayAuthorized()) !== false) return
+  if (!existsSync(owalletDbPath())) return
+  const bin = await owalletBinary()
+  if (!bin) return
+  await applyAutoSetupPassword().catch(() => {})
+  process.stderr.write(
+    "\nnorm needs this wallet connected to Overpay to get started — opening\n" +
+      "your browser to authorize...\n",
+  )
+  const code = await runInteractive(bin, [...envFlagArgs(), "authorize"], {
+    ...process.env,
+  })
+  await recordOverpayAuthorized(code === 0)
+  process.stderr.write(
+    code === 0
+      ? "Connected to Overpay.\n"
+      : "Overpay connect didn't complete — norm will retry on the next launch.\n",
   )
 }
 

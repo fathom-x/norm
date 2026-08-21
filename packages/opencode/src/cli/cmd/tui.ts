@@ -159,6 +159,9 @@ export const TuiThreadCommand = cmd({
       const { Norm } = await import("@/norm/norm")
       await Norm.firstRunOwalletChoice(UI.input).catch(() => {})
       await Norm.firstRunWalletSetup(UI.input, UI.inputSecret).catch(() => {})
+      // Getting started means being connected to Overpay: retry a
+      // not-yet-successful authorize on every launch until it lands.
+      await Norm.ensureOverpayConnected().catch(() => {})
     }
     const noReplay = args.replay === false || args.noReplay === true
 

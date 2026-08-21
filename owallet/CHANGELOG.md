@@ -4,6 +4,16 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+## 0.1.9
+
+### Core credits marked in status and balances
+
+- Merchant-credit rows in `get_account_info` / `GET /v1/status` now carry
+  the Rails-provided `core` flag on the overpay org's core-credit pool,
+  so clients (norm's sidebar) can pin the marketplace's primary spend
+  balance first. Requires an Overpay deploy that tags the row; absent
+  the flag nothing changes.
+
 ## 0.1.8
 
 ### Lenient ambient `.env` loading

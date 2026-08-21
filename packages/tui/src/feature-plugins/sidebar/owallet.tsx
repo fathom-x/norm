@@ -77,7 +77,13 @@ type OwalletStatus = {
   balance_error?: string
   /** The marketplace this wallet points at (env-resolved server-side). */
   overpay_url?: string
-  merchant_credits?: Array<{ seller_slug?: string; organization_slug?: string; balance_cents?: number }>
+  merchant_credits?: Array<{
+    seller_slug?: string
+    organization_slug?: string
+    balance_cents?: number
+    /** Marks the overpay org's core-credit pool — pinned above everything. */
+    core?: boolean
+  }>
   key_budget?: {
     daily_budget_usd?: number | null
     spent_today_usd?: number
@@ -165,7 +171,13 @@ function View(props: { api: TuiPluginApi }) {
     if (timer) clearTimeout(timer)
   })
 
-  const credits = () => status()?.merchant_credits?.filter((row) => (row.balance_cents ?? 0) > 0) ?? []
+  // Core credits are the marketplace's primary spend balance: pinned to the
+  // very top of the widget (above the chain balances) and shown even at $0.
+  // Requires owallet >= 0.1.9 + a Rails deploy that tags the row; without
+  // the flag the row renders among the ordinary credits as before.
+  const coreCredits = () => status()?.merchant_credits?.find((row) => row.core === true)
+  const credits = () =>
+    status()?.merchant_credits?.filter((row) => row.core !== true && (row.balance_cents ?? 0) > 0) ?? []
   const budget = () => status()?.key_budget
   const waiting = () => status() === undefined
   const error = () => stateLine(outcome())
@@ -175,6 +187,11 @@ function View(props: { api: TuiPluginApi }) {
       <text fg={theme().text}>
         <b>owallet</b>
       </text>
+      <Show when={coreCredits()}>
+        <text fg={theme().textMuted}>
+          core credits <span style={{ fg: theme().text }}>{usd((coreCredits()!.balance_cents ?? 0) / 100)}</span>
+        </text>
+      </Show>
       {/* Chain-qualified tickers (fathom-x/norm#22): both come from the
           wallet's configured EVM chain — Base for every wallet norm ships.
           If /v1/status ever reports the chain, derive the prefix from it. */}

@@ -280,3 +280,14 @@ test("a sandbox picks its owallet without prompting", async () => {
   expect(Norm.resolveOwalletBinary(undefined)).toBe(path.join(sandbox, "bin", "owallet"))
   expect(await Norm.needsOwalletChoice()).toBe(false)
 })
+
+test("overpay-authorized marker merges with the auto-setup marker", async () => {
+  expect(await Norm.readOverpayAuthorized()).toBeUndefined()
+  await Norm.recordAutoSetup(true)
+  await Norm.recordOverpayAuthorized(false)
+  // Both facts survive in the one setup file.
+  expect(await Norm.readOverpayAuthorized()).toBe(false)
+  expect(await Norm.readAutoSetupDefaultPassword()).toBe(true)
+  await Norm.recordOverpayAuthorized(true)
+  expect(await Norm.readOverpayAuthorized()).toBe(true)
+})
