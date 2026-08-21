@@ -456,6 +456,25 @@ async fn resolve_listing_id_cached(
     Ok(id)
 }
 
+/// Cost marker appended to every listing-backed tool description: each
+/// call places (and pays) a real marketplace order, and the roster itself
+/// should say so instead of leaving clients to hardcode it prompt-side.
+/// Priced from the listing's own fields (`price_usd` / `free`), so a
+/// repriced listing needs no Rust change to stay honest (fathom-x/norm#17).
+pub(crate) fn listing_cost_note(listing: &Value) -> String {
+    let price = listing.get("price_usd").and_then(Value::as_str);
+    if listing.get("free").and_then(Value::as_bool) == Some(true) || price == Some("Free") {
+        return " Each call places a real marketplace order (this listing is currently free)."
+            .to_string();
+    }
+    match price {
+        Some(price) => format!(
+            " Each call places a real marketplace order billed to the wallet (≈ {price} per call)."
+        ),
+        None => " Each call places a real marketplace order billed to the wallet.".to_string(),
+    }
+}
+
 /// The `run_python` tool definition offered to the model on every turn.
 /// `parameters` is the Python listing's own `buyer_note_schema` — already
 /// valid JSON Schema shaped exactly like an OpenAI tool's `parameters`
@@ -474,6 +493,7 @@ pub(crate) async fn run_python_tool_def(state: &McpState) -> Result<Value, OpenA
         .get("description")
         .and_then(Value::as_str)
         .unwrap_or("Run a Python 3.11 snippet in an isolated sandbox and return stdout, stderr, and exit code.");
+    let description = format!("{description}{}", listing_cost_note(inner));
 
     Ok(json!({
         "type": "function",
@@ -607,12 +627,21 @@ pub(crate) async fn fetch_listing_tools(state: &McpState) -> Result<Vec<ListingT
             name: name.to_string(),
             listing_id: listing_id.to_string(),
             seller_slug: seller_slug.to_string(),
-            description: inner
-                .get("description")
-                .and_then(Value::as_str)
-                .or_else(|| listing.get("description").and_then(Value::as_str))
-                .unwrap_or("A marketplace listing offered as a callable tool.")
-                .to_string(),
+            description: format!(
+                "{}{}",
+                inner
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .or_else(|| listing.get("description").and_then(Value::as_str))
+                    .unwrap_or("A marketplace listing offered as a callable tool."),
+                // Price fields ride the index row too; prefer the detail
+                // (`inner`) and fall back so either serialization works.
+                if inner.get("price_usd").is_some() || inner.get("free").is_some() {
+                    listing_cost_note(inner)
+                } else {
+                    listing_cost_note(listing)
+                }
+            ),
             parameters,
             wrapped,
         });
@@ -742,7 +771,8 @@ struct WalletToolSpec {
 const WALLET_TOOLS: &[WalletToolSpec] = &[
     WalletToolSpec {
         name: GET_BALANCES_TOOL,
-        description: "Check the wallet's balances: ETH / USDC / ZEC amounts, Overpay \
+        description: "Free — a read, no order is placed and nothing is billed. Check the \
+                      wallet's balances: ETH / USDC / ZEC amounts, Overpay \
                       merchant-credit balances per seller, this request's remaining \
                       spending allowance, and this key's remaining daily budget \
                       (if one is set; it resets at midnight in the wallet's configured \
@@ -755,7 +785,8 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
     },
     WalletToolSpec {
         name: BROWSE_MARKETPLACE_TOOL,
-        description: "Browse Overpay marketplace listings, with optional category / \
+        description: "Free — a read, no order is placed and nothing is billed. Browse \
+                      Overpay marketplace listings, with optional category / \
                       seller_slug filters and cursor paging. Call get_listing on the one \
                       you'd act on before create_order.",
         spend: false,
@@ -774,7 +805,8 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
     },
     WalletToolSpec {
         name: GET_LISTING_TOOL,
-        description: "Fetch one listing's full description, price, and buyer_note_schema. \
+        description: "Free — a read, no order is placed and nothing is billed. Fetch one \
+                      listing's full description, price, and buyer_note_schema. \
                       Call this before create_order when the listing declares a structured \
                       buyer_note shape, so the note can be built to match.",
         spend: false,
@@ -789,7 +821,8 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
     },
     WalletToolSpec {
         name: LIST_ORDERS_TOOL,
-        description: "List the wallet's recent orders, newest first — use this to find an \
+        description: "Free — a read, no order is placed and nothing is billed. \
+                      List the wallet's recent orders, newest first — use this to find an \
                       order id when the user refers to an order without one (\"my pending \
                       order\"). Optional payment_status / fulfillment_status filters; pass \
                       the returned next_cursor to page further back. Results are \
@@ -811,7 +844,8 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
     },
     WalletToolSpec {
         name: GET_ORDER_STATUS_TOOL,
-        description: "Check an order's payment and fulfillment status by order id — use \
+        description: "Free — a read, no order is placed and nothing is billed. \
+                      Check an order's payment and fulfillment status by order id — use \
                       this to confirm a payment landed. Statuses are point-in-time (see \
                       as_of); re-call for the current state rather than reusing an \
                       earlier result. Once the order is delivered, the \
@@ -833,7 +867,9 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
     },
     WalletToolSpec {
         name: CREATE_ORDER_TOOL,
-        description: "Create a pending order for a marketplace listing. buyer_note may be \
+        description: "Free to call, and no money moves yet — the order it creates is \
+                      unpaid until pay_order settles it with real funds. \
+                      Create a pending order for a marketplace listing. buyer_note may be \
                       free-form text or a JSON object matching the listing's \
                       buyer_note_schema (pre-validated locally — violations come back \
                       spelled out). The order is created unpaid: settle it with pay_order. \
@@ -853,7 +889,9 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
     },
     WalletToolSpec {
         name: PAY_ORDER_TOOL,
-        description: "Pay a pending order with the wallet's prepaid merchant credits for \
+        description: "The call itself is not billed, but it moves real money: it spends \
+                      the wallet's prepaid credits to settle the order. \
+                      Pay a pending order with the wallet's prepaid merchant credits for \
                       that seller. The seller is resolved from the order automatically. \
                       Returns the redemption status and remaining credit balance; if \
                       credits are short, buy_credits first.",
@@ -872,7 +910,9 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
     },
     WalletToolSpec {
         name: BUY_CREDITS_TOOL,
-        description: "Top up merchant credits with a seller, paid from the wallet. \
+        description: "The call itself is not billed, but it moves real money from the \
+                      wallet's on-chain funds. \
+                      Top up merchant credits with a seller, paid from the wallet. \
                       Counts against this request's spending allowance and this key's \
                       daily budget, if one is set. Returns the credit-purchase \
                       order id and status.",
@@ -2934,6 +2974,8 @@ mod tests {
             "id": listing_id,
             "title": "Run Python Code",
             "description": "Run a Python 3.11 snippet in an isolated sandbox.",
+            "price_usd": "$0.02",
+            "free": false,
             "buyer_note_schema": {
                 "type": "object",
                 "required": ["code"],
@@ -2976,6 +3018,8 @@ mod tests {
             "id": FORECAST_ID,
             "title": "AI Weather Report",
             "description": "AI-generated post-apocalyptic weather forecast for any location.",
+            "price_usd": "$0.10",
+            "free": false,
             "buyer_note_schema": {"type": "string", "title": "Enter a location"},
             "seller": {"slug": "weather", "name": "Weather Reporter"},
             "provider_tool": {"name": "forecast"},
@@ -3080,7 +3124,9 @@ mod tests {
             "type": "function",
             "function": {
                 "name": "run_python",
-                "description": "Run a Python 3.11 snippet in an isolated sandbox.",
+                "description": "Run a Python 3.11 snippet in an isolated sandbox. \
+                                Each call places a real marketplace order billed to the \
+                                wallet (≈ $0.02 per call).",
                 "parameters": {
                     "type": "object",
                     "required": ["code"],
@@ -5666,6 +5712,29 @@ mod tests {
     }
 
     #[test]
+    fn listing_cost_note_reads_the_listing_price_fields() {
+        assert_eq!(
+            listing_cost_note(&json!({"price_usd": "$1.50", "free": false})),
+            " Each call places a real marketplace order billed to the wallet (≈ $1.50 per call)."
+        );
+        // A free listing still places an order — say so without a price.
+        assert_eq!(
+            listing_cost_note(&json!({"price_usd": "Free", "free": true})),
+            " Each call places a real marketplace order (this listing is currently free)."
+        );
+        // `formatted_price`'s "Free" sentinel alone is enough.
+        assert_eq!(
+            listing_cost_note(&json!({"price_usd": "Free"})),
+            " Each call places a real marketplace order (this listing is currently free)."
+        );
+        // No price fields at all (older serializations): generic but honest.
+        assert_eq!(
+            listing_cost_note(&json!({})),
+            " Each call places a real marketplace order billed to the wallet."
+        );
+    }
+
+    #[test]
     fn tool_names_are_validated_conservatively() {
         assert!(valid_tool_name("forecast"));
         assert!(valid_tool_name("run_javascript"));
@@ -5741,6 +5810,16 @@ mod tests {
         let forecast = &tools[0];
         assert_eq!(forecast.listing_id, FORECAST_ID);
         assert_eq!(forecast.seller_slug, "weather");
+        // The roster itself must mark each listing tool as a paid order,
+        // priced from the listing's own fields (fathom-x/norm#17).
+        assert!(
+            forecast.description.ends_with(
+                "Each call places a real marketplace order billed to the wallet \
+                 (≈ $0.10 per call)."
+            ),
+            "cost note missing: {}",
+            forecast.description
+        );
         assert!(forecast.wrapped, "bare-string schema must be wrapped");
         assert_eq!(forecast.parameters["type"], "object");
         assert_eq!(forecast.parameters["properties"]["input"]["type"], "string");

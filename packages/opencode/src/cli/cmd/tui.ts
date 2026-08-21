@@ -150,9 +150,11 @@ export const TuiThreadCommand = cmd({
 
     // norm: first-launch prompts, before the TUI owns the terminal. With
     // both a pre-existing owallet and norm's bundled one present, ask which
-    // to use; with no wallet database yet, offer to run `owallet init` +
-    // `owallet generate` so the very first session can connect. Never
-    // blocks startup on failure.
+    // to use; with no wallet database yet, set one up so the very first
+    // session can connect — automatically (default password + generated
+    // wallet + an offer to connect to Overpay) for the bundled owallet,
+    // interactively for a pre-existing install. Never blocks startup on
+    // failure.
     {
       const { Norm } = await import("@/norm/norm")
       await Norm.firstRunOwalletChoice(UI.input).catch(() => {})

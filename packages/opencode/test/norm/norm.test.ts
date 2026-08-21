@@ -107,6 +107,35 @@ test("needsWalletSetup wants a binary, no DB, and no prior decline", async () =>
   expect(await Norm.readWalletSetupDeclined()).toBe(true)
 })
 
+test("auto-setup marker roundtrips and drives the default password", async () => {
+  const originalPassword = process.env.OWALLET_PASSWORD
+  delete process.env.OWALLET_PASSWORD
+  try {
+    expect(await Norm.readAutoSetupDefaultPassword()).toBe(false)
+
+    // A wallet auto-created under an exported OWALLET_PASSWORD records
+    // autoSetup without the default-password marker: nothing to restore.
+    await Norm.recordAutoSetup(false)
+    expect(await Norm.readAutoSetupDefaultPassword()).toBe(false)
+    await Norm.applyAutoSetupPassword()
+    expect(process.env.OWALLET_PASSWORD).toBeUndefined()
+
+    // Default-password auto-setup restores the password on later launches…
+    await Norm.recordAutoSetup(true)
+    expect(await Norm.readAutoSetupDefaultPassword()).toBe(true)
+    await Norm.applyAutoSetupPassword()
+    expect(process.env.OWALLET_PASSWORD).toBe(Norm.DEFAULT_OWALLET_PASSWORD)
+
+    // …but never overrides one the user exported themselves.
+    process.env.OWALLET_PASSWORD = "user-picked"
+    await Norm.applyAutoSetupPassword()
+    expect(process.env.OWALLET_PASSWORD).toBe("user-picked")
+  } finally {
+    if (originalPassword === undefined) delete process.env.OWALLET_PASSWORD
+    else process.env.OWALLET_PASSWORD = originalPassword
+  }
+})
+
 test("needsWalletSetup respects NORM_DISABLE", async () => {
   process.env.NORM_DISABLE = "1"
   await makeBinary(bundled())
