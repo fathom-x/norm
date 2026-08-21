@@ -183,7 +183,9 @@ pub(crate) fn balances_map(data: &Value) -> Map<String, Value> {
             .iter()
             .map(|c| {
                 let mut row = Map::new();
-                for key in ["holder_type", "seller_slug", "organization_slug"] {
+                // `core` marks the overpay org's core-credit pool (the
+                // marketplace's primary spend balance) — clients pin it first.
+                for key in ["holder_type", "seller_slug", "organization_slug", "core"] {
                     if let Some(v) = c.get(key) {
                         row.insert(key.into(), v.clone());
                     }

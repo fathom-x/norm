@@ -4,6 +4,20 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### `overpay_connected` in `GET /v1/status`
+
+- The status payload now says whether the wallet is linked to an Overpay
+  account (`account` fetch succeeded vs the authorize/sign-up hint), so
+  norm's sidebar can tell the user to log in to Overpay to get started.
+
+### Core credits marked in status and balances
+
+- Merchant-credit rows in `get_account_info` / `GET /v1/status` now carry
+  the Rails-provided `core` flag on the overpay org's core-credit pool,
+  so clients (norm's sidebar) can pin the marketplace's primary spend
+  balance first. Requires an Overpay deploy that tags the row; absent
+  the flag nothing changes.
+
 ### Lenient ambient `.env` loading
 
 - The `.env` picked up from the current working directory belongs to
