@@ -124,7 +124,10 @@ test("auto-setup marker roundtrips and drives the default password", async () =>
     await Norm.recordAutoSetup(true)
     expect(await Norm.readAutoSetupDefaultPassword()).toBe(true)
     await Norm.applyAutoSetupPassword()
-    expect(process.env.OWALLET_PASSWORD).toBe(Norm.DEFAULT_OWALLET_PASSWORD)
+    // Read through a fresh lookup: TS narrows the direct property access to
+    // undefined after the delete above (it can't see the mutation inside
+    // applyAutoSetupPassword).
+    expect(process.env["OWALLET_PASSWORD"] as string | undefined).toBe(Norm.DEFAULT_OWALLET_PASSWORD)
 
     // …but never overrides one the user exported themselves.
     process.env.OWALLET_PASSWORD = "user-picked"
