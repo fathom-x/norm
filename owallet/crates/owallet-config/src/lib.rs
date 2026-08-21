@@ -260,10 +260,52 @@ pub fn load_resolved_into_env(configs: &[ResolvedConfig]) -> Result<(), ConfigEr
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".env");
     if dot_env.exists() {
-        load_file_into_env(&dot_env)?;
+        load_dot_env_lenient(&dot_env);
     }
 
     Ok(())
+}
+
+/// Load the working directory's `.env`, tolerating lines owallet cannot parse.
+///
+/// This file is picked up *ambiently*: it belongs to whatever project the user
+/// happens to be standing in, not to owallet, and it is routinely written for
+/// other tools with syntax dotenvy rejects (a bare `some.key value` line, say).
+/// Taking the command down over one of those lines is a bad trade — it is how
+/// `owallet init` failed during norm's first-run wallet setup, leaving the user
+/// with no wallet, no server and an explanation that scrolled past.
+///
+/// So: skip what will not parse, keep what will, and say so on stderr. Explicit
+/// `--config` files and the discovered `*.owallet` files stay strict via
+/// [`load_file_into_env`] — those are owallet's own, and a typo in one deserves
+/// a hard error rather than a silently missing setting.
+fn load_dot_env_lenient(path: &Path) {
+    let items = match dotenvy::from_filename_iter(path) {
+        Ok(items) => items,
+        Err(e) => {
+            eprintln!("owallet: ignoring {} ({e})", path.display());
+            return;
+        }
+    };
+    // dotenvy's iterator reports a bad line and carries on to the next, so one
+    // rejected line costs only that line.
+    let mut skipped = 0usize;
+    for item in items {
+        match item {
+            Ok((k, v)) => {
+                if std::env::var_os(&k).is_none() {
+                    std::env::set_var(k, v);
+                }
+            }
+            Err(_) => skipped += 1,
+        }
+    }
+    if skipped > 0 {
+        eprintln!(
+            "owallet: ignored {skipped} unparsable line(s) in {}",
+            path.display()
+        );
+    }
 }
 
 fn load_file_into_env(path: &PathBuf) -> Result<(), ConfigError> {
@@ -357,6 +399,64 @@ fn expand_tilde(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lenient_dot_env_keeps_the_lines_it_can_parse() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = tmp.path().join(".env");
+        // Line 2 is the shape that killed `owallet init` inside a project
+        // directory: dotenvy rejects it, and used to fail the whole command.
+        std::fs::write(
+            &p,
+            "OWALLET_TEST_DOTENV_A=first
+sat.watch key
+OWALLET_TEST_DOTENV_B=second
+",
+        )
+        .unwrap();
+
+        load_dot_env_lenient(&p);
+
+        assert_eq!(
+            std::env::var("OWALLET_TEST_DOTENV_A").ok().as_deref(),
+            Some("first")
+        );
+        // The good line *after* the bad one still lands — dotenvy resumes.
+        assert_eq!(
+            std::env::var("OWALLET_TEST_DOTENV_B").ok().as_deref(),
+            Some("second")
+        );
+        std::env::remove_var("OWALLET_TEST_DOTENV_A");
+        std::env::remove_var("OWALLET_TEST_DOTENV_B");
+    }
+
+    #[test]
+    fn lenient_dot_env_never_overwrites_the_environment() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = tmp.path().join(".env");
+        std::fs::write(
+            &p,
+            "OWALLET_TEST_DOTENV_C=from-file
+",
+        )
+        .unwrap();
+        std::env::set_var("OWALLET_TEST_DOTENV_C", "from-env");
+
+        load_dot_env_lenient(&p);
+
+        assert_eq!(
+            std::env::var("OWALLET_TEST_DOTENV_C").ok().as_deref(),
+            Some("from-env")
+        );
+        std::env::remove_var("OWALLET_TEST_DOTENV_C");
+    }
+
+    #[test]
+    fn lenient_dot_env_shrugs_off_an_unreadable_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Missing file: nothing to load, and nothing to panic about.
+        load_dot_env_lenient(&tmp.path().join("nope.env"));
+    }
 
     #[test]
     fn explicit_path_wins() {
