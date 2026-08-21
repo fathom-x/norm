@@ -85,12 +85,12 @@ pub fn catalog() -> Vec<ToolSpec> {
         ToolSpec {
             name: "get_account_info",
             description:
-                "Show the active wallet's balances (ETH / USDC / ZEC), Overpay link status, and merchant credit balances (when linked). Addresses and account identifiers are shown on the owallet dashboard, not here.",
+                "Free — a read, no order is placed and nothing is billed. Show the active wallet's balances (ETH / USDC / ZEC), Overpay link status, and merchant credit balances (when linked). Addresses and account identifiers are shown on the owallet dashboard, not here.",
             input_schema: schema_object(json!({})),
         },
         ToolSpec {
             name: "list_marketplace",
-            description: "Browse Overpay marketplace listings. Supports optional category / seller / cursor filters.",
+            description: "Free — a read, no order is placed and nothing is billed. Browse Overpay marketplace listings. Supports optional category / seller / cursor filters.",
             input_schema: schema_object(json!({
                 "category":    {"type": "string"},
                 "seller_slug": {"type": "string"},
@@ -100,7 +100,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_wallet_orders",
-            description: "Fetch the active wallet's orders. Requires authorization.",
+            description: "Free — a read, no order is placed and nothing is billed. Fetch the active wallet's orders. Requires authorization.",
             input_schema: schema_object(json!({
                 "status":             {"type": "string"},
                 "fulfillment_status": {"type": "string"},
@@ -110,7 +110,8 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_listing",
-            description: "Fetch a single marketplace listing including \
+            description: "Free — a read, no order is placed and nothing is billed. \
+                          Fetch a single marketplace listing including \
                           its buyer_note_schema and checkout_schema. Call \
                           this before create_order on a listing whose \
                           buyer_note_schema declares a structured shape, \
@@ -122,7 +123,9 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_order",
-            description: "Create a pending order for a marketplace listing. \
+            description: "Free to call, and no money moves yet — the order is created \
+                          unpaid until it is settled (e.g. with pay_order). \
+                          Create a pending order for a marketplace listing. \
                           Requires authorization. `buyer_note` may be a \
                           string (free-form) or any JSON value (object / \
                           array / etc.) — when the listing declares a \
@@ -147,7 +150,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_order_status",
-            description: "Snapshot of a single order (status, fulfillment_status, tracking). Terminal orders are cached locally; large delivered_content is stripped to a pointer unless `include_delivered_content` is true — fetch it later with get_purchase.",
+            description: "Free — a read, no order is placed and nothing is billed. Snapshot of a single order (status, fulfillment_status, tracking). Terminal orders are cached locally; large delivered_content is stripped to a pointer unless `include_delivered_content` is true — fetch it later with get_purchase.",
             input_schema: schema_with_required(
                 json!({
                     "order_id":                  {"type": "string"},
@@ -159,7 +162,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         ToolSpec {
             name: "wait_for_order",
             description:
-                "Poll until the order reaches `until_status` (default \"delivered\") or a terminal status (failed / cancelled), then return its final snapshot plus `waited_seconds` and `timed_out`. Caches terminal orders and strips large delivered_content unless `include_delivered_content` is true. When the call is streamed (Accept: text/event-stream plus a `_meta.progressToken`) and the seller publishes its work in progress, each progress notification carries the newly generated text in `data.delta`.",
+                "Free — a read, no order is placed and nothing is billed. Poll until the order reaches `until_status` (default \"delivered\") or a terminal status (failed / cancelled), then return its final snapshot plus `waited_seconds` and `timed_out`. Caches terminal orders and strips large delivered_content unless `include_delivered_content` is true. When the call is streamed (Accept: text/event-stream plus a `_meta.progressToken`) and the seller publishes its work in progress, each progress notification carries the newly generated text in `data.delta`.",
             input_schema: schema_with_required(
                 json!({
                     "order_id":                  {"type": "string"},
@@ -173,7 +176,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "redeem_merchant_credits",
-            description: "Apply previously-purchased merchant credits to settle an order. Returns the amount redeemed and the remaining credit balance.",
+            description: "The call itself is not billed, but it moves real money: it spends the wallet's prepaid merchant credits. Apply previously-purchased merchant credits to settle an order. Returns the amount redeemed and the remaining credit balance.",
             input_schema: schema_with_required(
                 json!({
                     "seller_slug": {"type": "string"},
@@ -184,7 +187,9 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "pay_order",
-            description: "Settle a pending order with previously-purchased merchant credits. \
+            description: "The call itself is not billed, but it moves real money: it spends \
+                          the wallet's prepaid merchant credits. \
+                          Settle a pending order with previously-purchased merchant credits. \
                           Resolves the seller from the order's listing when `seller_slug` is \
                           omitted. Returns the redemption status and remaining credit balance.",
             input_schema: schema_with_required(
@@ -197,7 +202,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "buy",
-            description: "One-shot purchase of merchant credits: opens a credit-purchase order with Overpay, then signs and broadcasts a USDC transfer to the returned payment address. Returns the order id, status, and the USDC amount sent.",
+            description: "The call itself is not billed, but it moves real money: it signs and broadcasts a real on-chain USDC transfer. One-shot purchase of merchant credits: opens a credit-purchase order with Overpay, then signs and broadcasts a USDC transfer to the returned payment address. Returns the order id, status, and the USDC amount sent.",
             input_schema: schema_with_required(
                 json!({
                     "seller_slug": {"type": "string"},
@@ -208,7 +213,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "send_usdc",
-            description: "Sign and broadcast an ERC-20 USDC transfer on the configured EVM chain (default Base mainnet). Returns `{status: \"sent\"}`; the transaction id is viewable on the owallet dashboard and CLI.",
+            description: "The call itself is not billed, but it moves real money: it broadcasts a real on-chain transfer. Sign and broadcast an ERC-20 USDC transfer on the configured EVM chain (default Base mainnet). Returns `{status: \"sent\"}`; the transaction id is viewable on the owallet dashboard and CLI.",
             input_schema: schema_with_required(
                 json!({
                     "to_address":  {"type": "string"},
@@ -219,7 +224,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "send_zcash",
-            description: "Sync, then sign and broadcast a shielded Zcash (Orchard) payment to a Unified Address (u1…). Returns `{status: \"sent\"}`; the transaction id is viewable on the owallet dashboard and CLI.",
+            description: "The call itself is not billed, but it moves real money: it broadcasts a real on-chain transfer. Sync, then sign and broadcast a shielded Zcash (Orchard) payment to a Unified Address (u1…). Returns `{status: \"sent\"}`; the transaction id is viewable on the owallet dashboard and CLI.",
             input_schema: schema_with_required(
                 json!({
                     "to_address": {"type": "string"},
@@ -230,12 +235,12 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "sync_zcash",
-            description: "Sync the wallet's Zcash (Orchard) state from lightwalletd and return `{height, balance_zec, balance_zat, spendable_zat}`.",
+            description: "Free — a read, no order is placed and nothing is billed. Sync the wallet's Zcash (Orchard) state from lightwalletd and return `{height, balance_zec, balance_zat, spendable_zat}`.",
             input_schema: schema_object(json!({})),
         },
         ToolSpec {
             name: "list_purchases",
-            description: "List orders this wallet has cached locally from past purchases. The cache fills automatically when an order reaches a terminal fulfillment status. Call this before issuing a new `buy` to check whether a deliverable is already paid for. `delivered_content` is omitted — fetch it with get_purchase.",
+            description: "Free — a read, no order is placed and nothing is billed. List orders this wallet has cached locally from past purchases. The cache fills automatically when an order reaches a terminal fulfillment status. Call this before issuing a new `buy` to check whether a deliverable is already paid for. `delivered_content` is omitted — fetch it with get_purchase.",
             input_schema: schema_object(json!({
                 "limit":              {"type": "integer", "default": 50},
                 "fulfillment_status": {"type": "string"},
@@ -243,7 +248,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_purchase",
-            description: "Return the cached order payload (including delivered_content and the listing schema) for this wallet. Returns `{error: \"not_cached\"}` if the order isn't cached yet — call get_order_status or wait_for_order first to populate it.",
+            description: "Free — a read, no order is placed and nothing is billed. Return the cached order payload (including delivered_content and the listing schema) for this wallet. Returns `{error: \"not_cached\"}` if the order isn't cached yet — call get_order_status or wait_for_order first to populate it.",
             input_schema: schema_with_required(
                 json!({"order_id": {"type": "string"}}),
                 &["order_id"],
@@ -251,14 +256,14 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "sync_purchases",
-            description: "Backfill the local purchase cache from Overpay: fetch delivered orders and re-fetch each one's detail (so delivered_content is included), upserting into the cache. Idempotent. Returns `{synced, errors}`.",
+            description: "Free — a read, no order is placed and nothing is billed. Backfill the local purchase cache from Overpay: fetch delivered orders and re-fetch each one's detail (so delivered_content is included), upserting into the cache. Idempotent. Returns `{synced, errors}`.",
             input_schema: schema_object(json!({
                 "api_key": {"type": "string"},
             })),
         },
         ToolSpec {
             name: "load_core_credits",
-            description: "Create a Lightning invoice to load Overpay core credits. Returns a BOLT11 invoice with a scannable QR code. Pay from any Lightning wallet; credits are funded automatically once the invoice settles. Call wait_for_order(order_id, until_status=\"paid\") to confirm payment.",
+            description: "The call itself is not billed and moves no money — the returned invoice moves real money only when paid from a Lightning wallet. Create a Lightning invoice to load Overpay core credits. Returns a BOLT11 invoice with a scannable QR code. Pay from any Lightning wallet; credits are funded automatically once the invoice settles. Call wait_for_order(order_id, until_status=\"paid\") to confirm payment.",
             input_schema: schema_with_required(
                 json!({
                     "amount_usd": {"type": "number", "description": "Amount to load in USD (must meet the site minimum)"},
