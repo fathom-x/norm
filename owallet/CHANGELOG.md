@@ -4,6 +4,14 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+## 0.1.10
+
+### `overpay_connected` in `GET /v1/status`
+
+- The status payload now says whether the wallet is linked to an Overpay
+  account (`account` fetch succeeded vs the authorize/sign-up hint), so
+  norm's sidebar can tell the user to log in to Overpay to get started.
+
 ## 0.1.9
 
 ### Core credits marked in status and balances

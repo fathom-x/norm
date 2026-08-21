@@ -75,6 +75,8 @@ type OwalletStatus = {
   eth_balance?: string
   zec_balance?: number | string
   balance_error?: string
+  /** False when the wallet isn't linked to an Overpay account (owallet >= 0.1.10). */
+  overpay_connected?: boolean
   /** The marketplace this wallet points at (env-resolved server-side). */
   overpay_url?: string
   merchant_credits?: Array<{
@@ -182,11 +184,18 @@ function View(props: { api: TuiPluginApi }) {
   const waiting = () => status() === undefined
   const error = () => stateLine(outcome())
 
+  const needsLogin = () => status()?.overpay_connected === false
+
   return (
     <box>
       <text fg={theme().text}>
         <b>owallet</b>
       </text>
+      {/* An unlinked wallet can't buy anything — norm's whole point. Say
+          so first, ahead of every balance line. */}
+      <Show when={needsLogin()}>
+        <text fg={theme().warning}>log in to Overpay to get started — owallet authorize</text>
+      </Show>
       <Show when={coreCredits()}>
         <text fg={theme().textMuted}>
           core credits <span style={{ fg: theme().text }}>{usd((coreCredits()!.balance_cents ?? 0) / 100)}</span>

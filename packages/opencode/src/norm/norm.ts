@@ -339,14 +339,12 @@ function walletSetupFile() {
 }
 
 /**
- * The database password norm uses when it sets a wallet up by itself
- * (fathom-x/norm#18): first launch should not stop to invent a password.
- * It only protects the encrypted DB at rest, and only for wallets norm
- * created — a marker in the setup file records that the default is in
- * play, so `applyAutoSetupPassword` can restore non-interactive starts on
- * every later launch without the user exporting anything. Users who want a
- * real password export OWALLET_PASSWORD before the first launch (it wins),
- * or rotate later with owallet's own tooling.
+ * LEGACY: the password early norm builds used when setting a wallet up by
+ * themselves (fathom-x/norm#18). New setups always prompt the user for a
+ * password — no default — but wallets created back then carry the
+ * defaultPassword marker, and `applyAutoSetupPassword` keeps restoring it
+ * for them so their non-interactive starts don't break. Rotate with
+ * owallet's own tooling to leave the default behind.
  */
 export const DEFAULT_OWALLET_PASSWORD = "norm"
 
@@ -448,36 +446,57 @@ function runQuiet(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<
 }
 
 /**
- * Zero-question first-run setup for a bundled owallet (fathom-x/norm#18):
- * no password prompts — the DB is created under the default password (an
- * exported OWALLET_PASSWORD wins) and a wallet is generated automatically.
+ * First-run setup for a bundled owallet: the user chooses the wallet's
+ * admin password at the terminal (no default — it encrypts the database at
+ * rest and logs into the wallet dashboard; an exported OWALLET_PASSWORD
+ * wins and skips the prompt), then a wallet is generated automatically.
  * The seed phrase is NOT printed (`generate`'s stdout is discarded); the
  * user backs it up on demand with `owallet export key --format mnemonic`.
- * The one question asked is whether to connect to Overpay now, which runs
- * `owallet authorize` — the browser OAuth (PKCE) callback flow that logs
- * into Overpay and links this wallet — after which the bootstrap mints the
- * provider key for this very session.
+ * Connecting to Overpay is mandatory and runs last — the browser OAuth
+ * (PKCE) flow that logs into Overpay and links this wallet — after which
+ * the bootstrap mints the provider key for this very session.
  */
-async function autoWalletSetup(bin: string, ask: (prompt: string) => Promise<string>): Promise<void> {
-  const usingDefault = !process.env.OWALLET_PASSWORD
-  const password = process.env.OWALLET_PASSWORD || DEFAULT_OWALLET_PASSWORD
+async function autoWalletSetup(
+  bin: string,
+  askSecret: (prompt: string) => Promise<string>,
+): Promise<void> {
   process.stderr.write(
     [
       "",
-      "First run: setting up your owallet wallet automatically.",
+      "First run: setting up your owallet wallet.",
       `  database:  ${owalletDbPath()}`,
-      usingDefault
-        ? `  password:  the default ("${DEFAULT_OWALLET_PASSWORD}") — export OWALLET_PASSWORD before first launch to pick your own`
-        : "  password:  from OWALLET_PASSWORD",
       "  The seed phrase is not displayed. Back it up anytime with:",
       "    owallet export key --format mnemonic",
       "",
     ].join("\n"),
   )
+  let password = process.env.OWALLET_PASSWORD
+  if (!password) {
+    process.stderr.write(
+      "Choose the wallet admin password. It encrypts the wallet database at\n" +
+        "rest and logs into the wallet dashboard.\n",
+    )
+    for (let attempt = 0; ; attempt++) {
+      const first = await askSecret("Wallet admin password: ")
+      if (first) {
+        const confirm = await askSecret("Confirm password: ")
+        if (confirm === first) {
+          password = first
+          break
+        }
+      }
+      if (attempt >= 2) {
+        process.stderr.write("Giving up — norm will offer wallet setup again on the next launch.\n")
+        return
+      }
+      process.stderr.write(first ? "Passwords did not match, try again.\n" : "Password cannot be empty, try again.\n")
+    }
+  }
   // OWALLET_PASSWORD makes `init` non-interactive and unlocks the DB for
   // `generate`; OWALLET_WALLET_PASSWORD short-circuits generate's separate
-  // per-wallet (web admin) password prompt the same way. Both run with
-  // stdout discarded — generate's stdout carries the seed phrase.
+  // per-wallet (web admin) password prompt with the same chosen password.
+  // Both run with stdout discarded — generate's stdout carries the seed
+  // phrase.
   const env = {
     ...process.env,
     OWALLET_PASSWORD: password,
@@ -498,10 +517,11 @@ async function autoWalletSetup(bin: string, ask: (prompt: string) => Promise<str
       return
     }
   }
-  await recordAutoSetup(usingDefault)
+  await recordAutoSetup(false)
   // Keep the password in this process's env so the bootstrap that runs
-  // next can start `owallet serve` and mint the provider key; later
-  // launches restore it from the setup marker via applyAutoSetupPassword.
+  // next can start `owallet serve` and mint the provider key. It is not
+  // persisted: export OWALLET_PASSWORD in your shell profile to keep
+  // auto-start working across launches (said below, post-connect).
   process.env.OWALLET_PASSWORD = password
 
   // Connecting to Overpay is part of getting started, not an option: norm
@@ -521,6 +541,11 @@ async function autoWalletSetup(bin: string, ask: (prompt: string) => Promise<str
       ? "Connected to Overpay.\n"
       : "Overpay connect didn't complete — norm will retry on the next launch\n" +
           "(or run `owallet authorize` yourself).\n",
+  )
+  process.stderr.write(
+    "\nTo let norm start owallet automatically on future launches, export\n" +
+      "OWALLET_PASSWORD in your shell profile; otherwise run `owallet serve`\n" +
+      "yourself before starting norm.\n",
   )
 }
 
@@ -550,7 +575,7 @@ export async function firstRunWalletSetup(
   if (!process.stdin.isTTY || !process.stdout.isTTY) return
   if (!(await needsWalletSetup())) return
   const bin = (await owalletBinary())!
-  if (bin === bundledOwalletPath()) return autoWalletSetup(bin, ask)
+  if (bin === bundledOwalletPath()) return autoWalletSetup(bin, askSecret)
   process.stderr.write(
     [
       "",
