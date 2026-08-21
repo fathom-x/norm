@@ -301,11 +301,26 @@ function runInteractive(bin: string, args: string[], env: NodeJS.ProcessEnv): Pr
 }
 
 /**
+ * Run an owallet subcommand with its stdout discarded. Used for the
+ * auto-setup's `generate`, whose stdout includes the seed phrase — the
+ * phrase is deliberately never displayed (fathom-x/norm#18);
+ * `owallet export key --format mnemonic` prints it on demand.
+ */
+function runQuiet(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(bin, args, { env, timeout: 60_000 }, (error: any, _stdout, stderr) => {
+      resolve({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stderr: stderr ?? "" })
+    })
+  })
+}
+
+/**
  * Zero-question first-run setup for a bundled owallet (fathom-x/norm#18):
  * no password prompts — the DB is created under the default password (an
- * exported OWALLET_PASSWORD wins) and a wallet is generated automatically,
- * with the seed phrase still printed on the inherited terminal. The one
- * question asked is whether to connect to Overpay now, which runs
+ * exported OWALLET_PASSWORD wins) and a wallet is generated automatically.
+ * The seed phrase is NOT printed (`generate`'s stdout is discarded); the
+ * user backs it up on demand with `owallet export key --format mnemonic`.
+ * The one question asked is whether to connect to Overpay now, which runs
  * `owallet authorize` — the browser OAuth (PKCE) callback flow that logs
  * into Overpay and links this wallet — after which the bootstrap mints the
  * provider key for this very session.
@@ -321,13 +336,15 @@ async function autoWalletSetup(bin: string, ask: (prompt: string) => Promise<str
       usingDefault
         ? `  password:  the default ("${DEFAULT_OWALLET_PASSWORD}") — export OWALLET_PASSWORD before first launch to pick your own`
         : "  password:  from OWALLET_PASSWORD",
-      "  A seed phrase will be printed below — write it down.",
+      "  The seed phrase is not displayed. Back it up anytime with:",
+      "    owallet export key --format mnemonic",
       "",
     ].join("\n"),
   )
   // OWALLET_PASSWORD makes `init` non-interactive and unlocks the DB for
   // `generate`; OWALLET_WALLET_PASSWORD short-circuits generate's separate
-  // per-wallet (web admin) password prompt the same way.
+  // per-wallet (web admin) password prompt the same way. Both run with
+  // stdout discarded — generate's stdout carries the seed phrase.
   const env = {
     ...process.env,
     OWALLET_PASSWORD: password,
@@ -335,10 +352,12 @@ async function autoWalletSetup(bin: string, ask: (prompt: string) => Promise<str
   }
   for (const step of ["init", "generate"]) {
     const args = [...envFlagArgs(), step]
-    const code = await runInteractive(bin, args, env)
-    if (code !== 0) {
+    const result = await runQuiet(bin, args, env)
+    if (result.code !== 0) {
+      const detail = result.stderr.trim()
       process.stderr.write(
-        `\`owallet ${step}\` exited with code ${code} — norm will retry setup on the next launch.\n`,
+        `\`owallet ${step}\` exited with code ${result.code}${detail ? `:\n${detail}\n` : " — "}` +
+          `norm will retry setup on the next launch.\n`,
       )
       return
     }

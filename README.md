@@ -48,9 +48,16 @@ norm
 
 On the first launch norm sets the bundled owallet up by itself: it creates
 the wallet database (under a default password — export `OWALLET_PASSWORD`
-before the first launch to pick your own), generates a seed phrase which you
-**must write down**, and then offers to connect to Overpay — a browser
-login that links your wallet and authorizes the norm session automatically.
+before the first launch to pick your own), generates a wallet, and then
+offers to connect to Overpay — a browser login that links your wallet and
+authorizes the norm session automatically.
+
+The seed phrase is never printed during setup. To back it up (recommended
+before funding the wallet), export it explicitly:
+
+```bash
+owallet export key --format mnemonic
+```
 
 If you use your own (non-bundled) owallet install instead, norm falls back
 to offering the manual steps interactively (`owallet init` +
