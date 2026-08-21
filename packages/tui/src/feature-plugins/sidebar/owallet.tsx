@@ -175,11 +175,14 @@ function View(props: { api: TuiPluginApi }) {
       <text fg={theme().text}>
         <b>owallet</b>
       </text>
+      {/* Chain-qualified tickers (fathom-x/norm#22): both come from the
+          wallet's configured EVM chain — Base for every wallet norm ships.
+          If /v1/status ever reports the chain, derive the prefix from it. */}
       <Show when={status()?.usdc_balance !== undefined}>
-        <text fg={theme().textMuted}>{status()!.usdc_balance} USDC</text>
+        <text fg={theme().textMuted}>{status()!.usdc_balance} BASE.USDC</text>
       </Show>
       <Show when={status()?.eth_balance !== undefined}>
-        <text fg={theme().textMuted}>{status()!.eth_balance} ETH</text>
+        <text fg={theme().textMuted}>{status()!.eth_balance} BASE.ETH</text>
       </Show>
       <Show when={status()?.zec_balance !== undefined}>
         <text fg={theme().textMuted}>{String(status()!.zec_balance)} ZEC</text>
