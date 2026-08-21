@@ -19,13 +19,34 @@ const RETRY_MS = 10_000
 const FETCH_TIMEOUT_MS = 15_000
 
 // Deliberately duplicated from packages/opencode/src/norm/norm.ts
-// (owalletUrl/owalletEnv) — the tui package doesn't depend on the opencode
-// package, and the mapping is three lines. Keep the two in sync by hand,
-// like install.rs's copy of DEFAULT_MODEL.
+// (owalletUrl/owalletEnv/normHome/sandboxPort) — the tui package doesn't
+// depend on the opencode package, and the mapping is small. Keep the two in
+// sync by hand, like install.rs's copy of DEFAULT_MODEL. The NORM_HOME
+// branch must match exactly: when this copy lagged behind, the widget
+// polled the real serve on 8767 with the sandbox's key and rendered
+// "provider key rejected" for every sandboxed run.
 const ENV_PORTS = { prod: 8765, dev: 8766, staging: 8767 } as const
 const DEFAULT_ENV: keyof typeof ENV_PORTS = "staging"
+const SANDBOX_PORT_BASE = 8800
+const SANDBOX_PORT_SPAN = 1000
+
+function normHome(): string | undefined {
+  const value = process.env.NORM_HOME?.trim()
+  return value ? path.resolve(value) : undefined
+}
+
+/** Same djb2-style hash as norm.ts — the two must land on the same port. */
+function sandboxPort(root: string): string {
+  let hash = 5381
+  for (let i = 0; i < root.length; i++) hash = ((hash * 33) ^ root.charCodeAt(i)) >>> 0
+  return String(SANDBOX_PORT_BASE + (hash % SANDBOX_PORT_SPAN))
+}
 
 function owalletUrl() {
+  // A NORM_HOME sandbox is absolute: its own port, ambient NORM_OWALLET_URL
+  // ignored (norm.ts prints the notice).
+  const root = normHome()
+  if (root) return `http://127.0.0.1:${sandboxPort(root)}`
   if (process.env.NORM_OWALLET_URL) return process.env.NORM_OWALLET_URL.replace(/\/+$/, "")
   const env = process.env.NORM_OWALLET_ENV
   const resolved = env === "prod" || env === "dev" || env === "staging" ? env : DEFAULT_ENV
