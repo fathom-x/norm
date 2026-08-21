@@ -437,6 +437,9 @@ async function autoWalletSetup(bin: string, ask: (prompt: string) => Promise<str
         `\`owallet ${step}\` exited with code ${result.code}${detail ? `:\n${detail}\n` : " — "}` +
           `norm will retry setup on the next launch.\n`,
       )
+      // The TUI takes the screen the moment this returns; without a pause the
+      // one explanation of why Overpay is unavailable scrolls past unread.
+      await ask("Press Enter to continue without Overpay: ").catch(() => "")
       return
     }
   }
@@ -544,6 +547,9 @@ export async function firstRunWalletSetup(
       process.stderr.write(
         `\`owallet ${step}\` exited with code ${code} — norm will offer setup again on the next launch.\n`,
       )
+      // Same as the auto path: hold the screen so the failure is readable
+      // before the TUI paints over it.
+      await ask("Press Enter to continue without Overpay: ").catch(() => "")
       return
     }
   }
