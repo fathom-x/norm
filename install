@@ -34,11 +34,17 @@ Environment:
     GITHUB_TOKEN / GH_TOKEN Token used for API + asset downloads (required
                             while the repository is private)
     VERSION                 Same as --version
+    NORM_HOME               Install everything under this directory instead of
+                            ~/.norm/bin (implies --no-modify-path). Export the
+                            same value when running norm and it keeps all of
+                            its state — including the owallet wallet database —
+                            there too: a throwaway, fresh install.
 
 Examples:
     curl -fsSL https://raw.githubusercontent.com/fathom-x/norm/main/install | bash
     curl -fsSL https://raw.githubusercontent.com/fathom-x/norm/main/install | bash -s -- --version 0.1.0
     ./install --binary /path/to/norm
+    NORM_HOME=/tmp/example ./install     # throwaway sandbox install
 EOF
 }
 
@@ -82,7 +88,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-INSTALL_DIR=$HOME/.norm/bin
+# NORM_HOME collapses norm's whole footprint into one directory (see
+# packages/opencode/src/norm/norm.ts). Honour it here too, so
+#   NORM_HOME=/tmp/example curl -fsSL .../install | bash
+# is a complete throwaway install: binaries in the sandbox, no shell rc edit,
+# nothing written to ~/.norm, ~/.owallet or the XDG dirs.
+if [ -n "${NORM_HOME:-}" ]; then
+    INSTALL_DIR=$NORM_HOME/bin
+    no_modify_path=true
+else
+    INSTALL_DIR=$HOME/.norm/bin
+fi
 mkdir -p "$INSTALL_DIR"
 
 print_message() {
@@ -217,9 +233,19 @@ else
     # Only skips the norm binary itself: the owallet step below must still
     # run — e.g. a first-run "bundled" choice recorded after norm was already
     # current means owallet gets fetched on a re-run that updates nothing else.
+    # Probe the binary in INSTALL_DIR when there is one — under NORM_HOME the
+    # copy on PATH belongs to the real install and says nothing about the
+    # sandbox, which must be populated regardless of its version.
+    norm_probe=""
+    if [ -x "$INSTALL_DIR/$APP" ]; then
+        norm_probe="$INSTALL_DIR/$APP"
+    elif [ -z "${NORM_HOME:-}" ] && command -v "$APP" >/dev/null 2>&1; then
+        norm_probe=$(command -v "$APP")
+    fi
+
     norm_current=""
-    if command -v "$APP" >/dev/null 2>&1; then
-        installed_version=$("$APP" --version 2>/dev/null || echo "")
+    if [ -n "$norm_probe" ]; then
+        installed_version=$("$norm_probe" --version 2>/dev/null || echo "")
         if [[ "$installed_version" == "$specific_version" ]]; then
             print_message info "${MUTED}Version ${NC}$specific_version${MUTED} already installed${NC}"
             norm_current=1
@@ -257,7 +283,9 @@ else
     # newest owallet-v* release so a fresh machine gets both in one command.
     # Any failure here is a warning, not an install failure.
     install_owallet() {
-        if command -v owallet >/dev/null 2>&1; then
+        # A sandbox is self-contained: an owallet elsewhere on PATH is the real
+        # install and must not stand in for the one that belongs in NORM_HOME.
+        if [ -z "${NORM_HOME:-}" ] && command -v owallet >/dev/null 2>&1; then
             case "$(command -v owallet)" in
                 "$INSTALL_DIR"/*) ;; # ours — refresh below
                 *)
@@ -391,6 +419,14 @@ if [[ "$no_modify_path" != "true" ]]; then
             add_to_path "$config_file" "export PATH=$INSTALL_DIR:\$PATH"
         fi
     fi
+fi
+
+if [ -n "${NORM_HOME:-}" ]; then
+    print_message info "\n${MUTED}Sandbox install — nothing outside ${NC}$NORM_HOME${MUTED} was touched.${NC}"
+    print_message info "${MUTED}Run it with:${NC}"
+    print_message info "  export NORM_HOME=$NORM_HOME"
+    print_message info "  $INSTALL_DIR/$APP"
+    print_message info "${MUTED}Throw it away with: ${NC}rm -rf $NORM_HOME"
 fi
 
 if [ -n "${GITHUB_ACTIONS-}" ] && [ "${GITHUB_ACTIONS}" == "true" ]; then

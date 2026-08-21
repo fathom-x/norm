@@ -11,11 +11,24 @@ import { makeGlobalNode } from "./effect/app-node"
 // auth.json, cache, state) never collide with a stock opencode install
 // on the same machine.
 const app = "norm"
-const data = path.join(xdgData!, app)
-const cache = path.join(xdgCache!, app)
-const config = path.join(xdgConfig!, app)
-const state = path.join(xdgState!, app)
-const tmp = path.join(os.tmpdir(), app)
+
+// `NORM_HOME=/tmp/example` collapses norm's whole per-user footprint into one
+// directory: the four XDG dirs below, plus — in `src/norm/norm.ts` — the
+// owallet wallet database, owallet's state and config dirs, the bundled
+// binaries, and the port the auto-started `owallet serve` listens on. Nothing
+// outside it is read or written, so a throwaway root is a genuinely fresh
+// install that leaves the real ~/.owallet, ~/.norm and XDG dirs untouched.
+// It relocates norm's own state, not the workspace: project files and project
+// config are still read from where they are.
+// Read once at import (these paths are module constants); export it in the
+// shell before launching norm.
+const sandbox = process.env["NORM_HOME"]?.trim()
+const root = sandbox ? path.resolve(sandbox) : undefined
+const data = root ? path.join(root, "data") : path.join(xdgData!, app)
+const cache = root ? path.join(root, "cache") : path.join(xdgCache!, app)
+const config = root ? path.join(root, "config") : path.join(xdgConfig!, app)
+const state = root ? path.join(root, "state") : path.join(xdgState!, app)
+const tmp = root ? path.join(root, "tmp") : path.join(os.tmpdir(), app)
 
 const paths = {
   get home() {

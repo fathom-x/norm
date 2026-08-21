@@ -57,13 +57,38 @@ Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until
 the public release**, flip `DEFAULT_ENV` in `norm.ts` then),
-`NORM_OWALLET_URL` (explicit owallet URL, wins over the env default),
-`NORM_DEBUG=1` (bootstrap diagnostics on stderr). Staging/dev serve
+`NORM_OWALLET_URL` (explicit owallet URL, wins over the env default —
+ignored under `NORM_HOME`),
+`NORM_DEBUG=1` (bootstrap diagnostics on stderr), `NORM_HOME` (sandbox
+root, below). Staging/dev serve
 flags come from owallet's `dev-envs` feature — compiled into release
 binaries during the pre-release phase (staging Overpay URL baked in),
 see `owallet-release.yml`. Tests:
 `packages/opencode/test/config/config.test.ts` (`norm defaults`
-describe block).
+describe block) and `packages/opencode/test/norm/norm.test.ts`.
+
+`NORM_HOME=/tmp/example` puts **everything norm owns** under one
+directory — `data/` (auth.json, the owallet-binary/setup markers, logs),
+`config/`, `cache/`, `state/`, `tmp/`, `owallet/` (the wallet DB plus
+owallet's own state and `*.owallet` config, exported to child processes
+as `OWALLET_HOME`/`OWALLET_DB_PATH`/`OWALLET_CONFIG_DIR`), and `bin/`
+(what the installer writes when the same variable is set). The
+auto-started serve also gets its own port, derived from the root path
+(8800-9799): defaulting to 8767 would make `ensureServer` reuse the
+*real* wallet's running serve and silently undo the isolation. For the
+same reason the sandbox is **absolute**: ambient `OWALLET_HOME` /
+`OWALLET_DB_PATH` / `OWALLET_CONFIG_DIR` pointing outside the root and
+any `NORM_OWALLET_URL` are refused with a stderr notice (a leftover
+export from earlier experiments once pointed a "sandboxed" norm at the
+real wallet); unset `NORM_HOME` to use them. Inside a
+sandbox the owallet binary is picked without prompting — the sandbox's
+own `bin/owallet` if the installer put one there, else whatever is on
+PATH — so pointing `NORM_HOME` at an empty directory gives fresh state
+with the already-installed binary. It is the supported way to exercise a
+fresh install (or anything else that would otherwise write to
+`~/.owallet`) without touching the real wallet database; read at process
+start, so export it before launching. `rm -rf` the directory to undo.
+
 
 ## Rebrand
 

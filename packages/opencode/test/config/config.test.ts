@@ -452,6 +452,25 @@ describe("norm defaults", () => {
     ),
   )
 
+  it.instance("NORM_HOME points the seeded defaults at the sandbox's own port", () =>
+    withNorm(
+      withProcessEnv(
+        "NORM_HOME",
+        "/tmp/norm-sandbox-config-test",
+        Effect.gen(function* () {
+          const config = yield* Config.use.get()
+          const base = config.provider?.overpay?.options?.baseURL as string
+          // A sandbox must not default to 8767 — that serve is the real
+          // wallet's, and ensureServer would happily reuse it.
+          const port = Number(new URL(base).port)
+          expect(port).toBeGreaterThanOrEqual(8800)
+          expect(port).toBeLessThan(9800)
+          expect(config.mcp?.owallet).toMatchObject({ url: base.replace(/\/v1$/, "/mcp") })
+        }),
+      ),
+    ),
+  )
+
   it.instance(
     "lets user config override the seeded defaults",
     withNorm(
