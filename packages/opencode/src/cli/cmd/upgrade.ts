@@ -48,15 +48,25 @@ export const UpgradeCommand = {
     prompts.log.info("Using method: " + method)
     const target = args.target ? args.target.replace(/^v/, "") : await Installation.latest()
 
-    if (InstallationVersion === target) {
+    // norm: the curl method's installer also manages the bundled owallet, so
+    // "norm is already current" is not a no-op there — the installer skips
+    // the norm binary itself but still refreshes owallet from the newest
+    // owallet-v* release. Only the package-manager methods (which have no
+    // owallet step) can safely skip the whole run.
+    const normCurrent = InstallationVersion === target
+    if (normCurrent && method !== "curl") {
       prompts.log.warn(`norm upgrade skipped: ${target} is already installed`)
       prompts.outro("Done")
       return
     }
 
-    prompts.log.info(`From ${InstallationVersion} → ${target}`)
+    if (normCurrent) {
+      prompts.log.info(`norm ${target} is already installed — checking owallet`)
+    } else {
+      prompts.log.info(`From ${InstallationVersion} → ${target}`)
+    }
     const spinner = prompts.spinner()
-    spinner.start("Upgrading...")
+    spinner.start(normCurrent ? "Updating owallet..." : "Upgrading...")
     const err = await Installation.upgrade(method, target).catch((err) => err)
     if (err) {
       spinner.stop("Upgrade failed", 1)
@@ -71,7 +81,7 @@ export const UpgradeCommand = {
       prompts.outro("Done")
       return
     }
-    spinner.stop("Upgrade complete")
+    spinner.stop(normCurrent ? "owallet check complete" : "Upgrade complete")
     prompts.outro("Done")
   },
 }

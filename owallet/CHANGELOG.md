@@ -4,6 +4,21 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Cost markers on every model-facing tool description (fathom-x/norm#17)
+
+- Listing-backed tools (`run_python`, every `provider_tool` listing, on
+  `/v1` and `/mcp` alike) now end their descriptions with a cost note —
+  "Each call places a real marketplace order billed to the wallet
+  (≈ $X per call)" — priced live from the listing's own `price_usd` /
+  `free` fields, so a repriced listing needs no code change.
+- The free wallet/order/marketplace reads on both rosters now open with
+  "Free — a read, no order is placed and nothing is billed", and the
+  money-moving calls (`create_order`, `pay_order`, `buy`/`buy_credits`,
+  `send_usdc`, `send_zcash`, `load_core_credits`,
+  `redeem_merchant_credits`) say that the call itself is not billed but
+  moves real money — so a client model can tell the three cost tiers
+  apart from the roster alone instead of guessing.
+
 ## 0.1.6
 
 ### Client-side tools (the norm agent work)

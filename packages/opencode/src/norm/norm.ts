@@ -226,17 +226,57 @@ function walletSetupFile() {
   return path.join(Global.Path.data, "owallet-setup.json")
 }
 
-/** True when the user answered "no" to the first-run wallet setup offer. */
-export async function readWalletSetupDeclined(): Promise<boolean> {
-  const parsed = await fs
+/**
+ * The database password norm uses when it sets a wallet up by itself
+ * (fathom-x/norm#18): first launch should not stop to invent a password.
+ * It only protects the encrypted DB at rest, and only for wallets norm
+ * created — a marker in the setup file records that the default is in
+ * play, so `applyAutoSetupPassword` can restore non-interactive starts on
+ * every later launch without the user exporting anything. Users who want a
+ * real password export OWALLET_PASSWORD before the first launch (it wins),
+ * or rotate later with owallet's own tooling.
+ */
+export const DEFAULT_OWALLET_PASSWORD = "norm"
+
+async function readWalletSetupState(): Promise<any> {
+  return fs
     .readFile(walletSetupFile(), "utf8")
     .then((text) => JSON.parse(text))
     .catch(() => undefined)
-  return parsed?.declined === true
+}
+
+/** True when the user answered "no" to the first-run wallet setup offer. */
+export async function readWalletSetupDeclined(): Promise<boolean> {
+  return (await readWalletSetupState())?.declined === true
 }
 
 export async function recordWalletSetupDeclined(): Promise<void> {
   await fs.writeFile(walletSetupFile(), JSON.stringify({ declined: true }, null, 2) + "\n")
+}
+
+/** True when norm auto-created the wallet DB under the default password. */
+export async function readAutoSetupDefaultPassword(): Promise<boolean> {
+  return (await readWalletSetupState())?.defaultPassword === true
+}
+
+export async function recordAutoSetup(defaultPassword: boolean): Promise<void> {
+  await fs.writeFile(
+    walletSetupFile(),
+    JSON.stringify({ autoSetup: true, defaultPassword }, null, 2) + "\n",
+  )
+}
+
+/**
+ * Make the auto-set-up wallet's default password available to this process
+ * (serve auto-start, provider-key mint, CLI children) when the user hasn't
+ * exported their own. Only applies to a DB the auto-setup created under the
+ * default password — never guesses at a user-created database.
+ */
+export async function applyAutoSetupPassword(): Promise<void> {
+  if (process.env.OWALLET_PASSWORD) return
+  if (await readAutoSetupDefaultPassword()) {
+    process.env.OWALLET_PASSWORD = DEFAULT_OWALLET_PASSWORD
+  }
 }
 
 /**
@@ -261,19 +301,108 @@ function runInteractive(bin: string, args: string[], env: NodeJS.ProcessEnv): Pr
 }
 
 /**
+ * Run an owallet subcommand with its stdout discarded. Used for the
+ * auto-setup's `generate`, whose stdout includes the seed phrase — the
+ * phrase is deliberately never displayed (fathom-x/norm#18);
+ * `owallet export key --format mnemonic` prints it on demand.
+ */
+function runQuiet(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(bin, args, { env, timeout: 60_000 }, (error: any, _stdout, stderr) => {
+      resolve({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stderr: stderr ?? "" })
+    })
+  })
+}
+
+/**
+ * Zero-question first-run setup for a bundled owallet (fathom-x/norm#18):
+ * no password prompts — the DB is created under the default password (an
+ * exported OWALLET_PASSWORD wins) and a wallet is generated automatically.
+ * The seed phrase is NOT printed (`generate`'s stdout is discarded); the
+ * user backs it up on demand with `owallet export key --format mnemonic`.
+ * The one question asked is whether to connect to Overpay now, which runs
+ * `owallet authorize` — the browser OAuth (PKCE) callback flow that logs
+ * into Overpay and links this wallet — after which the bootstrap mints the
+ * provider key for this very session.
+ */
+async function autoWalletSetup(bin: string, ask: (prompt: string) => Promise<string>): Promise<void> {
+  const usingDefault = !process.env.OWALLET_PASSWORD
+  const password = process.env.OWALLET_PASSWORD || DEFAULT_OWALLET_PASSWORD
+  process.stderr.write(
+    [
+      "",
+      "First run: setting up your owallet wallet automatically.",
+      `  database:  ${owalletDbPath()}`,
+      usingDefault
+        ? `  password:  the default ("${DEFAULT_OWALLET_PASSWORD}") — export OWALLET_PASSWORD before first launch to pick your own`
+        : "  password:  from OWALLET_PASSWORD",
+      "  The seed phrase is not displayed. Back it up anytime with:",
+      "    owallet export key --format mnemonic",
+      "",
+    ].join("\n"),
+  )
+  // OWALLET_PASSWORD makes `init` non-interactive and unlocks the DB for
+  // `generate`; OWALLET_WALLET_PASSWORD short-circuits generate's separate
+  // per-wallet (web admin) password prompt the same way. Both run with
+  // stdout discarded — generate's stdout carries the seed phrase.
+  const env = {
+    ...process.env,
+    OWALLET_PASSWORD: password,
+    OWALLET_WALLET_PASSWORD: process.env.OWALLET_WALLET_PASSWORD || password,
+  }
+  for (const step of ["init", "generate"]) {
+    const args = [...envFlagArgs(), step]
+    const result = await runQuiet(bin, args, env)
+    if (result.code !== 0) {
+      const detail = result.stderr.trim()
+      process.stderr.write(
+        `\`owallet ${step}\` exited with code ${result.code}${detail ? `:\n${detail}\n` : " — "}` +
+          `norm will retry setup on the next launch.\n`,
+      )
+      return
+    }
+  }
+  await recordAutoSetup(usingDefault)
+  // Keep the password in this process's env so the bootstrap that runs
+  // next can start `owallet serve` and mint the provider key; later
+  // launches restore it from the setup marker via applyAutoSetupPassword.
+  process.env.OWALLET_PASSWORD = password
+
+  process.stderr.write(
+    "\nWallet ready. Connecting to Overpay links this wallet to your Overpay\n" +
+      "account (opens your browser to log in and authorize; norm's provider\n" +
+      "key is minted automatically afterwards).\n\n",
+  )
+  const answer = (await ask("Connect to Overpay now? [Y/n]: ")).trim().toLowerCase()
+  if (answer === "n" || answer === "no") {
+    process.stderr.write("Skipping — run `owallet authorize` anytime to link this wallet to Overpay.\n")
+    return
+  }
+  const code = await runInteractive(bin, [...envFlagArgs(), "authorize"], env)
+  process.stderr.write(
+    code === 0
+      ? "Connected to Overpay.\n"
+      : "Overpay connect didn't complete — run `owallet authorize` anytime to retry.\n",
+  )
+}
+
+/**
  * First-run wallet setup: an owallet binary is present but there is no
  * wallet database, so the bootstrap could neither start `owallet serve` nor
  * mint a provider key — a fresh install would sit at "cannot connect" with
- * no hint. Offer to run `owallet init` + `owallet generate` right here,
- * before the TUI owns the terminal.
+ * no hint. Runs before the TUI owns the terminal.
  *
- * The database password is collected once (an exported OWALLET_PASSWORD
- * wins) and handed to the child commands, then kept in this process's env
- * so the bootstrap that runs moments later can auto-start the server and
- * mint the overpay key for this very session. `ask`/`askSecret` are
- * injected by the CLI layer (UI.input / UI.inputSecret) so this module
- * stays UI-free. A decline is recorded and not asked again; an aborted or
- * failed setup is re-offered on the next launch.
+ * A bundled owallet gets the zero-question path (`autoWalletSetup` above).
+ * A pre-existing (system) owallet keeps the interactive offer below — its
+ * owner may have their own password conventions, so norm asks instead of
+ * assuming: the database password is collected once (an exported
+ * OWALLET_PASSWORD wins) and handed to the child commands, then kept in
+ * this process's env so the bootstrap that runs moments later can
+ * auto-start the server and mint the overpay key for this very session.
+ * `ask`/`askSecret` are injected by the CLI layer (UI.input /
+ * UI.inputSecret) so this module stays UI-free. A decline is recorded and
+ * not asked again; an aborted or failed setup is re-offered on the next
+ * launch.
  */
 export async function firstRunWalletSetup(
   ask: (prompt: string) => Promise<string>,
@@ -282,6 +411,7 @@ export async function firstRunWalletSetup(
   if (!process.stdin.isTTY || !process.stdout.isTTY) return
   if (!(await needsWalletSetup())) return
   const bin = (await owalletBinary())!
+  if (bin === bundledOwalletPath()) return autoWalletSetup(bin, ask)
   process.stderr.write(
     [
       "",
@@ -366,25 +496,37 @@ export function systemPrompt(): string {
     "You are running inside norm, a fork of opencode preconfigured for the",
     "Overpay marketplace. Requests to the `overpay` provider are served by the",
     "user's local owallet server (an OpenAI-compatible endpoint): it routes",
-    "chat to a marketplace inference seller and executes tool calls",
-    "server-side as real, individually paid marketplace orders (code",
-    "execution, web fetch, image generation, wallet and order lookups, and",
-    "whatever else is currently listed).",
+    "chat to a marketplace inference seller and executes listing-backed tool",
+    "calls server-side as real, individually paid marketplace orders (code",
+    "execution, web fetch, image generation, and whatever else is currently",
+    "listed).",
     "",
     "- The authoritative list of marketplace capabilities is the set of tools",
     "  attached to your request by the wallet — NOT the opencode docs.",
     "  https://opencode.ai documents only the client (TUI, config, keybinds).",
     "  When asked what you can do on this provider, answer from your attached",
     "  tools; do not fetch opencode docs for that.",
-    "- Every chat turn and every server-side tool execution spends real money",
-    "  from the user's wallet (bounded by per-key budgets and spend caps), so",
-    "  avoid redundant tool calls — but a fresh read of volatile state is not",
-    "  redundant: wallet balances, budgets, and order statuses change with",
-    "  every order, and results in earlier turns are stale (each carries an",
-    "  as_of timestamp). When the user asks for current values, call the tool",
-    "  again; never answer from a previous tool result.",
+    "- Costs fall into three tiers — treat them differently:",
+    "  1. Free reads: wallet, order, and marketplace lookups (account info,",
+    "     balances, order status, browsing/fetching listings, purchase",
+    "     history). These place no order and bill nothing — never hesitate to",
+    "     re-check them, and prefer a fresh read of volatile state: balances,",
+    "     budgets, and order statuses change with every order, and results in",
+    "     earlier turns are stale (each carries an as_of timestamp). When the",
+    "     user asks for current values, call the tool again; never answer",
+    "     from a previous tool result.",
+    "  2. Free calls that move real money: creating/paying orders, buying",
+    "     credits, and on-chain sends. The call itself is not billed, but it",
+    "     spends or transfers the user's funds — be deliberate and confirm",
+    "     intent, not because the call bills, but because the money moves.",
+    "  3. Per-call paid orders: every chat turn on this provider and every",
+    "     listing-backed tool execution (however trivial-looking) is a real,",
+    "     individually paid marketplace order, bounded by per-key budgets and",
+    "     spend caps. Tool descriptions carry the per-call price where known",
+    "     — avoid redundant calls in this tier.",
     "- The `owallet` MCP server is also attached client-side for wallet",
-    "  operations (balances, orders, marketplace browsing).",
+    "  operations (balances, orders, marketplace browsing) — its reads are",
+    "  tier-1 free; its one-shot marketplace purchase tools are tier 3.",
   ].join("\n")
 }
 
@@ -692,6 +834,7 @@ async function ensureProviderKey(): Promise<void> {
  */
 export async function bootstrap(): Promise<void> {
   if (disabled()) return
+  await applyAutoSetupPassword().catch(() => {})
   await ensureServer(owalletUrl()).catch((error) => {
     debug("owallet auto-start failed:", error)
     return false

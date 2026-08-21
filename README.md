@@ -40,29 +40,29 @@ curl -fsSL https://raw.githubusercontent.com/fathom-x/norm/main/install | bash
 
 ### Getting started
 
-After norm is installed, initialize owallet:
+After norm is installed, just run it:
 
 ```bash
-owallet init
-```
-
-That will set up your `OWALLET_PASSWORD`, which is used to unlock and authorize funds.
-
-Then create a spending account:
-
-```bash
-owallet generate
-```
-
-That generates a seed phrase which you **must write down!**
-
-Now you're ready to use norm:
-
-```bash
-export OWALLET_PASSWORD=...
-
 norm
 ```
+
+On the first launch norm sets the bundled owallet up by itself: it creates
+the wallet database (under a default password — export `OWALLET_PASSWORD`
+before the first launch to pick your own), generates a wallet, and then
+offers to connect to Overpay — a browser login that links your wallet and
+authorizes the norm session automatically.
+
+The seed phrase is never printed during setup. To back it up (recommended
+before funding the wallet), export it explicitly:
+
+```bash
+owallet export key --format mnemonic
+```
+
+If you use your own (non-bundled) owallet install instead, norm falls back
+to offering the manual steps interactively (`owallet init` +
+`owallet generate`), and you can always run those — and
+`owallet authorize` — yourself.
 
 ### Agents
 
