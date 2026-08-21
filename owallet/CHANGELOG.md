@@ -4,6 +4,17 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+## 0.1.8
+
+### Lenient ambient `.env` loading
+
+- The `.env` picked up from the current working directory belongs to
+  whatever project the user is standing in, and one line owallet could
+  not parse used to fail the whole command — it killed `owallet init`
+  during norm's first-run wallet setup. Unparsable lines are now skipped
+  with a stderr note; explicit `--config` and discovered `*.owallet`
+  files stay strict.
+
 ## 0.1.7
 
 ### Cost markers on every model-facing tool description (fathom-x/norm#17)
