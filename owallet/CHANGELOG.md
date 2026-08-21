@@ -4,6 +4,8 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+## 0.1.7
+
 ### Cost markers on every model-facing tool description (fathom-x/norm#17)
 
 - Listing-backed tools (`run_python`, every `provider_tool` listing, on
