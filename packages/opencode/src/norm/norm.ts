@@ -661,6 +661,56 @@ export async function firstRunWalletSetup(
 }
 
 /**
+ * With no default password, a launch without OWALLET_PASSWORD exported
+ * cannot start `owallet serve` or mint provider keys — the session would
+ * open with the overpay provider dead and only a NORM_DEBUG note saying
+ * why. So when the wallet exists but the password isn't in the
+ * environment and no serve is already answering, ask for it at the
+ * terminal (before the TUI owns it). The answer is validated by a
+ * read-only `owallet provider-key list` (unlocks the DB, touches
+ * nothing), kept in this process's env only — never persisted — and
+ * Enter skips for people who run `owallet serve` themselves.
+ */
+export async function ensureServePassword(askSecret: (prompt: string) => Promise<string>): Promise<void> {
+  if (disabled()) return
+  applySandboxEnv()
+  if (!process.stdin.isTTY || !process.stdout.isTTY) return
+  await applyAutoSetupPassword().catch(() => {})
+  if (process.env.OWALLET_PASSWORD) return
+  if (!existsSync(owalletDbPath())) return
+  const bin = await owalletBinary()
+  if (!bin) return
+  // A serve that's already answering needs no password from us.
+  if (await probe(owalletUrl())) return
+  process.stderr.write(
+    "\nnorm starts the owallet server for you, which needs the wallet admin\n" +
+      "password (export OWALLET_PASSWORD in your shell profile to skip this\n" +
+      "prompt).\n",
+  )
+  let lastError = ""
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const password = await askSecret("Wallet admin password (Enter to skip): ")
+    if (!password) {
+      process.stderr.write("Skipping — export OWALLET_PASSWORD or run `owallet serve` yourself.\n")
+      return
+    }
+    const result = await runQuiet(bin, ["provider-key", "list"], {
+      ...process.env,
+      OWALLET_PASSWORD: password,
+    })
+    if (result.code === 0) {
+      process.env.OWALLET_PASSWORD = password
+      return
+    }
+    lastError = result.stderr.trim()
+    process.stderr.write("That password didn't unlock the wallet database — try again.\n")
+  }
+  process.stderr.write(
+    `Giving up${lastError ? ` (${lastError})` : ""} — export OWALLET_PASSWORD or run \`owallet serve\` yourself.\n`,
+  )
+}
+
+/**
  * Retry the mandatory Overpay connect on launch: a wallet norm set up whose
  * `owallet authorize` hasn't succeeded yet (browser closed, no browser,
  * OAuth abandoned) gets the flow re-run before the TUI takes the terminal,

@@ -55,6 +55,11 @@ automatically. Connecting is part of getting started: an unlinked wallet
 can't buy anything, so norm re-offers the login on every launch (and the
 sidebar says so) until it completes.
 
+On later launches norm prompts for the wallet admin password (once,
+validated, kept only for that session) so it can start the owallet
+server for you — export `OWALLET_PASSWORD` in your shell profile to skip
+the prompt, or press Enter there and run `owallet serve` yourself.
+
 The seed phrase is never printed during setup. To back it up (recommended
 before funding the wallet), export it explicitly:
 
