@@ -513,7 +513,8 @@ async function autoWalletSetup(
       )
       // The TUI takes the screen the moment this returns; without a pause the
       // one explanation of why Overpay is unavailable scrolls past unread.
-      await ask("Press Enter to continue without Overpay: ").catch(() => "")
+      // (askSecret because it's the prompt this path has; input is discarded.)
+      await askSecret("Press Enter to continue without Overpay: ").catch(() => "")
       return
     }
   }
