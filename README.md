@@ -80,9 +80,11 @@ rm -rf $NORM_HOME            # gone, real wallet untouched
 
 Export it before launching (it is read at startup). With `NORM_HOME` set,
 none of the state norm owns lives outside that directory: not the wallet
-database in `~/.owallet`, not `~/.norm`, not your shell config. (Your
-project files and project config are still read normally — it sandboxes
-norm's own footprint, not the editor.)
+database in `~/.owallet`, not `~/.norm`, not your shell config — and
+leftover `OWALLET_*`/`NORM_OWALLET_URL` exports in the shell are ignored
+(with a notice) rather than allowed to point the sandbox at your real
+wallet. (Your project files and project config are still read normally —
+it sandboxes norm's own footprint, not the editor.)
 
 ### Agents
 

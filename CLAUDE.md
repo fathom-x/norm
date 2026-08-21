@@ -57,7 +57,8 @@ Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until
 the public release**, flip `DEFAULT_ENV` in `norm.ts` then),
-`NORM_OWALLET_URL` (explicit owallet URL, wins over the env default),
+`NORM_OWALLET_URL` (explicit owallet URL, wins over the env default —
+ignored under `NORM_HOME`),
 `NORM_DEBUG=1` (bootstrap diagnostics on stderr), `NORM_HOME` (sandbox
 root, below). Staging/dev serve
 flags come from owallet's `dev-envs` feature — compiled into release
@@ -74,7 +75,12 @@ as `OWALLET_HOME`/`OWALLET_DB_PATH`/`OWALLET_CONFIG_DIR`), and `bin/`
 (what the installer writes when the same variable is set). The
 auto-started serve also gets its own port, derived from the root path
 (8800-9799): defaulting to 8767 would make `ensureServer` reuse the
-*real* wallet's running serve and silently undo the isolation. Inside a
+*real* wallet's running serve and silently undo the isolation. For the
+same reason the sandbox is **absolute**: ambient `OWALLET_HOME` /
+`OWALLET_DB_PATH` / `OWALLET_CONFIG_DIR` pointing outside the root and
+any `NORM_OWALLET_URL` are refused with a stderr notice (a leftover
+export from earlier experiments once pointed a "sandboxed" norm at the
+real wallet); unset `NORM_HOME` to use them. Inside a
 sandbox the owallet binary is picked without prompting — the sandbox's
 own `bin/owallet` if the installer put one there, else whatever is on
 PATH — so pointing `NORM_HOME` at an empty directory gives fresh state

@@ -194,17 +194,22 @@ test("NORM_HOME moves the wallet db, the bundled binary and the serve port", asy
   expect(Norm.bundledOwalletPath()).toBe(path.join(sandbox, "bin", "owallet"))
 
   // Its own port: reusing the default would hand the sandbox whatever serve is
-  // already running against the real wallet. Stable across launches, and
-  // NORM_OWALLET_URL still wins.
+  // already running against the real wallet. Stable across launches — and a
+  // leftover NORM_OWALLET_URL is ignored inside a sandbox for the same
+  // reason (that is exactly how a sandboxed norm once reached the real
+  // wallet's serve); it still wins outside one.
   const url = Norm.owalletUrl()
   expect(url).not.toBe(outside)
   expect(url).toBe(Norm.owalletUrl())
   expect(Number(new URL(url).port)).toBeGreaterThanOrEqual(8800)
   process.env.NORM_OWALLET_URL = "http://127.0.0.1:9999"
   try {
+    expect(Norm.owalletUrl()).toBe(url)
+    delete process.env.NORM_HOME
     expect(Norm.owalletUrl()).toBe("http://127.0.0.1:9999")
   } finally {
     delete process.env.NORM_OWALLET_URL
+    process.env.NORM_HOME = sandbox
   }
 })
 
@@ -231,10 +236,17 @@ test("applySandboxEnv points owallet's own vars at the sandbox", async () => {
   // and won't create it itself.
   expect(existsSync(dir)).toBe(true)
 
-  // An explicitly exported OWALLET_* always wins.
+  // An OWALLET_* pointing outside the sandbox is refused — a leftover export
+  // from earlier experiments must not punch through the isolation.
   process.env.OWALLET_DB_PATH = "/somewhere/else.db"
   Norm.applySandboxEnv()
-  expect(process.env.OWALLET_DB_PATH).toBe("/somewhere/else.db")
+  expect(process.env.OWALLET_DB_PATH).toBe(path.join(dir, "owallet.db"))
+
+  // A path already inside the sandbox is kept (sandbox-consistent).
+  const custom = path.join(dir, "renamed.db")
+  process.env.OWALLET_DB_PATH = custom
+  Norm.applySandboxEnv()
+  expect(process.env.OWALLET_DB_PATH).toBe(custom)
 })
 
 test("a sandbox wallet is set up independently of the real one", async () => {

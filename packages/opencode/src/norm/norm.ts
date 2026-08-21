@@ -88,12 +88,23 @@ function sandboxPort(root: string): string {
   return String(SANDBOX_PORT_BASE + (hash % SANDBOX_PORT_SPAN))
 }
 
+// One warning per process for ambient overrides the sandbox refuses.
+let sandboxOverrideWarned = false
+
 /**
  * Point owallet's own env vars at the sandbox, so every owallet norm runs —
  * the auto-started `serve`, first-run `init`/`generate`, `authorize`,
- * `provider-key create` — reads and writes inside `NORM_HOME`. setdefault
- * semantics: an explicitly exported `OWALLET_*` always wins. No-op without a
- * sandbox. Idempotent; called from every entry point that may spawn owallet.
+ * `provider-key create` — reads and writes inside `NORM_HOME`.
+ *
+ * The sandbox is ABSOLUTE: an `OWALLET_HOME`/`OWALLET_DB_PATH`/
+ * `OWALLET_CONFIG_DIR` pointing outside the root is overridden (an inside
+ * path is kept — it is already sandbox-consistent). Earlier setdefault
+ * semantics let a leftover export from previous experiments silently point
+ * a "sandboxed" norm at the real wallet — observed in the field with a
+ * stale `NORM_OWALLET_URL`, which `owalletUrl` now likewise ignores under
+ * a sandbox. Refused overrides are named once on stderr; unset NORM_HOME
+ * to use them. No-op without a sandbox; called from every entry point that
+ * may spawn owallet.
  */
 export function applySandboxEnv(): void {
   const root = normHome()
@@ -104,19 +115,42 @@ export function applySandboxEnv(): void {
   try {
     mkdirSync(dir, { recursive: true })
   } catch {}
-  if (!process.env.OWALLET_HOME) process.env.OWALLET_HOME = dir
-  if (!process.env.OWALLET_DB_PATH) process.env.OWALLET_DB_PATH = path.join(dir, "owallet.db")
-  if (!process.env.OWALLET_CONFIG_DIR) process.env.OWALLET_CONFIG_DIR = dir
+  const inside = (value: string) => {
+    const resolved = path.resolve(value)
+    return resolved === root || resolved.startsWith(root + path.sep)
+  }
+  const sandboxValues: Record<string, string> = {
+    OWALLET_HOME: dir,
+    OWALLET_DB_PATH: path.join(dir, "owallet.db"),
+    OWALLET_CONFIG_DIR: dir,
+  }
+  const refused: string[] = []
+  for (const [key, value] of Object.entries(sandboxValues)) {
+    const current = process.env[key]
+    if (current && inside(current)) continue
+    if (current) refused.push(`${key}=${current}`)
+    process.env[key] = value
+  }
+  if (process.env.NORM_OWALLET_URL) refused.push(`NORM_OWALLET_URL=${process.env.NORM_OWALLET_URL}`)
+  if (refused.length && !sandboxOverrideWarned) {
+    sandboxOverrideWarned = true
+    process.stderr.write(
+      `[norm] NORM_HOME sandbox ignores ${refused.join(", ")} — the sandbox is fully self-contained; unset NORM_HOME to use them.\n`,
+    )
+  }
 }
 
 /**
- * Base URL of the owallet server. `NORM_OWALLET_URL` overrides the default;
- * under `NORM_HOME` the default port is the sandbox's own (see `sandboxPort`).
+ * Base URL of the owallet server. `NORM_OWALLET_URL` overrides the default —
+ * except under `NORM_HOME`, where the sandbox's own port (see `sandboxPort`)
+ * always wins: a leftover exported URL is exactly how a "sandboxed" norm once
+ * ended up talking to the real wallet's serve. `applySandboxEnv` names the
+ * ignored override on stderr.
  */
 export function owalletUrl() {
-  if (process.env.NORM_OWALLET_URL) return process.env.NORM_OWALLET_URL.replace(/\/+$/, "")
   const root = normHome()
   if (root) return `http://127.0.0.1:${sandboxPort(root)}`
+  if (process.env.NORM_OWALLET_URL) return process.env.NORM_OWALLET_URL.replace(/\/+$/, "")
   return `http://127.0.0.1:${ENV_PORTS[owalletEnv()]}`
 }
 
