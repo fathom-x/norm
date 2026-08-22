@@ -247,6 +247,15 @@ async fn wallet_status(
         .await
         .map_err(|e| OpenAiError::internal(format!("get_account_info: {e}")))?;
     let mut map = crate::projection::balances_map(&out.data);
+    // Whether this wallet is linked to an Overpay account: the underlying
+    // account read yields `account` when the live fetch succeeded and
+    // `account_hint` (run `owallet authorize`, sign up, ...) when it
+    // didn't. norm's sidebar turns `false` into its "log in to Overpay to
+    // get started" line.
+    map.insert(
+        "overpay_connected".into(),
+        Value::Bool(out.data.get("account").is_some()),
+    );
     if let Some(key) = read_key(&state, key_id.as_deref()) {
         map.insert("key_budget".into(), key_budget_json(&key));
     }

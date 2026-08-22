@@ -19,13 +19,34 @@ const RETRY_MS = 10_000
 const FETCH_TIMEOUT_MS = 15_000
 
 // Deliberately duplicated from packages/opencode/src/norm/norm.ts
-// (owalletUrl/owalletEnv) — the tui package doesn't depend on the opencode
-// package, and the mapping is three lines. Keep the two in sync by hand,
-// like install.rs's copy of DEFAULT_MODEL.
+// (owalletUrl/owalletEnv/normHome/sandboxPort) — the tui package doesn't
+// depend on the opencode package, and the mapping is small. Keep the two in
+// sync by hand, like install.rs's copy of DEFAULT_MODEL. The NORM_HOME
+// branch must match exactly: when this copy lagged behind, the widget
+// polled the real serve on 8767 with the sandbox's key and rendered
+// "provider key rejected" for every sandboxed run.
 const ENV_PORTS = { prod: 8765, dev: 8766, staging: 8767 } as const
 const DEFAULT_ENV: keyof typeof ENV_PORTS = "staging"
+const SANDBOX_PORT_BASE = 8800
+const SANDBOX_PORT_SPAN = 1000
+
+function normHome(): string | undefined {
+  const value = process.env.NORM_HOME?.trim()
+  return value ? path.resolve(value) : undefined
+}
+
+/** Same djb2-style hash as norm.ts — the two must land on the same port. */
+function sandboxPort(root: string): string {
+  let hash = 5381
+  for (let i = 0; i < root.length; i++) hash = ((hash * 33) ^ root.charCodeAt(i)) >>> 0
+  return String(SANDBOX_PORT_BASE + (hash % SANDBOX_PORT_SPAN))
+}
 
 function owalletUrl() {
+  // A NORM_HOME sandbox is absolute: its own port, ambient NORM_OWALLET_URL
+  // ignored (norm.ts prints the notice).
+  const root = normHome()
+  if (root) return `http://127.0.0.1:${sandboxPort(root)}`
   if (process.env.NORM_OWALLET_URL) return process.env.NORM_OWALLET_URL.replace(/\/+$/, "")
   const env = process.env.NORM_OWALLET_ENV
   const resolved = env === "prod" || env === "dev" || env === "staging" ? env : DEFAULT_ENV
@@ -54,9 +75,17 @@ type OwalletStatus = {
   eth_balance?: string
   zec_balance?: number | string
   balance_error?: string
+  /** False when the wallet isn't linked to an Overpay account (owallet >= 0.1.10). */
+  overpay_connected?: boolean
   /** The marketplace this wallet points at (env-resolved server-side). */
   overpay_url?: string
-  merchant_credits?: Array<{ seller_slug?: string; organization_slug?: string; balance_cents?: number }>
+  merchant_credits?: Array<{
+    seller_slug?: string
+    organization_slug?: string
+    balance_cents?: number
+    /** Marks the overpay org's core-credit pool — pinned above everything. */
+    core?: boolean
+  }>
   key_budget?: {
     daily_budget_usd?: number | null
     spent_today_usd?: number
@@ -144,21 +173,42 @@ function View(props: { api: TuiPluginApi }) {
     if (timer) clearTimeout(timer)
   })
 
-  const credits = () => status()?.merchant_credits?.filter((row) => (row.balance_cents ?? 0) > 0) ?? []
+  // Core credits are the marketplace's primary spend balance: pinned to the
+  // very top of the widget (above the chain balances) and shown even at $0.
+  // Requires owallet >= 0.1.9 + a Rails deploy that tags the row; without
+  // the flag the row renders among the ordinary credits as before.
+  const coreCredits = () => status()?.merchant_credits?.find((row) => row.core === true)
+  const credits = () =>
+    status()?.merchant_credits?.filter((row) => row.core !== true && (row.balance_cents ?? 0) > 0) ?? []
   const budget = () => status()?.key_budget
   const waiting = () => status() === undefined
   const error = () => stateLine(outcome())
+
+  const needsLogin = () => status()?.overpay_connected === false
 
   return (
     <box>
       <text fg={theme().text}>
         <b>owallet</b>
       </text>
+      {/* An unlinked wallet can't buy anything — norm's whole point. Say
+          so first, ahead of every balance line. */}
+      <Show when={needsLogin()}>
+        <text fg={theme().warning}>log in to Overpay to get started — owallet authorize</text>
+      </Show>
+      <Show when={coreCredits()}>
+        <text fg={theme().textMuted}>
+          core credits <span style={{ fg: theme().text }}>{usd((coreCredits()!.balance_cents ?? 0) / 100)}</span>
+        </text>
+      </Show>
+      {/* Chain-qualified tickers (fathom-x/norm#22): both come from the
+          wallet's configured EVM chain — Base for every wallet norm ships.
+          If /v1/status ever reports the chain, derive the prefix from it. */}
       <Show when={status()?.usdc_balance !== undefined}>
-        <text fg={theme().textMuted}>{status()!.usdc_balance} USDC</text>
+        <text fg={theme().textMuted}>{status()!.usdc_balance} BASE.USDC</text>
       </Show>
       <Show when={status()?.eth_balance !== undefined}>
-        <text fg={theme().textMuted}>{status()!.eth_balance} ETH</text>
+        <text fg={theme().textMuted}>{status()!.eth_balance} BASE.ETH</text>
       </Show>
       <Show when={status()?.zec_balance !== undefined}>
         <text fg={theme().textMuted}>{String(status()!.zec_balance)} ZEC</text>

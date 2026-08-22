@@ -269,10 +269,14 @@ export function Session() {
   const [showGenericToolOutput, setShowGenericToolOutput] = kv.signal("generic_tool_output_visibility", false)
 
   const wide = createMemo(() => dimensions().width > 120)
+  // norm: the sidebar carries the owallet widget (balances, credits, budget),
+  // so it shows by default at every width — upstream gates "auto" behind
+  // wide(). The toggle still hides it (persisted), and child sessions stay
+  // sidebar-free.
   const sidebarVisible = createMemo(() => {
     if (session()?.parentID) return false
     if (sidebarOpen()) return true
-    if (sidebar() === "auto" && wide()) return true
+    if (sidebar() === "auto") return true
     return false
   })
   const showTimestamps = createMemo(() => timestamps() === "show")

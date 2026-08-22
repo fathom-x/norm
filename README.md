@@ -46,11 +46,19 @@ After norm is installed, just run it:
 norm
 ```
 
-On the first launch norm sets the bundled owallet up by itself: it creates
-the wallet database (under a default password — export `OWALLET_PASSWORD`
-before the first launch to pick your own), generates a wallet, and then
-offers to connect to Overpay — a browser login that links your wallet and
-authorizes the norm session automatically.
+On the first launch norm sets the bundled owallet up: you choose the
+wallet admin password at the prompt (it encrypts the wallet database and
+logs into the wallet dashboard; an exported `OWALLET_PASSWORD` skips the
+prompt), a wallet is generated, and norm connects to Overpay — a browser
+login that links your wallet and authorizes the norm session
+automatically. Connecting is part of getting started: an unlinked wallet
+can't buy anything, so norm re-offers the login on every launch (and the
+sidebar says so) until it completes.
+
+On later launches norm prompts for the wallet admin password (once,
+validated, kept only for that session) so it can start the owallet
+server for you — export `OWALLET_PASSWORD` in your shell profile to skip
+the prompt, or press Enter there and run `owallet serve` yourself.
 
 The seed phrase is never printed during setup. To back it up (recommended
 before funding the wallet), export it explicitly:
