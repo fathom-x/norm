@@ -2534,6 +2534,15 @@ struct OrderFollower<'a> {
     /// always confirmed by a GET). `None` after any failure — the
     /// follower then behaves exactly like the pure-polling version.
     ws: Option<tokio::sync::mpsc::Receiver<owallet_overpay::cable::CableFrame>>,
+    /// The subscription attempt, in flight. Raced against the poll
+    /// timer rather than awaited: where WebSocket upgrades are
+    /// blackholed rather than refused, awaiting it would add the full
+    /// connect timeout to first-token latency on every followed order.
+    ws_connecting: Option<
+        tokio::task::JoinHandle<
+            Result<tokio::sync::mpsc::Receiver<owallet_overpay::cable::CableFrame>, String>,
+        >,
+    >,
     ws_tried: bool,
 }
 
@@ -2550,6 +2559,7 @@ impl<'a> OrderFollower<'a> {
             poll_deadline: tokio::time::Instant::now(),
             pending: None,
             ws: None,
+            ws_connecting: None,
             ws_tried: false,
         }
     }
@@ -2562,27 +2572,48 @@ impl<'a> OrderFollower<'a> {
         }
         if self.ctx.ws_enabled && !self.ws_tried {
             self.ws_tried = true;
-            // The first poll hasn't happened yet, so a failed connect
-            // (bounded at 3s inside) delays nothing but itself.
-            match owallet_overpay::cable::subscribe_payment_status(
-                self.ctx.mcp.overpay.base_url().as_str(),
-                self.order_id,
-            )
-            .await
-            {
-                Ok(rx) => {
-                    self.ws = Some(rx);
-                    tracing::debug!(order_id = self.order_id, "cable subscription live");
-                }
-                Err(e) => tracing::debug!(order_id = self.order_id, "cable unavailable: {e}"),
-            }
+            // Spawned, not awaited: polling starts on schedule and the
+            // subscription is adopted below whenever it lands.
+            let base = self.ctx.mcp.overpay.base_url().as_str().to_string();
+            let order_id = self.order_id.to_string();
+            self.ws_connecting = Some(tokio::spawn(async move {
+                owallet_overpay::cable::subscribe_payment_status(&base, &order_id).await
+            }));
         }
 
         loop {
-            let Some(rx) = self.ws.as_mut() else {
-                tokio::time::sleep_until(self.poll_deadline).await;
-                return self.poll().await;
-            };
+            if self.ws.is_none() {
+                // Not subscribed. Race an in-flight connect against the
+                // poll timer; with no connect pending, just poll.
+                let Some(connecting) = self.ws_connecting.as_mut() else {
+                    tokio::time::sleep_until(self.poll_deadline).await;
+                    return self.poll().await;
+                };
+                tokio::select! {
+                    biased;
+                    joined = connecting => {
+                        self.ws_connecting = None;
+                        match joined {
+                            Ok(Ok(rx)) => {
+                                self.ws = Some(rx);
+                                tracing::debug!(order_id = self.order_id, "cable subscription live");
+                            }
+                            Ok(Err(e)) => {
+                                tracing::debug!(order_id = self.order_id, "cable unavailable: {e}")
+                            }
+                            Err(e) => {
+                                tracing::debug!(order_id = self.order_id, "cable task failed: {e}")
+                            }
+                        }
+                        continue;
+                    }
+                    // The connect keeps running; a later pass adopts it.
+                    _ = tokio::time::sleep_until(self.poll_deadline) => {
+                        return self.poll().await;
+                    }
+                }
+            }
+            let rx = self.ws.as_mut().expect("checked above");
             let frame = tokio::select! {
                 biased;
                 frame = rx.recv() => frame,
@@ -2675,6 +2706,18 @@ impl<'a> OrderFollower<'a> {
             self.poll_deadline = tokio::time::Instant::now() + interval;
         }
         first
+    }
+}
+
+impl Drop for OrderFollower<'_> {
+    fn drop(&mut self) {
+        // A connect still in flight has no consumer left. (Even without
+        // this the socket would not leak — a subscription that lands
+        // unowned closes as soon as its receiver drops — but there is no
+        // reason to let the attempt outlive the turn that wanted it.)
+        if let Some(handle) = self.ws_connecting.take() {
+            handle.abort();
+        }
     }
 }
 
@@ -4163,6 +4206,110 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         format!("http://{addr}")
+    }
+
+    /// A marketplace that answers REST normally but never completes the
+    /// /cable upgrade (accepted, then silent — what a firewall
+    /// blackholing WebSockets looks like). The stream must not wait on
+    /// it: the connect is raced against the poll timer, not awaited.
+    /// Before that, every followed order paid the full CONNECT_TIMEOUT
+    /// before its first poll.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hanging_cable_upgrade_does_not_stall_the_stream() {
+        use axum::extract::{Path as AxPath, Query};
+        use axum::routing::{get as ax_get, post as ax_post};
+        use std::collections::HashMap;
+
+        async fn listings(Query(q): Query<HashMap<String, String>>) -> axum::Json<Value> {
+            let data = match q.get("seller").map(String::as_str) {
+                Some("openrouter-bot") => {
+                    json!([{"id": OPENROUTER_ID, "title": "OpenRouter Inference"}])
+                }
+                Some("exec") => json!([{"id": PYTHON_ID, "title": "Run Python Code"}]),
+                _ => json!([]),
+            };
+            axum::Json(json!({ "data": data }))
+        }
+        async fn listing_show(AxPath(id): AxPath<String>) -> axum::Json<Value> {
+            if id == PYTHON_ID {
+                axum::Json(python_listing_body(PYTHON_ID))
+            } else {
+                axum::Json(openrouter_listing_body(OPENROUTER_ID))
+            }
+        }
+        async fn create_order() -> axum::Json<Value> {
+            axum::Json(json!({"data": {"id": "HANG"}}))
+        }
+        async fn redeem() -> axum::Json<Value> {
+            axum::Json(json!({"data": {"status": "fully_paid", "amount_redeemed_cents": 1}}))
+        }
+        async fn order_show() -> axum::Json<Value> {
+            axum::Json(json!({"data": {
+                "id": "HANG",
+                "fulfillment_status": "delivered",
+                "delivered_content": delivered_content("done", "m1", false),
+            }}))
+        }
+        // Never upgrades, never responds — the client's connect sits here
+        // until its own timeout.
+        async fn hanging_cable() -> axum::response::Response {
+            tokio::time::sleep(Duration::from_secs(120)).await;
+            axum::http::StatusCode::GONE.into_response()
+        }
+
+        let app = axum::Router::new()
+            .route("/api/v1/listings", ax_get(listings))
+            .route("/api/v1/listings/{id}", ax_get(listing_show))
+            .route("/api/v1/orders", ax_post(create_order))
+            .route("/api/v1/orders/{id}", ax_get(order_show))
+            .route("/api/v1/merchant_credits/{slug}/redeem", ax_post(redeem))
+            .route("/cable", ax_get(hanging_cable));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&format!("http://{addr}"), &tmp);
+        let key = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "test", "chat", None)
+            .unwrap()
+            .1;
+        let app = router_with_config_full(
+            state,
+            Duration::from_secs(10),
+            Duration::from_millis(50),
+            20.0,
+            true, // WS on, pointed at an endpoint that never answers
+            Duration::from_millis(300),
+        );
+        let mut server = TestServer::new(app).unwrap();
+        server.add_header(header::AUTHORIZATION, format!("Bearer {key}"));
+
+        let started = std::time::Instant::now();
+        let res = server
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "default",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true,
+            }))
+            .await;
+        let elapsed = started.elapsed();
+
+        res.assert_status_ok();
+        assert!(res.text().contains("[DONE]"), "stream did not finish");
+        // The order is already delivered, so the first poll ends it. Any
+        // material time here means the connect was awaited first — the
+        // client-side connect timeout alone is 3s.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "stream took {elapsed:?} — the cable connect stalled the first poll"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
