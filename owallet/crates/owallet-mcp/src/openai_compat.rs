@@ -245,12 +245,6 @@ fn env_u64(name: &str) -> Option<u64> {
 /// Innermost constructor: also fixes the spend cap, bypassing the env
 /// read — tests use this so a parallel test can't race another's
 /// process-global environment.
-fn router_with_config(state: McpState, timeout: Duration, poll: Duration, cap: f64) -> Router {
-    // Tests default to WS off (their mock marketplaces speak plain HTTP;
-    // the WS-specific tests opt in via router_with_config_full).
-    router_with_config_full(state, timeout, poll, cap, false, poll)
-}
-
 fn router_with_config_full(
     state: McpState,
     timeout: Duration,
@@ -1849,10 +1843,7 @@ async fn place_and_pay_order(
     // the returned cents to [`net_key_budget_from_delivery`] once they
     // hold the terminal snapshot.
     let mut redeemed_cents: i64 = 0;
-    if let Some(cents) = payment
-        .get("amount_redeemed_cents")
-        .and_then(Value::as_f64)
-    {
+    if let Some(cents) = payment.get("amount_redeemed_cents").and_then(Value::as_f64) {
         record_key_budget(state, key_id, cents / 100.0);
         redeemed_cents = cents.round() as i64;
     }
@@ -2600,7 +2591,11 @@ impl<'a> OrderFollower<'a> {
                 }
             };
             match frame {
-                Some(CableFrame::Partial { seq, delta, content }) => {
+                Some(CableFrame::Partial {
+                    seq,
+                    delta,
+                    content,
+                }) => {
                     // A resync frame (or an old-protocol full-buffer
                     // frame) is authoritative: run it through the same
                     // byte diff as a polled buffer.
@@ -2781,7 +2776,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             };
             yield Ok(chunk_event(&order_id, &requested_model, json!({"role": "assistant"}), None));
 
-            let mut streamed = 0usize;
+            let streamed;
             let mut follower = OrderFollower::new(&ctx, &auth, &order_id);
             let snap = loop {
                 match follower.next_event().await {
@@ -2875,7 +2870,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 yield Ok(chunk_event(&response_id, &last_model, json!({"role": "assistant"}), None));
             }
 
-            let mut streamed = 0usize;
+            let streamed;
             let mut follower = OrderFollower::new(&ctx, &auth, &order_id);
             let snap = loop {
                 match follower.next_event().await {
@@ -3111,7 +3106,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             response_id = order_id.clone();
             yield Ok(chunk_event(&response_id, &last_model, json!({"role": "assistant"}), None));
         }
-        let mut streamed = 0usize;
+        let streamed;
         let mut follower = OrderFollower::new(&ctx, &auth, &order_id);
         let snap = loop {
             match follower.next_event().await {
@@ -3327,8 +3322,20 @@ mod tests {
     async fn listing_id_cache_is_per_state_not_process_global() {
         let overpay_a = MockServer::start().await;
         let overpay_b = MockServer::start().await;
-        mount_seller_listing(&overpay_a, "openrouter-bot", "ENV-A", "OpenRouter Inference").await;
-        mount_seller_listing(&overpay_b, "openrouter-bot", "ENV-B", "OpenRouter Inference").await;
+        mount_seller_listing(
+            &overpay_a,
+            "openrouter-bot",
+            "ENV-A",
+            "OpenRouter Inference",
+        )
+        .await;
+        mount_seller_listing(
+            &overpay_b,
+            "openrouter-bot",
+            "ENV-B",
+            "OpenRouter Inference",
+        )
+        .await;
 
         let tmp_a = TempDir::new().unwrap();
         let tmp_b = TempDir::new().unwrap();
@@ -4119,7 +4126,9 @@ mod tests {
                         }
                     }
                 }
-                let _ = socket.send(send(json!({"type": "confirm_subscription"}))).await;
+                let _ = socket
+                    .send(send(json!({"type": "confirm_subscription"})))
+                    .await;
                 let _ = socket
                     .send(send(json!({"identifier": "i", "message":
                         {"action": "partial", "seq": 1, "delta": "Hel", "content": "Hel"}})))
@@ -4130,7 +4139,9 @@ mod tests {
                     .await;
                 delivered.store(true, Ordering::SeqCst);
                 let _ = socket
-                    .send(send(json!({"identifier": "i", "message": {"action": "refresh"}})))
+                    .send(send(
+                        json!({"identifier": "i", "message": {"action": "refresh"}}),
+                    ))
                     .await;
                 // Hold the socket open past the request's lifetime.
                 tokio::time::sleep(Duration::from_secs(5)).await;

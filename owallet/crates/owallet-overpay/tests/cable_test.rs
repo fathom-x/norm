@@ -33,8 +33,7 @@ async fn cable_server(expected_order: &'static str, frames: Vec<Value>) -> Strin
         };
         let sub: Value = serde_json::from_str(&sub).unwrap();
         assert_eq!(sub["command"], "subscribe");
-        let identifier: Value =
-            serde_json::from_str(sub["identifier"].as_str().unwrap()).unwrap();
+        let identifier: Value = serde_json::from_str(sub["identifier"].as_str().unwrap()).unwrap();
         assert_eq!(identifier["channel"], "PaymentChannel");
         assert_eq!(identifier["order_id"], expected_order);
 
