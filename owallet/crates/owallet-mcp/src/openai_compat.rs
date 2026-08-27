@@ -2565,7 +2565,7 @@ impl<'a> OrderFollower<'a> {
             // The first poll hasn't happened yet, so a failed connect
             // (bounded at 3s inside) delays nothing but itself.
             match owallet_overpay::cable::subscribe_payment_status(
-                self.ctx.mcp.overpay.base_url_str(),
+                self.ctx.mcp.overpay.base_url().as_str(),
                 self.order_id,
             )
             .await

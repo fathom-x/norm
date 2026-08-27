@@ -103,12 +103,6 @@ impl OverpayClient {
     /// it from the client means a caller can't file a bearer under one host
     /// and look it up under another. See [`host_key`].
     #[must_use]
-    /// The Overpay API base URL this client talks to. The cable
-    /// subscriber derives its WebSocket endpoint from it.
-    pub fn base_url_str(&self) -> &str {
-        self.base_url.as_str()
-    }
-
     pub fn host_key(&self) -> String {
         host_key(self.base_url.as_str())
     }
