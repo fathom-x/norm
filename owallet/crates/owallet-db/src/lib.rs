@@ -127,6 +127,22 @@ pub struct Database {
     data_dir: PathBuf,
 }
 
+/// Connection-level PRAGMAs shared by [`Database::init`] and
+/// [`Database::open`], so a freshly-created DB gets the same journal mode
+/// as a reopened one (init used to leave the default rollback journal
+/// until the next open). WAL + `synchronous=NORMAL` is the standard WAL
+/// pairing — NORMAL still survives application crashes, and it drops the
+/// per-commit fsync that FULL forces on every budget write. The explicit
+/// busy_timeout makes the wait-not-fail behavior visible rather than
+/// relying on rusqlite's compiled-in default.
+fn apply_connection_pragmas(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    Ok(())
+}
+
 impl Database {
     /// Create a new encrypted database at `path` with the given password.
     /// Fails if the file already exists.
@@ -141,6 +157,7 @@ impl Database {
         }
 
         let conn = Connection::open(path)?;
+        apply_connection_pragmas(&conn)?;
         schema::create(&conn)?;
 
         let mut salt = [0u8; owallet_crypto::SALT_LEN];
@@ -172,8 +189,7 @@ impl Database {
         }
         let conn = Connection::open(path)?;
         // Apply the standard PRAGMAs and migrations.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+        apply_connection_pragmas(&conn)?;
         schema::migrate(&conn)?;
         Ok(Self {
             conn,
@@ -760,4 +776,29 @@ pub(crate) fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod pragma_tests {
+    use super::*;
+
+    #[test]
+    fn connection_pragmas_apply_wal_normal_and_busy_timeout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let conn = Connection::open(tmp.path().join("t.db")).unwrap();
+        apply_connection_pragmas(&conn).unwrap();
+
+        let journal: String = conn
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .unwrap();
+        assert_eq!(journal, "wal");
+        let sync: i64 = conn
+            .pragma_query_value(None, "synchronous", |r| r.get(0))
+            .unwrap();
+        assert_eq!(sync, 1, "synchronous should be NORMAL");
+        let busy: i64 = conn
+            .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy, 5000);
+    }
 }

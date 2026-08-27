@@ -18,8 +18,15 @@ thiserror = { workspace = true }
 sha2 = { workspace = true }
 base64 = "0.22"
 rand = { workspace = true }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time", "net", "macros"] }
+# ActionCable subscriber for the marketplace's payment_status channel
+# (crate::cable). native-roots so SSL_CERT_FILE-style overrides work the
+# same way they do for reqwest.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
+# Server side of the cable tests (accept_async).
+tokio-tungstenite = "0.24"

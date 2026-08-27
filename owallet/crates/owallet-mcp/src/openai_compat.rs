@@ -152,14 +152,22 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// tool's docs for why 1s: the marketplace's own broadcast fan-out
 /// (Solid Cable) polls at roughly the same granularity today.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
-
-/// Resolved listing ids, process-wide. Each id is derived from its bot's
-/// private key (`Overpay::Uuid.derive_listing_id`) and so differs per
-/// environment — neither can be a literal constant — but it never changes
-/// for a given Overpay instance during a process's lifetime, so a plain
-/// cache (no invalidation) is enough.
-static OPENROUTER_LISTING_ID: OnceCell<String> = OnceCell::const_new();
-static PYTHON_LISTING_ID: OnceCell<String> = OnceCell::const_new();
+/// Poll cadence while a live cable subscription is delivering frames —
+/// the poll is only a safety net then (terminal detection, resync), so
+/// it backs off. Keep-alive comments ride the poll, and intermediary
+/// idle timeouts are tens of seconds, so 5s stays comfortably safe.
+pub(crate) const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Env overrides for the timing knobs above and the WS toggle. Not wire
+/// protocol — real OpenAI clients can't ask a server for different
+/// timing — but ops-level tuning without a rebuild.
+const POLL_MS_ENV: &str = "OWALLET_V1_POLL_MS";
+const TIMEOUT_S_ENV: &str = "OWALLET_V1_TIMEOUT_S";
+const FALLBACK_POLL_MS_ENV: &str = "OWALLET_V1_FALLBACK_POLL_MS";
+/// `OWALLET_V1_WS=0` disables the cable subscription entirely, reverting
+/// to pure polling. Default on: every WS failure already degrades to
+/// exactly the polling behavior, so the toggle exists for diagnosis, not
+/// safety.
+const WS_ENV: &str = "OWALLET_V1_WS";
 
 /// Axum state: the wallet's shared `McpState` plus this endpoint's own
 /// request-timeout/poll-cadence config. Kept separate from `McpState`
@@ -171,6 +179,12 @@ struct Ctx {
     mcp: McpState,
     timeout: Duration,
     poll: Duration,
+    /// Poll cadence while a live cable subscription is feeding frames —
+    /// see [`FALLBACK_POLL_INTERVAL`].
+    fallback_poll: Duration,
+    /// Whether the streaming path tries the marketplace's WebSocket
+    /// channel at all — see [`WS_ENV`].
+    ws_enabled: bool,
     /// Whether the authenticated provider key carries the `spend` scope.
     /// `false` at construction; set per request from the key's stored
     /// scopes in [`chat_completions`].
@@ -207,17 +221,44 @@ fn router_with_timing(state: McpState, timeout: Duration, poll: Duration) -> Rou
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|v| v.is_finite() && *v >= 0.0)
         .unwrap_or(DEFAULT_SPEND_CAP_USD);
-    router_with_config(state, timeout, poll, cap)
+    let timeout = env_u64(TIMEOUT_S_ENV)
+        .map(Duration::from_secs)
+        .unwrap_or(timeout);
+    let poll = env_u64(POLL_MS_ENV)
+        .map(Duration::from_millis)
+        .unwrap_or(poll);
+    let fallback_poll = env_u64(FALLBACK_POLL_MS_ENV)
+        .map(Duration::from_millis)
+        .unwrap_or(FALLBACK_POLL_INTERVAL)
+        .max(poll);
+    let ws_enabled = std::env::var(WS_ENV).map(|v| v != "0").unwrap_or(true);
+    router_with_config_full(state, timeout, poll, cap, ws_enabled, fallback_poll)
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
 }
 
 /// Innermost constructor: also fixes the spend cap, bypassing the env
 /// read — tests use this so a parallel test can't race another's
 /// process-global environment.
-fn router_with_config(state: McpState, timeout: Duration, poll: Duration, cap: f64) -> Router {
+fn router_with_config_full(
+    state: McpState,
+    timeout: Duration,
+    poll: Duration,
+    cap: f64,
+    ws_enabled: bool,
+    fallback_poll: Duration,
+) -> Router {
     let ctx = Ctx {
         mcp: state,
         timeout,
         poll,
+        fallback_poll,
+        ws_enabled,
         can_spend: false,
         key_id: None,
         spend_cap_usd: cap,
@@ -406,12 +447,18 @@ async fn resolve_models(state: &McpState) -> Result<Vec<String>, OpenAiError> {
     Ok(models)
 }
 
+// Each id is derived from its bot's private key
+// (`Overpay::Uuid.derive_listing_id`) and so differs per environment —
+// neither can be a literal constant. Cached per marketplace on
+// `McpState::listing_ids` (see `ListingIdCache` for why not a process
+// global), with no invalidation: an id never changes for a given Overpay
+// instance during a process's lifetime.
 async fn resolve_openrouter_listing_id(state: &McpState) -> Result<String, OpenAiError> {
     resolve_listing_id_cached(
         state,
         OPENROUTER_SELLER_SLUG,
         OPENROUTER_LISTING_TITLE,
-        &OPENROUTER_LISTING_ID,
+        &state.listing_ids.openrouter,
     )
     .await
 }
@@ -421,7 +468,7 @@ async fn resolve_python_listing_id(state: &McpState) -> Result<String, OpenAiErr
         state,
         PYTHON_SELLER_SLUG,
         PYTHON_LISTING_TITLE,
-        &PYTHON_LISTING_ID,
+        &state.listing_ids.python,
     )
     .await
 }
@@ -1747,9 +1794,14 @@ async fn place_and_pay_order(
             .map_err(|e| OpenAiError::internal(format!("could not encode buyer_note: {e}")))?,
     };
 
+    // One request creates AND settles when the marketplace understands
+    // `pay: "merchant_credits"` (its response then carries a `payment`
+    // key) — halving the Rails round trips of the hottest call in the
+    // module. An older marketplace ignores the param and returns only
+    // the order; the separate redeem call below covers it.
     let order = state
         .overpay
-        .create_order_value(listing_id, Some(&note_str), auth.as_auth())
+        .create_and_pay_order_value(listing_id, Some(&note_str), auth.as_auth())
         .await?;
     let order_id = order
         .get("data")
@@ -1758,19 +1810,22 @@ async fn place_and_pay_order(
         .ok_or_else(|| OpenAiError::internal("create_order response missing id"))?
         .to_string();
 
-    let redeem = state
-        .overpay
-        .redeem_merchant_credits_value(seller_slug, &order_id, auth.as_auth())
-        .await?;
-    let status = redeem
-        .get("data")
-        .and_then(|d| d.get("status"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let payment = match order.get("payment") {
+        Some(p) => p.clone(),
+        None => {
+            let redeem = state
+                .overpay
+                .redeem_merchant_credits_value(seller_slug, &order_id, auth.as_auth())
+                .await?;
+            redeem.get("data").cloned().unwrap_or(Value::Null)
+        }
+    };
+
+    let status = payment.get("status").and_then(Value::as_str).unwrap_or("");
     if status != "fully_paid" && status != "already_paid" {
-        let message = redeem
-            .get("data")
-            .and_then(|d| d.get("message"))
+        let message = payment
+            .get("message")
+            .or_else(|| payment.get("error"))
             .and_then(Value::as_str)
             .unwrap_or("insufficient Overpay merchant credits");
         return Err(OpenAiError::PaymentRequired(format!(
@@ -1788,10 +1843,7 @@ async fn place_and_pay_order(
     // the returned cents to [`net_key_budget_from_delivery`] once they
     // hold the terminal snapshot.
     let mut redeemed_cents: i64 = 0;
-    if let Some(cents) = redeem
-        .pointer("/data/amount_redeemed_cents")
-        .and_then(Value::as_f64)
-    {
+    if let Some(cents) = payment.get("amount_redeemed_cents").and_then(Value::as_f64) {
         record_key_budget(state, key_id, cents / 100.0);
         redeemed_cents = cents.round() as i64;
     }
@@ -1849,11 +1901,16 @@ async fn wait_for_order_terminal(
     poll: Duration,
 ) -> Result<Value, OpenAiError> {
     let start = Instant::now();
+    // This caller never streams the partial buffer, so passing the last
+    // seen seq back as `since_seq` lets the marketplace omit it from
+    // every poll — the buffer can be 32 KB, re-downloaded each second.
+    let mut last_seq = 0u64;
     loop {
         let snap = state
             .overpay
-            .get_order_value(order_id, auth.as_auth())
+            .get_order_value_since(order_id, Some(last_seq), auth.as_auth())
             .await?;
+        last_seq = last_seq.max(partial_output(&snap).1.unwrap_or(0));
         if is_terminal(order_status(&snap)) {
             return Ok(snap);
         }
@@ -2421,11 +2478,247 @@ fn usage_event(id: &str, model: &str, usage: TurnUsage) -> Event {
 /// observed a partial chunk (fast/tiny replies), or whose partial buffer
 /// was truncated by the marketplace's 32 KB cap while delivered_content
 /// was not. `None` once fully caught up.
+///
+/// A `streamed` offset landing mid-character in `delivered_text` (a
+/// byte-capped partial buffer can leave one) floors to the previous
+/// char boundary rather than dropping the tail: the worst case re-emits
+/// the lead bytes of one already-counted character, strictly better
+/// than silently losing the rest of the reply.
 fn catch_up(delivered_text: &str, streamed: usize) -> Option<&str> {
-    if streamed >= delivered_text.len() || !delivered_text.is_char_boundary(streamed) {
+    if streamed >= delivered_text.len() {
         return None;
     }
-    Some(&delivered_text[streamed..])
+    let mut start = streamed;
+    while start > 0 && !delivered_text.is_char_boundary(start) {
+        start -= 1;
+    }
+    Some(&delivered_text[start..])
+}
+
+/// One event from following an in-flight order's streaming progress.
+enum FollowEvent {
+    /// Newly streamed text to forward as a content chunk.
+    Delta(String),
+    /// Nothing new this wakeup — emit an SSE keep-alive comment.
+    KeepAlive,
+    /// The order reached a terminal status: the final snapshot plus how
+    /// many bytes of its partial buffer were forwarded (what `catch_up`
+    /// needs to emit the uncovered tail of the delivered text).
+    Terminal(Box<Value>, usize),
+    /// Following failed (fetch error or the request timeout). Terminal.
+    Failed(OpenAiError),
+}
+
+/// Follows one order to a terminal status, surfacing streaming progress
+/// as [`FollowEvent`]s — the loop the streaming generator used to
+/// duplicate per turn shape (passthrough, agentic, landing). One event
+/// per `next_event` call; after `Terminal` or `Failed` the follower is
+/// exhausted and must not be polled again.
+///
+/// Polls `GET /orders/:id?since_seq=<last>` on the `ctx.poll` cadence —
+/// the marketplace omits an unchanged partial buffer for the seq it
+/// already told us about — and byte-diffs the buffer exactly as before.
+struct OrderFollower<'a> {
+    ctx: &'a Ctx,
+    auth: &'a OwnedAuth,
+    order_id: &'a str,
+    streamed: usize,
+    last_seq: u64,
+    start: Instant,
+    poll_deadline: tokio::time::Instant,
+    pending: Option<FollowEvent>,
+    /// Live cable subscription to the order's `payment_status` topic,
+    /// established lazily on the first wait when [`Ctx::ws_enabled`].
+    /// While present, frames arrive as push and the poll backs off to
+    /// [`Ctx::fallback_poll`] as a safety net (terminal detection is
+    /// always confirmed by a GET). `None` after any failure — the
+    /// follower then behaves exactly like the pure-polling version.
+    ws: Option<tokio::sync::mpsc::Receiver<owallet_overpay::cable::CableFrame>>,
+    /// The subscription attempt, in flight. Raced against the poll
+    /// timer rather than awaited: where WebSocket upgrades are
+    /// blackholed rather than refused, awaiting it would add the full
+    /// connect timeout to first-token latency on every followed order.
+    ws_connecting: Option<
+        tokio::task::JoinHandle<
+            Result<tokio::sync::mpsc::Receiver<owallet_overpay::cable::CableFrame>, String>,
+        >,
+    >,
+    ws_tried: bool,
+}
+
+impl<'a> OrderFollower<'a> {
+    fn new(ctx: &'a Ctx, auth: &'a OwnedAuth, order_id: &'a str) -> Self {
+        Self {
+            ctx,
+            auth,
+            order_id,
+            streamed: 0,
+            last_seq: 0,
+            start: Instant::now(),
+            // First poll fires immediately, matching the old loops.
+            poll_deadline: tokio::time::Instant::now(),
+            pending: None,
+            ws: None,
+            ws_connecting: None,
+            ws_tried: false,
+        }
+    }
+
+    async fn next_event(&mut self) -> FollowEvent {
+        use owallet_overpay::cable::CableFrame;
+
+        if let Some(ev) = self.pending.take() {
+            return ev;
+        }
+        if self.ctx.ws_enabled && !self.ws_tried {
+            self.ws_tried = true;
+            // Spawned, not awaited: polling starts on schedule and the
+            // subscription is adopted below whenever it lands.
+            let base = self.ctx.mcp.overpay.base_url().as_str().to_string();
+            let order_id = self.order_id.to_string();
+            self.ws_connecting = Some(tokio::spawn(async move {
+                owallet_overpay::cable::subscribe_payment_status(&base, &order_id).await
+            }));
+        }
+
+        loop {
+            if self.ws.is_none() {
+                // Not subscribed. Race an in-flight connect against the
+                // poll timer; with no connect pending, just poll.
+                let Some(connecting) = self.ws_connecting.as_mut() else {
+                    tokio::time::sleep_until(self.poll_deadline).await;
+                    return self.poll().await;
+                };
+                tokio::select! {
+                    biased;
+                    joined = connecting => {
+                        self.ws_connecting = None;
+                        match joined {
+                            Ok(Ok(rx)) => {
+                                self.ws = Some(rx);
+                                tracing::debug!(order_id = self.order_id, "cable subscription live");
+                            }
+                            Ok(Err(e)) => {
+                                tracing::debug!(order_id = self.order_id, "cable unavailable: {e}")
+                            }
+                            Err(e) => {
+                                tracing::debug!(order_id = self.order_id, "cable task failed: {e}")
+                            }
+                        }
+                        continue;
+                    }
+                    // The connect keeps running; a later pass adopts it.
+                    _ = tokio::time::sleep_until(self.poll_deadline) => {
+                        return self.poll().await;
+                    }
+                }
+            }
+            let rx = self.ws.as_mut().expect("checked above");
+            let frame = tokio::select! {
+                biased;
+                frame = rx.recv() => frame,
+                _ = tokio::time::sleep_until(self.poll_deadline) => {
+                    return self.poll().await;
+                }
+            };
+            match frame {
+                Some(CableFrame::Partial {
+                    seq,
+                    delta,
+                    content,
+                }) => {
+                    // A resync frame (or an old-protocol full-buffer
+                    // frame) is authoritative: run it through the same
+                    // byte diff as a polled buffer.
+                    if let Some(text) = content {
+                        self.last_seq = self.last_seq.max(seq);
+                        if let Some(new) = new_output_since(Some(&text), &mut self.streamed) {
+                            return FollowEvent::Delta(new.to_string());
+                        }
+                        continue;
+                    }
+                    if seq <= self.last_seq {
+                        continue; // replayed frame — already covered
+                    }
+                    if seq == self.last_seq + 1 {
+                        if let Some(d) = delta {
+                            self.last_seq = seq;
+                            self.streamed += d.len();
+                            return FollowEvent::Delta(d);
+                        }
+                        continue;
+                    }
+                    // Gap — a missed frame. The next conditional GET
+                    // returns the full buffer (seq advanced past ours)
+                    // and the byte diff emits exactly what was missed.
+                    return self.poll().await;
+                }
+                Some(CableFrame::Refresh) => {
+                    // Something changed (fulfillment transition) — poll
+                    // now instead of at the next safety-net tick.
+                    return self.poll().await;
+                }
+                Some(CableFrame::Closed) | None => {
+                    self.ws = None;
+                    // Back to the tight poll cadence immediately.
+                    self.poll_deadline = tokio::time::Instant::now();
+                }
+            }
+        }
+    }
+
+    /// One conditional GET: emits the new text (or a keep-alive), and
+    /// stashes a terminal/timeout event for the next call — the old loop
+    /// yielded its delta first and then broke/errored, so ordering is
+    /// preserved exactly.
+    async fn poll(&mut self) -> FollowEvent {
+        let snap = match self
+            .ctx
+            .mcp
+            .overpay
+            .get_order_value_since(self.order_id, Some(self.last_seq), self.auth.as_auth())
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => return FollowEvent::Failed(OpenAiError::from(e)),
+        };
+        let (partial, seq) = partial_output(&snap);
+        self.last_seq = self.last_seq.max(seq.unwrap_or(0));
+        let first = match new_output_since(partial, &mut self.streamed) {
+            Some(delta) => FollowEvent::Delta(delta.to_string()),
+            None => FollowEvent::KeepAlive,
+        };
+
+        if is_terminal(order_status(&snap)) {
+            self.pending = Some(FollowEvent::Terminal(Box::new(snap), self.streamed));
+        } else if self.start.elapsed() >= self.ctx.timeout {
+            self.pending = Some(FollowEvent::Failed(OpenAiError::UpstreamFailure(format!(
+                "order {} did not complete within {}s",
+                self.order_id,
+                self.ctx.timeout.as_secs()
+            ))));
+        } else {
+            let interval = if self.ws.is_some() {
+                self.ctx.fallback_poll
+            } else {
+                self.ctx.poll
+            };
+            self.poll_deadline = tokio::time::Instant::now() + interval;
+        }
+        first
+    }
+}
+
+impl Drop for OrderFollower<'_> {
+    fn drop(&mut self) {
+        // A connect still in flight has no consumer left. (Even without
+        // this the socket would not leak — a subscription that lands
+        // unowned closes as soon as its receiver drops — but there is no
+        // reason to let the attempt outlive the turn that wanted it.)
+        if let Some(handle) = self.ws_connecting.take() {
+            handle.abort();
+        }
+    }
 }
 
 /// Terminal error frames for the streaming path: a normal-shaped
@@ -2526,32 +2819,21 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             };
             yield Ok(chunk_event(&order_id, &requested_model, json!({"role": "assistant"}), None));
 
-            let mut streamed = 0usize;
-            let start = Instant::now();
+            let streamed;
+            let mut follower = OrderFollower::new(&ctx, &auth, &order_id);
             let snap = loop {
-                let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        for ev in error_events(&order_id, &requested_model, OpenAiError::from(e)) { yield Ok(ev); }
+                match follower.next_event().await {
+                    FollowEvent::Delta(delta) => yield Ok(chunk_event(&order_id, &requested_model, json!({"content": delta}), None)),
+                    FollowEvent::KeepAlive => yield Ok(Event::default().comment("owallet: waiting on the model")),
+                    FollowEvent::Terminal(snap, streamed_bytes) => {
+                        streamed = streamed_bytes;
+                        break *snap;
+                    }
+                    FollowEvent::Failed(err) => {
+                        for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
                         return;
                     }
-                };
-                let (partial, _seq) = partial_output(&snap);
-                match new_output_since(partial, &mut streamed) {
-                    Some(delta) => yield Ok(chunk_event(&order_id, &requested_model, json!({"content": delta}), None)),
-                    None => yield Ok(Event::default().comment("owallet: waiting on the model")),
                 }
-                if is_terminal(order_status(&snap)) {
-                    break snap;
-                }
-                if start.elapsed() >= ctx.timeout {
-                    let err = OpenAiError::UpstreamFailure(format!(
-                        "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
-                    ));
-                    for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
-                    return;
-                }
-                tokio::time::sleep(ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             let mut usage = TurnUsage::default();
@@ -2631,34 +2913,21 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 yield Ok(chunk_event(&response_id, &last_model, json!({"role": "assistant"}), None));
             }
 
-            let mut streamed = 0usize;
-            let start = Instant::now();
+            let streamed;
+            let mut follower = OrderFollower::new(&ctx, &auth, &order_id);
             let snap = loop {
-                let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
+                match follower.next_event().await {
+                    FollowEvent::Delta(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
+                    FollowEvent::KeepAlive => yield Ok(Event::default().comment("owallet: waiting on the model")),
+                    FollowEvent::Terminal(snap, streamed_bytes) => {
+                        streamed = streamed_bytes;
+                        break *snap;
+                    }
+                    FollowEvent::Failed(err) => {
+                        for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
                         return;
                     }
-                };
-
-                let (partial, _seq) = partial_output(&snap);
-                match new_output_since(partial, &mut streamed) {
-                    Some(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
-                    None => yield Ok(Event::default().comment("owallet: waiting on the model")),
                 }
-
-                if is_terminal(order_status(&snap)) {
-                    break snap;
-                }
-                if start.elapsed() >= ctx.timeout {
-                    let err = OpenAiError::UpstreamFailure(format!(
-                        "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
-                    ));
-                    for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
-                    return;
-                }
-                tokio::time::sleep(ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             usage.add_order(&snap, redeemed_cents);
@@ -2751,12 +3020,14 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     };
                     let started = Instant::now();
                     let mut lt_streamed = 0usize;
+                    let mut lt_seq = 0u64;
                     let mut lt_emitted = false;
                     let result_text = loop {
-                        let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                        let snap = match ctx.mcp.overpay.get_order_value_since(&order_id, Some(lt_seq), auth.as_auth()).await {
                             Ok(s) => s,
                             Err(e) => break json!({"error": OpenAiError::from(e).message()}).to_string(),
                         };
+                        lt_seq = lt_seq.max(partial_output(&snap).1.unwrap_or(0));
 
                         // Forward whatever is new before checking for the
                         // end, so the final flush of the preview is never
@@ -2803,11 +3074,12 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 };
 
                 let mut py_streamed = 0usize;
+                let mut py_seq = 0u64;
                 let mut fence_open = false;
                 let py_start = Instant::now();
                 let python_snap;
                 loop {
-                    let snap = match ctx.mcp.overpay.get_order_value(&python_order_id, auth.as_auth()).await {
+                    let snap = match ctx.mcp.overpay.get_order_value_since(&python_order_id, Some(py_seq), auth.as_auth()).await {
                         Ok(s) => s,
                         Err(e) => {
                             let result_text = json!({"error": OpenAiError::from(e).message()}).to_string();
@@ -2815,6 +3087,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                             continue 'tool_calls;
                         }
                     };
+                    py_seq = py_seq.max(partial_output(&snap).1.unwrap_or(0));
 
                     let (partial, _seq) = partial_output(&snap);
                     match new_output_since(partial, &mut py_streamed) {
@@ -2876,32 +3149,21 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             response_id = order_id.clone();
             yield Ok(chunk_event(&response_id, &last_model, json!({"role": "assistant"}), None));
         }
-        let mut streamed = 0usize;
-        let start = Instant::now();
+        let streamed;
+        let mut follower = OrderFollower::new(&ctx, &auth, &order_id);
         let snap = loop {
-            let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
-                Ok(s) => s,
-                Err(e) => {
-                    for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
+            match follower.next_event().await {
+                FollowEvent::Delta(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
+                FollowEvent::KeepAlive => yield Ok(Event::default().comment("owallet: waiting on the model")),
+                FollowEvent::Terminal(snap, streamed_bytes) => {
+                    streamed = streamed_bytes;
+                    break *snap;
+                }
+                FollowEvent::Failed(err) => {
+                    for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
                     return;
                 }
-            };
-            let (partial, _seq) = partial_output(&snap);
-            match new_output_since(partial, &mut streamed) {
-                Some(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
-                None => yield Ok(Event::default().comment("owallet: waiting on the model")),
             }
-            if is_terminal(order_status(&snap)) {
-                break snap;
-            }
-            if start.elapsed() >= ctx.timeout {
-                let err = OpenAiError::UpstreamFailure(format!(
-                    "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
-                ));
-                for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
-                return;
-            }
-            tokio::time::sleep(ctx.poll).await;
         };
         net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
         usage.add_order(&snap, redeemed_cents);
@@ -3095,6 +3357,52 @@ mod tests {
             .await;
     }
 
+    /// Two serve environments (two `McpState`s against two marketplaces)
+    /// must each resolve their own listing ids. The cache used to be a
+    /// pair of process-global statics, so whichever env resolved first
+    /// poisoned the other with its ids under a multi-env serve.
+    #[tokio::test]
+    async fn listing_id_cache_is_per_state_not_process_global() {
+        let overpay_a = MockServer::start().await;
+        let overpay_b = MockServer::start().await;
+        mount_seller_listing(
+            &overpay_a,
+            "openrouter-bot",
+            "ENV-A",
+            "OpenRouter Inference",
+        )
+        .await;
+        mount_seller_listing(
+            &overpay_b,
+            "openrouter-bot",
+            "ENV-B",
+            "OpenRouter Inference",
+        )
+        .await;
+
+        let tmp_a = TempDir::new().unwrap();
+        let tmp_b = TempDir::new().unwrap();
+        let state_a = seeded_state(&overpay_a.uri(), &tmp_a);
+        let state_b = seeded_state(&overpay_b.uri(), &tmp_b);
+
+        let id_a = resolve_openrouter_listing_id(&state_a)
+            .await
+            .unwrap_or_else(|e| panic!("env A resolve failed: {}", e.message()));
+        let id_b = resolve_openrouter_listing_id(&state_b)
+            .await
+            .unwrap_or_else(|e| panic!("env B resolve failed: {}", e.message()));
+        assert_eq!(id_a, "ENV-A");
+        assert_eq!(id_b, "ENV-B");
+        // And a per-request clone shares its parent's cache rather than
+        // re-resolving: drop the mock so a second fetch would fail.
+        drop(overpay_a);
+        let pinned = state_a.with_npub(Some("npub1abandon".into()));
+        let id_pinned = resolve_openrouter_listing_id(&pinned)
+            .await
+            .unwrap_or_else(|e| panic!("cached resolve failed: {}", e.message()));
+        assert_eq!(id_pinned, "ENV-A");
+    }
+
     async fn mount_fully_paid(overpay: &MockServer, order_id: &str) {
         mount_fully_paid_for(overpay, order_id, "openrouter-bot").await;
     }
@@ -3122,6 +3430,76 @@ mod tests {
             })))
             .mount(overpay)
             .await;
+    }
+
+    /// place_and_pay against a marketplace that settles in the create
+    /// call itself: the response carries a `payment` key, and the
+    /// separate redeem endpoint must never be hit (no mock is mounted
+    /// for it — a call would 404 and fail the request).
+    #[tokio::test]
+    async fn place_and_pay_uses_the_one_call_path_when_the_marketplace_settles_on_create() {
+        let overpay = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .and(body_partial_json(json!({"pay": "merchant_credits"})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "ONECALL", "payment_status": "paid"},
+                "payment": {"status": "fully_paid", "amount_redeemed_cents": 7}
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+
+        let (order_id, redeemed) = place_and_pay_order(
+            &state,
+            &auth,
+            "L1",
+            "openrouter-bot",
+            &json!({"model": "default"}),
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("one-call path failed: {}", e.message()));
+        assert_eq!(order_id, "ONECALL");
+        assert_eq!(redeemed, 7);
+    }
+
+    /// A one-call redemption failure surfaces as PaymentRequired, same
+    /// as the two-call path's insufficient-credits case.
+    #[tokio::test]
+    async fn place_and_pay_reports_a_one_call_redemption_failure() {
+        let overpay = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "BROKE", "payment_status": "pending"},
+                "payment": {"status": "failed", "error": "no merchant credits"}
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+
+        let err = place_and_pay_order(
+            &state,
+            &auth,
+            "L1",
+            "openrouter-bot",
+            &json!({"model": "default"}),
+            None,
+        )
+        .await
+        .expect_err("must not treat a failed payment as paid");
+        assert!(
+            err.message().contains("no merchant credits"),
+            "got: {}",
+            err.message()
+        );
     }
 
     /// The exact `run_python` tool definition `run_python_tool_def` builds
@@ -3725,6 +4103,267 @@ mod tests {
             };
             ResponseTemplate::new(200).set_body_json(body)
         }
+    }
+
+    /// A mock marketplace whose /cable route is a REAL WebSocket speaking
+    /// the ActionCable protocol, and whose order endpoint never returns
+    /// any partial content — so a streamed delta in the SSE output can
+    /// only have arrived by push. The cable handler flips the order to
+    /// delivered right before sending its refresh frame.
+    async fn ws_marketplace() -> String {
+        use axum::extract::ws::{Message as WsMessage, WebSocketUpgrade};
+        use axum::extract::{Path as AxPath, Query, State as AxState};
+        use axum::response::IntoResponse;
+        use axum::routing::{get as ax_get, post as ax_post};
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicBool;
+
+        type Delivered = Arc<AtomicBool>;
+
+        async fn listings(Query(q): Query<HashMap<String, String>>) -> axum::Json<Value> {
+            let data = match q.get("seller").map(String::as_str) {
+                Some("openrouter-bot") => {
+                    json!([{"id": OPENROUTER_ID, "title": "OpenRouter Inference"}])
+                }
+                Some("exec") => json!([{"id": PYTHON_ID, "title": "Run Python Code"}]),
+                _ => json!([]),
+            };
+            axum::Json(json!({ "data": data }))
+        }
+        async fn listing_show(AxPath(id): AxPath<String>) -> axum::Json<Value> {
+            if id == PYTHON_ID {
+                axum::Json(python_listing_body(PYTHON_ID))
+            } else {
+                axum::Json(openrouter_listing_body(OPENROUTER_ID))
+            }
+        }
+        async fn create_order() -> axum::Json<Value> {
+            axum::Json(json!({"data": {"id": "WS-ORDER"}}))
+        }
+        async fn redeem() -> axum::Json<Value> {
+            axum::Json(json!({"data": {"status": "fully_paid", "amount_redeemed_cents": 100}}))
+        }
+        async fn order_show(AxState(delivered): AxState<Delivered>) -> axum::Json<Value> {
+            if delivered.load(Ordering::SeqCst) {
+                axum::Json(json!({"data": {
+                    "id": "WS-ORDER",
+                    "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content("Hello world", "m1", false),
+                }}))
+            } else {
+                axum::Json(json!({"data": {"id": "WS-ORDER", "fulfillment_status": "processing"}}))
+            }
+        }
+        async fn cable(
+            ws: WebSocketUpgrade,
+            AxState(delivered): AxState<Delivered>,
+        ) -> impl IntoResponse {
+            ws.on_upgrade(move |mut socket| async move {
+                let send = |v: Value| WsMessage::Text(v.to_string().into());
+                let _ = socket.send(send(json!({"type": "welcome"}))).await;
+                while let Some(Ok(msg)) = socket.recv().await {
+                    if let WsMessage::Text(t) = msg {
+                        let v: Value = serde_json::from_str(&t).unwrap_or_default();
+                        if v["command"] == "subscribe" {
+                            break;
+                        }
+                    }
+                }
+                let _ = socket
+                    .send(send(json!({"type": "confirm_subscription"})))
+                    .await;
+                let _ = socket
+                    .send(send(json!({"identifier": "i", "message":
+                        {"action": "partial", "seq": 1, "delta": "Hel", "content": "Hel"}})))
+                    .await;
+                let _ = socket
+                    .send(send(json!({"identifier": "i", "message":
+                        {"action": "partial", "seq": 2, "delta": "lo "}})))
+                    .await;
+                delivered.store(true, Ordering::SeqCst);
+                let _ = socket
+                    .send(send(
+                        json!({"identifier": "i", "message": {"action": "refresh"}}),
+                    ))
+                    .await;
+                // Hold the socket open past the request's lifetime.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            })
+        }
+
+        let delivered: Delivered = Arc::new(AtomicBool::new(false));
+        let app = axum::Router::new()
+            .route("/api/v1/listings", ax_get(listings))
+            .route("/api/v1/listings/{id}", ax_get(listing_show))
+            .route("/api/v1/orders", ax_post(create_order))
+            .route("/api/v1/orders/{id}", ax_get(order_show))
+            .route("/api/v1/merchant_credits/{slug}/redeem", ax_post(redeem))
+            .route("/cable", ax_get(cable))
+            .with_state(delivered);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    /// A marketplace that answers REST normally but never completes the
+    /// /cable upgrade (accepted, then silent — what a firewall
+    /// blackholing WebSockets looks like). The stream must not wait on
+    /// it: the connect is raced against the poll timer, not awaited.
+    /// Before that, every followed order paid the full CONNECT_TIMEOUT
+    /// before its first poll.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_hanging_cable_upgrade_does_not_stall_the_stream() {
+        use axum::extract::{Path as AxPath, Query};
+        use axum::routing::{get as ax_get, post as ax_post};
+        use std::collections::HashMap;
+
+        async fn listings(Query(q): Query<HashMap<String, String>>) -> axum::Json<Value> {
+            let data = match q.get("seller").map(String::as_str) {
+                Some("openrouter-bot") => {
+                    json!([{"id": OPENROUTER_ID, "title": "OpenRouter Inference"}])
+                }
+                Some("exec") => json!([{"id": PYTHON_ID, "title": "Run Python Code"}]),
+                _ => json!([]),
+            };
+            axum::Json(json!({ "data": data }))
+        }
+        async fn listing_show(AxPath(id): AxPath<String>) -> axum::Json<Value> {
+            if id == PYTHON_ID {
+                axum::Json(python_listing_body(PYTHON_ID))
+            } else {
+                axum::Json(openrouter_listing_body(OPENROUTER_ID))
+            }
+        }
+        async fn create_order() -> axum::Json<Value> {
+            axum::Json(json!({"data": {"id": "HANG"}}))
+        }
+        async fn redeem() -> axum::Json<Value> {
+            axum::Json(json!({"data": {"status": "fully_paid", "amount_redeemed_cents": 1}}))
+        }
+        async fn order_show() -> axum::Json<Value> {
+            axum::Json(json!({"data": {
+                "id": "HANG",
+                "fulfillment_status": "delivered",
+                "delivered_content": delivered_content("done", "m1", false),
+            }}))
+        }
+        // Never upgrades, never responds — the client's connect sits here
+        // until its own timeout.
+        async fn hanging_cable() -> axum::response::Response {
+            tokio::time::sleep(Duration::from_secs(120)).await;
+            axum::http::StatusCode::GONE.into_response()
+        }
+
+        let app = axum::Router::new()
+            .route("/api/v1/listings", ax_get(listings))
+            .route("/api/v1/listings/{id}", ax_get(listing_show))
+            .route("/api/v1/orders", ax_post(create_order))
+            .route("/api/v1/orders/{id}", ax_get(order_show))
+            .route("/api/v1/merchant_credits/{slug}/redeem", ax_post(redeem))
+            .route("/cable", ax_get(hanging_cable));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&format!("http://{addr}"), &tmp);
+        let key = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "test", "chat", None)
+            .unwrap()
+            .1;
+        let app = router_with_config_full(
+            state,
+            Duration::from_secs(10),
+            Duration::from_millis(50),
+            20.0,
+            true, // WS on, pointed at an endpoint that never answers
+            Duration::from_millis(300),
+        );
+        let mut server = TestServer::new(app).unwrap();
+        server.add_header(header::AUTHORIZATION, format!("Bearer {key}"));
+
+        let started = std::time::Instant::now();
+        let res = server
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "default",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true,
+            }))
+            .await;
+        let elapsed = started.elapsed();
+
+        res.assert_status_ok();
+        assert!(res.text().contains("[DONE]"), "stream did not finish");
+        // The order is already delivered, so the first poll ends it. Any
+        // material time here means the connect was awaited first — the
+        // client-side connect timeout alone is 3s.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "stream took {elapsed:?} — the cable connect stalled the first poll"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_pushes_deltas_over_the_cable_socket() {
+        let base = ws_marketplace().await;
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&base, &tmp);
+        let key = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "test", "chat", None)
+            .unwrap()
+            .1;
+        let app = router_with_config_full(
+            state,
+            Duration::from_secs(10),
+            Duration::from_millis(100),
+            20.0,
+            true,                       // ws on — the point of this test
+            Duration::from_millis(300), // safety-net poll while ws is live
+        );
+        let mut server = TestServer::new(app).unwrap();
+        server.add_header(header::AUTHORIZATION, format!("Bearer {key}"));
+
+        let res = server
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "default",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true,
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let text = res.text();
+        let content: String = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|l| *l != "[DONE]")
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| {
+                v["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+
+        // "Hel" + "lo " can only have arrived over the socket (the order
+        // endpoint never serves partial_content); "world" is the terminal
+        // catch_up tail from delivered_content.
+        assert_eq!(content, "Hello world", "full SSE text was: {text}");
+        assert!(text.contains("[DONE]"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

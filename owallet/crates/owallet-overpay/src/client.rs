@@ -241,6 +241,25 @@ impl OverpayClient {
             .await
     }
 
+    /// [`get_order_value`] with a conditional-streaming hint: when
+    /// `since_seq` matches the order's current `partial_seq`, a Rails
+    /// that understands the param omits the (up to 32 KB) partial buffer
+    /// from the payload — `partial_seq` still rides along as the change
+    /// signal. Older marketplaces ignore the param and return the full
+    /// payload, so callers need no capability check.
+    pub async fn get_order_value_since(
+        &self,
+        id: &str,
+        since_seq: Option<u64>,
+        auth: Auth<'_>,
+    ) -> Result<Value, OverpayError> {
+        let path = match since_seq {
+            Some(seq) => format!("/api/v1/orders/{id}?since_seq={seq}"),
+            None => format!("/api/v1/orders/{id}"),
+        };
+        self.get_json_value(&path, auth).await
+    }
+
     pub async fn create_order(
         &self,
         listing_id: &str,
@@ -268,6 +287,26 @@ impl OverpayClient {
         let body = serde_json::json!({
             "listing_id": listing_id,
             "buyer_note": buyer_note,
+        });
+        self.post_json_value("/api/v1/orders", auth, &body).await
+    }
+
+    /// [`create_order_value`] asking the marketplace to settle the new
+    /// order with merchant credits in the same request. A marketplace
+    /// that understands `pay` returns a top-level `payment` key with the
+    /// redemption outcome; an older one ignores the param and returns
+    /// only the order — callers detect that and fall back to the
+    /// separate redeem call.
+    pub async fn create_and_pay_order_value(
+        &self,
+        listing_id: &str,
+        buyer_note: Option<&str>,
+        auth: Auth<'_>,
+    ) -> Result<Value, OverpayError> {
+        let body = serde_json::json!({
+            "listing_id": listing_id,
+            "buyer_note": buyer_note,
+            "pay": "merchant_credits",
         });
         self.post_json_value("/api/v1/orders", auth, &body).await
     }

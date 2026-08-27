@@ -39,3 +39,6 @@ tempfile = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
 axum-test = "17"
+# The end-to-end cable test runs a mock marketplace whose /cable route is
+# a real WebSocket (axum's ws feature is dev-only here).
+axum = { version = "0.8", features = ["ws"] }

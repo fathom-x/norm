@@ -6,6 +6,21 @@ use owallet_crypto::{derive_from_stored_seed, HdError, PrivateKey};
 use owallet_db::Database;
 use owallet_overpay::{Auth, OverpayClient};
 
+/// Per-marketplace cache of the two hardcoded listing ids ("OpenRouter
+/// Inference" / "Run Python Code"). Lives on [`McpState`] — one per serve
+/// environment, cloned along with it — rather than as process globals:
+/// the ids are derived from each bot's key and differ per marketplace, so
+/// under a multi-env serve (`owallet serve --prod --dev`) process-wide
+/// statics would let whichever env resolved first poison the other with
+/// its ids. Same isolation rationale as the `listing_tools` registry
+/// cache on the /v1 `Ctx`. No invalidation: an id never changes for a
+/// given Overpay instance during the process lifetime.
+#[derive(Default)]
+pub struct ListingIdCache {
+    pub openrouter: tokio::sync::OnceCell<String>,
+    pub python: tokio::sync::OnceCell<String>,
+}
+
 /// Everything a tool handler needs to do its work: the encrypted DB
 /// (for stored bearer tokens + default npub lookup), the Rails REST client,
 /// and the npub the request is bound to (set by the auth layer).
@@ -43,6 +58,10 @@ pub struct McpState {
     /// Whether that provider key's scopes include `spend`. Meaningless
     /// unless [`Self::provider_key_id`] is set.
     pub provider_key_can_spend: bool,
+    /// See [`ListingIdCache`]. Shared by every clone of this state (the
+    /// per-request `with_npub`/`with_provider_key` copies), so the ids
+    /// resolve once per environment, not once per request.
+    pub listing_ids: Arc<ListingIdCache>,
 }
 
 /// An owned auth strategy with its data living long enough for one tool
@@ -93,6 +112,7 @@ impl McpState {
             zcash_network: "mainnet".to_string(),
             provider_key_id: None,
             provider_key_can_spend: false,
+            listing_ids: Arc::new(ListingIdCache::default()),
         }
     }
 
@@ -142,6 +162,7 @@ impl McpState {
             zcash_network: self.zcash_network.clone(),
             provider_key_id: self.provider_key_id.clone(),
             provider_key_can_spend: self.provider_key_can_spend,
+            listing_ids: self.listing_ids.clone(),
         }
     }
 
