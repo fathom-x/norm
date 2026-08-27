@@ -153,14 +153,6 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// (Solid Cable) polls at roughly the same granularity today.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Resolved listing ids, process-wide. Each id is derived from its bot's
-/// private key (`Overpay::Uuid.derive_listing_id`) and so differs per
-/// environment — neither can be a literal constant — but it never changes
-/// for a given Overpay instance during a process's lifetime, so a plain
-/// cache (no invalidation) is enough.
-static OPENROUTER_LISTING_ID: OnceCell<String> = OnceCell::const_new();
-static PYTHON_LISTING_ID: OnceCell<String> = OnceCell::const_new();
-
 /// Axum state: the wallet's shared `McpState` plus this endpoint's own
 /// request-timeout/poll-cadence config. Kept separate from `McpState`
 /// itself (rather than adding fields there) since these constants are
@@ -406,12 +398,18 @@ async fn resolve_models(state: &McpState) -> Result<Vec<String>, OpenAiError> {
     Ok(models)
 }
 
+// Each id is derived from its bot's private key
+// (`Overpay::Uuid.derive_listing_id`) and so differs per environment —
+// neither can be a literal constant. Cached per marketplace on
+// `McpState::listing_ids` (see `ListingIdCache` for why not a process
+// global), with no invalidation: an id never changes for a given Overpay
+// instance during a process's lifetime.
 async fn resolve_openrouter_listing_id(state: &McpState) -> Result<String, OpenAiError> {
     resolve_listing_id_cached(
         state,
         OPENROUTER_SELLER_SLUG,
         OPENROUTER_LISTING_TITLE,
-        &OPENROUTER_LISTING_ID,
+        &state.listing_ids.openrouter,
     )
     .await
 }
@@ -421,7 +419,7 @@ async fn resolve_python_listing_id(state: &McpState) -> Result<String, OpenAiErr
         state,
         PYTHON_SELLER_SLUG,
         PYTHON_LISTING_TITLE,
-        &PYTHON_LISTING_ID,
+        &state.listing_ids.python,
     )
     .await
 }
@@ -3093,6 +3091,40 @@ mod tests {
             })))
             .mount(overpay)
             .await;
+    }
+
+    /// Two serve environments (two `McpState`s against two marketplaces)
+    /// must each resolve their own listing ids. The cache used to be a
+    /// pair of process-global statics, so whichever env resolved first
+    /// poisoned the other with its ids under a multi-env serve.
+    #[tokio::test]
+    async fn listing_id_cache_is_per_state_not_process_global() {
+        let overpay_a = MockServer::start().await;
+        let overpay_b = MockServer::start().await;
+        mount_seller_listing(&overpay_a, "openrouter-bot", "ENV-A", "OpenRouter Inference").await;
+        mount_seller_listing(&overpay_b, "openrouter-bot", "ENV-B", "OpenRouter Inference").await;
+
+        let tmp_a = TempDir::new().unwrap();
+        let tmp_b = TempDir::new().unwrap();
+        let state_a = seeded_state(&overpay_a.uri(), &tmp_a);
+        let state_b = seeded_state(&overpay_b.uri(), &tmp_b);
+
+        let id_a = resolve_openrouter_listing_id(&state_a)
+            .await
+            .unwrap_or_else(|e| panic!("env A resolve failed: {}", e.message()));
+        let id_b = resolve_openrouter_listing_id(&state_b)
+            .await
+            .unwrap_or_else(|e| panic!("env B resolve failed: {}", e.message()));
+        assert_eq!(id_a, "ENV-A");
+        assert_eq!(id_b, "ENV-B");
+        // And a per-request clone shares its parent's cache rather than
+        // re-resolving: drop the mock so a second fetch would fail.
+        drop(overpay_a);
+        let pinned = state_a.with_npub(Some("npub1abandon".into()));
+        let id_pinned = resolve_openrouter_listing_id(&pinned)
+            .await
+            .unwrap_or_else(|e| panic!("cached resolve failed: {}", e.message()));
+        assert_eq!(id_pinned, "ENV-A");
     }
 
     async fn mount_fully_paid(overpay: &MockServer, order_id: &str) {
