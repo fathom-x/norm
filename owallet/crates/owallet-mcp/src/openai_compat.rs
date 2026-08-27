@@ -152,6 +152,22 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// tool's docs for why 1s: the marketplace's own broadcast fan-out
 /// (Solid Cable) polls at roughly the same granularity today.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Poll cadence while a live cable subscription is delivering frames —
+/// the poll is only a safety net then (terminal detection, resync), so
+/// it backs off. Keep-alive comments ride the poll, and intermediary
+/// idle timeouts are tens of seconds, so 5s stays comfortably safe.
+pub(crate) const FALLBACK_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// Env overrides for the timing knobs above and the WS toggle. Not wire
+/// protocol — real OpenAI clients can't ask a server for different
+/// timing — but ops-level tuning without a rebuild.
+const POLL_MS_ENV: &str = "OWALLET_V1_POLL_MS";
+const TIMEOUT_S_ENV: &str = "OWALLET_V1_TIMEOUT_S";
+const FALLBACK_POLL_MS_ENV: &str = "OWALLET_V1_FALLBACK_POLL_MS";
+/// `OWALLET_V1_WS=0` disables the cable subscription entirely, reverting
+/// to pure polling. Default on: every WS failure already degrades to
+/// exactly the polling behavior, so the toggle exists for diagnosis, not
+/// safety.
+const WS_ENV: &str = "OWALLET_V1_WS";
 
 /// Axum state: the wallet's shared `McpState` plus this endpoint's own
 /// request-timeout/poll-cadence config. Kept separate from `McpState`
@@ -163,6 +179,12 @@ struct Ctx {
     mcp: McpState,
     timeout: Duration,
     poll: Duration,
+    /// Poll cadence while a live cable subscription is feeding frames —
+    /// see [`FALLBACK_POLL_INTERVAL`].
+    fallback_poll: Duration,
+    /// Whether the streaming path tries the marketplace's WebSocket
+    /// channel at all — see [`WS_ENV`].
+    ws_enabled: bool,
     /// Whether the authenticated provider key carries the `spend` scope.
     /// `false` at construction; set per request from the key's stored
     /// scopes in [`chat_completions`].
@@ -199,17 +221,50 @@ fn router_with_timing(state: McpState, timeout: Duration, poll: Duration) -> Rou
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|v| v.is_finite() && *v >= 0.0)
         .unwrap_or(DEFAULT_SPEND_CAP_USD);
-    router_with_config(state, timeout, poll, cap)
+    let timeout = env_u64(TIMEOUT_S_ENV)
+        .map(Duration::from_secs)
+        .unwrap_or(timeout);
+    let poll = env_u64(POLL_MS_ENV)
+        .map(Duration::from_millis)
+        .unwrap_or(poll);
+    let fallback_poll = env_u64(FALLBACK_POLL_MS_ENV)
+        .map(Duration::from_millis)
+        .unwrap_or(FALLBACK_POLL_INTERVAL)
+        .max(poll);
+    let ws_enabled = std::env::var(WS_ENV).map(|v| v != "0").unwrap_or(true);
+    router_with_config_full(state, timeout, poll, cap, ws_enabled, fallback_poll)
+}
+
+fn env_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
 }
 
 /// Innermost constructor: also fixes the spend cap, bypassing the env
 /// read — tests use this so a parallel test can't race another's
 /// process-global environment.
 fn router_with_config(state: McpState, timeout: Duration, poll: Duration, cap: f64) -> Router {
+    // Tests default to WS off (their mock marketplaces speak plain HTTP;
+    // the WS-specific tests opt in via router_with_config_full).
+    router_with_config_full(state, timeout, poll, cap, false, poll)
+}
+
+fn router_with_config_full(
+    state: McpState,
+    timeout: Duration,
+    poll: Duration,
+    cap: f64,
+    ws_enabled: bool,
+    fallback_poll: Duration,
+) -> Router {
     let ctx = Ctx {
         mcp: state,
         timeout,
         poll,
+        fallback_poll,
+        ws_enabled,
         can_spend: false,
         key_id: None,
         spend_cap_usd: cap,
@@ -1847,11 +1902,16 @@ async fn wait_for_order_terminal(
     poll: Duration,
 ) -> Result<Value, OpenAiError> {
     let start = Instant::now();
+    // This caller never streams the partial buffer, so passing the last
+    // seen seq back as `since_seq` lets the marketplace omit it from
+    // every poll — the buffer can be 32 KB, re-downloaded each second.
+    let mut last_seq = 0u64;
     loop {
         let snap = state
             .overpay
-            .get_order_value(order_id, auth.as_auth())
+            .get_order_value_since(order_id, Some(last_seq), auth.as_auth())
             .await?;
+        last_seq = last_seq.max(partial_output(&snap).1.unwrap_or(0));
         if is_terminal(order_status(&snap)) {
             return Ok(snap);
         }
@@ -2419,11 +2479,21 @@ fn usage_event(id: &str, model: &str, usage: TurnUsage) -> Event {
 /// observed a partial chunk (fast/tiny replies), or whose partial buffer
 /// was truncated by the marketplace's 32 KB cap while delivered_content
 /// was not. `None` once fully caught up.
+///
+/// A `streamed` offset landing mid-character in `delivered_text` (a
+/// byte-capped partial buffer can leave one) floors to the previous
+/// char boundary rather than dropping the tail: the worst case re-emits
+/// the lead bytes of one already-counted character, strictly better
+/// than silently losing the rest of the reply.
 fn catch_up(delivered_text: &str, streamed: usize) -> Option<&str> {
-    if streamed >= delivered_text.len() || !delivered_text.is_char_boundary(streamed) {
+    if streamed >= delivered_text.len() {
         return None;
     }
-    Some(&delivered_text[streamed..])
+    let mut start = streamed;
+    while start > 0 && !delivered_text.is_char_boundary(start) {
+        start -= 1;
+    }
+    Some(&delivered_text[start..])
 }
 
 /// Terminal error frames for the streaming path: a normal-shaped
@@ -2749,12 +2819,14 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     };
                     let started = Instant::now();
                     let mut lt_streamed = 0usize;
+                    let mut lt_seq = 0u64;
                     let mut lt_emitted = false;
                     let result_text = loop {
-                        let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                        let snap = match ctx.mcp.overpay.get_order_value_since(&order_id, Some(lt_seq), auth.as_auth()).await {
                             Ok(s) => s,
                             Err(e) => break json!({"error": OpenAiError::from(e).message()}).to_string(),
                         };
+                        lt_seq = lt_seq.max(partial_output(&snap).1.unwrap_or(0));
 
                         // Forward whatever is new before checking for the
                         // end, so the final flush of the preview is never
@@ -2801,11 +2873,12 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 };
 
                 let mut py_streamed = 0usize;
+                let mut py_seq = 0u64;
                 let mut fence_open = false;
                 let py_start = Instant::now();
                 let python_snap;
                 loop {
-                    let snap = match ctx.mcp.overpay.get_order_value(&python_order_id, auth.as_auth()).await {
+                    let snap = match ctx.mcp.overpay.get_order_value_since(&python_order_id, Some(py_seq), auth.as_auth()).await {
                         Ok(s) => s,
                         Err(e) => {
                             let result_text = json!({"error": OpenAiError::from(e).message()}).to_string();
@@ -2813,6 +2886,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                             continue 'tool_calls;
                         }
                     };
+                    py_seq = py_seq.max(partial_output(&snap).1.unwrap_or(0));
 
                     let (partial, _seq) = partial_output(&snap);
                     match new_output_since(partial, &mut py_streamed) {
