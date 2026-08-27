@@ -2528,6 +2528,14 @@ struct OrderFollower<'a> {
     start: Instant,
     poll_deadline: tokio::time::Instant,
     pending: Option<FollowEvent>,
+    /// Live cable subscription to the order's `payment_status` topic,
+    /// established lazily on the first wait when [`Ctx::ws_enabled`].
+    /// While present, frames arrive as push and the poll backs off to
+    /// [`Ctx::fallback_poll`] as a safety net (terminal detection is
+    /// always confirmed by a GET). `None` after any failure — the
+    /// follower then behaves exactly like the pure-polling version.
+    ws: Option<tokio::sync::mpsc::Receiver<owallet_overpay::cable::CableFrame>>,
+    ws_tried: bool,
 }
 
 impl<'a> OrderFollower<'a> {
@@ -2542,15 +2550,87 @@ impl<'a> OrderFollower<'a> {
             // First poll fires immediately, matching the old loops.
             poll_deadline: tokio::time::Instant::now(),
             pending: None,
+            ws: None,
+            ws_tried: false,
         }
     }
 
     async fn next_event(&mut self) -> FollowEvent {
+        use owallet_overpay::cable::CableFrame;
+
         if let Some(ev) = self.pending.take() {
             return ev;
         }
-        tokio::time::sleep_until(self.poll_deadline).await;
-        self.poll().await
+        if self.ctx.ws_enabled && !self.ws_tried {
+            self.ws_tried = true;
+            // The first poll hasn't happened yet, so a failed connect
+            // (bounded at 3s inside) delays nothing but itself.
+            match owallet_overpay::cable::subscribe_payment_status(
+                self.ctx.mcp.overpay.base_url_str(),
+                self.order_id,
+            )
+            .await
+            {
+                Ok(rx) => {
+                    self.ws = Some(rx);
+                    tracing::debug!(order_id = self.order_id, "cable subscription live");
+                }
+                Err(e) => tracing::debug!(order_id = self.order_id, "cable unavailable: {e}"),
+            }
+        }
+
+        loop {
+            let Some(rx) = self.ws.as_mut() else {
+                tokio::time::sleep_until(self.poll_deadline).await;
+                return self.poll().await;
+            };
+            let frame = tokio::select! {
+                biased;
+                frame = rx.recv() => frame,
+                _ = tokio::time::sleep_until(self.poll_deadline) => {
+                    return self.poll().await;
+                }
+            };
+            match frame {
+                Some(CableFrame::Partial { seq, delta, content }) => {
+                    // A resync frame (or an old-protocol full-buffer
+                    // frame) is authoritative: run it through the same
+                    // byte diff as a polled buffer.
+                    if let Some(text) = content {
+                        self.last_seq = self.last_seq.max(seq);
+                        if let Some(new) = new_output_since(Some(&text), &mut self.streamed) {
+                            return FollowEvent::Delta(new.to_string());
+                        }
+                        continue;
+                    }
+                    if seq <= self.last_seq {
+                        continue; // replayed frame — already covered
+                    }
+                    if seq == self.last_seq + 1 {
+                        if let Some(d) = delta {
+                            self.last_seq = seq;
+                            self.streamed += d.len();
+                            return FollowEvent::Delta(d);
+                        }
+                        continue;
+                    }
+                    // Gap — a missed frame. The next conditional GET
+                    // returns the full buffer (seq advanced past ours)
+                    // and the byte diff emits exactly what was missed.
+                    return self.poll().await;
+                }
+                Some(CableFrame::Refresh) => {
+                    // Something changed (fulfillment transition) — poll
+                    // now instead of at the next safety-net tick.
+                    return self.poll().await;
+                }
+                Some(CableFrame::Closed) | None => {
+                    self.ws = None;
+                    // Back to the tight poll cadence immediately.
+                    self.poll_deadline = tokio::time::Instant::now();
+                }
+            }
+        }
     }
 
     /// One conditional GET: emits the new text (or a keep-alive), and
@@ -2584,7 +2664,12 @@ impl<'a> OrderFollower<'a> {
                 self.ctx.timeout.as_secs()
             ))));
         } else {
-            self.poll_deadline = tokio::time::Instant::now() + self.ctx.poll;
+            let interval = if self.ws.is_some() {
+                self.ctx.fallback_poll
+            } else {
+                self.ctx.poll
+            };
+            self.poll_deadline = tokio::time::Instant::now() + interval;
         }
         first
     }
@@ -3890,6 +3975,159 @@ mod tests {
             };
             ResponseTemplate::new(200).set_body_json(body)
         }
+    }
+
+    /// A mock marketplace whose /cable route is a REAL WebSocket speaking
+    /// the ActionCable protocol, and whose order endpoint never returns
+    /// any partial content — so a streamed delta in the SSE output can
+    /// only have arrived by push. The cable handler flips the order to
+    /// delivered right before sending its refresh frame.
+    async fn ws_marketplace() -> String {
+        use axum::extract::ws::{Message as WsMessage, WebSocketUpgrade};
+        use axum::extract::{Path as AxPath, Query, State as AxState};
+        use axum::response::IntoResponse;
+        use axum::routing::{get as ax_get, post as ax_post};
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicBool;
+
+        type Delivered = Arc<AtomicBool>;
+
+        async fn listings(Query(q): Query<HashMap<String, String>>) -> axum::Json<Value> {
+            let data = match q.get("seller").map(String::as_str) {
+                Some("openrouter-bot") => {
+                    json!([{"id": OPENROUTER_ID, "title": "OpenRouter Inference"}])
+                }
+                Some("exec") => json!([{"id": PYTHON_ID, "title": "Run Python Code"}]),
+                _ => json!([]),
+            };
+            axum::Json(json!({ "data": data }))
+        }
+        async fn listing_show(AxPath(id): AxPath<String>) -> axum::Json<Value> {
+            if id == PYTHON_ID {
+                axum::Json(python_listing_body(PYTHON_ID))
+            } else {
+                axum::Json(openrouter_listing_body(OPENROUTER_ID))
+            }
+        }
+        async fn create_order() -> axum::Json<Value> {
+            axum::Json(json!({"data": {"id": "WS-ORDER"}}))
+        }
+        async fn redeem() -> axum::Json<Value> {
+            axum::Json(json!({"data": {"status": "fully_paid", "amount_redeemed_cents": 100}}))
+        }
+        async fn order_show(AxState(delivered): AxState<Delivered>) -> axum::Json<Value> {
+            if delivered.load(Ordering::SeqCst) {
+                axum::Json(json!({"data": {
+                    "id": "WS-ORDER",
+                    "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content("Hello world", "m1", false),
+                }}))
+            } else {
+                axum::Json(json!({"data": {"id": "WS-ORDER", "fulfillment_status": "processing"}}))
+            }
+        }
+        async fn cable(
+            ws: WebSocketUpgrade,
+            AxState(delivered): AxState<Delivered>,
+        ) -> impl IntoResponse {
+            ws.on_upgrade(move |mut socket| async move {
+                let send = |v: Value| WsMessage::Text(v.to_string().into());
+                let _ = socket.send(send(json!({"type": "welcome"}))).await;
+                while let Some(Ok(msg)) = socket.recv().await {
+                    if let WsMessage::Text(t) = msg {
+                        let v: Value = serde_json::from_str(&t).unwrap_or_default();
+                        if v["command"] == "subscribe" {
+                            break;
+                        }
+                    }
+                }
+                let _ = socket.send(send(json!({"type": "confirm_subscription"}))).await;
+                let _ = socket
+                    .send(send(json!({"identifier": "i", "message":
+                        {"action": "partial", "seq": 1, "delta": "Hel", "content": "Hel"}})))
+                    .await;
+                let _ = socket
+                    .send(send(json!({"identifier": "i", "message":
+                        {"action": "partial", "seq": 2, "delta": "lo "}})))
+                    .await;
+                delivered.store(true, Ordering::SeqCst);
+                let _ = socket
+                    .send(send(json!({"identifier": "i", "message": {"action": "refresh"}})))
+                    .await;
+                // Hold the socket open past the request's lifetime.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            })
+        }
+
+        let delivered: Delivered = Arc::new(AtomicBool::new(false));
+        let app = axum::Router::new()
+            .route("/api/v1/listings", ax_get(listings))
+            .route("/api/v1/listings/{id}", ax_get(listing_show))
+            .route("/api/v1/orders", ax_post(create_order))
+            .route("/api/v1/orders/{id}", ax_get(order_show))
+            .route("/api/v1/merchant_credits/{slug}/redeem", ax_post(redeem))
+            .route("/cable", ax_get(cable))
+            .with_state(delivered);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn streaming_pushes_deltas_over_the_cable_socket() {
+        let base = ws_marketplace().await;
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&base, &tmp);
+        let key = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "test", "chat", None)
+            .unwrap()
+            .1;
+        let app = router_with_config_full(
+            state,
+            Duration::from_secs(10),
+            Duration::from_millis(100),
+            20.0,
+            true,                       // ws on — the point of this test
+            Duration::from_millis(300), // safety-net poll while ws is live
+        );
+        let mut server = TestServer::new(app).unwrap();
+        server.add_header(header::AUTHORIZATION, format!("Bearer {key}"));
+
+        let res = server
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "default",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true,
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let text = res.text();
+        let content: String = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|l| *l != "[DONE]")
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| {
+                v["choices"][0]["delta"]["content"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+
+        // "Hel" + "lo " can only have arrived over the socket (the order
+        // endpoint never serves partial_content); "world" is the terminal
+        // catch_up tail from delivered_content.
+        assert_eq!(content, "Hello world", "full SSE text was: {text}");
+        assert!(text.contains("[DONE]"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -28,3 +28,5 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"
+# Server side of the cable tests (accept_async).
+tokio-tungstenite = "0.24"
