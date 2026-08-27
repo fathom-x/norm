@@ -229,13 +229,29 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   execution becomes an `{"error": ...}` tool-result message fed back to
   the model rather than aborting the request — see `execute_tool_call`'s
   doc comment for why. The request timeout (120s) and poll cadence (1s)
-  are `const`s, not request parameters — real OpenAI clients have no way
-  to ask a server for a different timeout, so this doesn't either — but
-  tests need short values to avoid a 120s-real-time test, hence the
-  private `router_with_timing(state, timeout, poll)` construction-time
-  knob and the `Ctx` wrapper struct (kept separate from `McpState` on
-  purpose — these fields are HTTP-specific and don't belong on the struct
-  MCP tool calls share). `owallet install --opencode-*`
+  are construction-time values, not request parameters — real OpenAI
+  clients have no way to ask a server for a different timeout, so this
+  doesn't either — env-overridable for ops (`OWALLET_V1_TIMEOUT_S`,
+  `OWALLET_V1_POLL_MS`, `OWALLET_V1_FALLBACK_POLL_MS`); tests use the
+  private `router_with_timing` / `router_with_config_full` knobs and the
+  `Ctx` wrapper struct (kept separate from `McpState` on purpose — these
+  fields are HTTP-specific and don't belong on the struct MCP tool calls
+  share). **Streaming is push-first**: `OrderFollower` (the one shared
+  turn-follow loop — the passthrough/agentic/landing copies were
+  unified) subscribes to the order's `payment_status` ActionCable topic
+  (`owallet_overpay::cable`, anonymous — the order UUID is the
+  credential, same as the order page) and applies delta frames as they
+  arrive; the poll drops to the fallback cadence as a safety net,
+  `since_seq` makes every poll conditional (the marketplace omits an
+  unchanged partial buffer), a seq gap or refresh frame triggers an
+  immediate conditional GET, and any socket failure downgrades to the
+  plain polling loop. `OWALLET_V1_WS=0` disables the socket outright.
+  `place_and_pay_order` settles in the create call when the marketplace
+  supports `pay: "merchant_credits"` (response carries a `payment` key),
+  falling back to the separate redeem round trip when it doesn't.
+  The two hardcoded listing-id caches live on `McpState::listing_ids`
+  (per serve env, like the `Ctx` listing-tool registry) — they were
+  process globals once, which cross-contaminated multi-env serves. `owallet install --opencode-*`
   (`crates/owallet/src/commands/install.rs`) writes an OpenCode `provider`
   entry pointed at this endpoint, fetching the model list the same
   drift-avoidance way — `fetch_models` reads the OpenRouter listing's own
