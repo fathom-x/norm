@@ -1001,3 +1001,18 @@ fn provider_key_rows_predating_the_budget_columns_read_as_unlimited_untouched() 
     let row = db.read_provider_key(&key.id).unwrap().unwrap();
     assert_eq!(row.spent_today_usd_cents(), 100);
 }
+
+#[test]
+fn init_leaves_the_db_file_in_wal_mode() {
+    // init used to skip the journal_mode pragma, leaving a fresh DB in the
+    // default rollback journal until the next open(). WAL is persisted in
+    // the file header, so a second plain connection can observe it.
+    let (tmp, path) = fresh_path();
+    drop(Database::init(&path, "pw").unwrap());
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let journal: String = conn
+        .pragma_query_value(None, "journal_mode", |r| r.get(0))
+        .unwrap();
+    assert_eq!(journal, "wal");
+    drop(tmp);
+}
