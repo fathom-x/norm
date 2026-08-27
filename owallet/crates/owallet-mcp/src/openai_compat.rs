@@ -2496,6 +2496,100 @@ fn catch_up(delivered_text: &str, streamed: usize) -> Option<&str> {
     Some(&delivered_text[start..])
 }
 
+/// One event from following an in-flight order's streaming progress.
+enum FollowEvent {
+    /// Newly streamed text to forward as a content chunk.
+    Delta(String),
+    /// Nothing new this wakeup — emit an SSE keep-alive comment.
+    KeepAlive,
+    /// The order reached a terminal status: the final snapshot plus how
+    /// many bytes of its partial buffer were forwarded (what `catch_up`
+    /// needs to emit the uncovered tail of the delivered text).
+    Terminal(Box<Value>, usize),
+    /// Following failed (fetch error or the request timeout). Terminal.
+    Failed(OpenAiError),
+}
+
+/// Follows one order to a terminal status, surfacing streaming progress
+/// as [`FollowEvent`]s — the loop the streaming generator used to
+/// duplicate per turn shape (passthrough, agentic, landing). One event
+/// per `next_event` call; after `Terminal` or `Failed` the follower is
+/// exhausted and must not be polled again.
+///
+/// Polls `GET /orders/:id?since_seq=<last>` on the `ctx.poll` cadence —
+/// the marketplace omits an unchanged partial buffer for the seq it
+/// already told us about — and byte-diffs the buffer exactly as before.
+struct OrderFollower<'a> {
+    ctx: &'a Ctx,
+    auth: &'a OwnedAuth,
+    order_id: &'a str,
+    streamed: usize,
+    last_seq: u64,
+    start: Instant,
+    poll_deadline: tokio::time::Instant,
+    pending: Option<FollowEvent>,
+}
+
+impl<'a> OrderFollower<'a> {
+    fn new(ctx: &'a Ctx, auth: &'a OwnedAuth, order_id: &'a str) -> Self {
+        Self {
+            ctx,
+            auth,
+            order_id,
+            streamed: 0,
+            last_seq: 0,
+            start: Instant::now(),
+            // First poll fires immediately, matching the old loops.
+            poll_deadline: tokio::time::Instant::now(),
+            pending: None,
+        }
+    }
+
+    async fn next_event(&mut self) -> FollowEvent {
+        if let Some(ev) = self.pending.take() {
+            return ev;
+        }
+        tokio::time::sleep_until(self.poll_deadline).await;
+        self.poll().await
+    }
+
+    /// One conditional GET: emits the new text (or a keep-alive), and
+    /// stashes a terminal/timeout event for the next call — the old loop
+    /// yielded its delta first and then broke/errored, so ordering is
+    /// preserved exactly.
+    async fn poll(&mut self) -> FollowEvent {
+        let snap = match self
+            .ctx
+            .mcp
+            .overpay
+            .get_order_value_since(self.order_id, Some(self.last_seq), self.auth.as_auth())
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => return FollowEvent::Failed(OpenAiError::from(e)),
+        };
+        let (partial, seq) = partial_output(&snap);
+        self.last_seq = self.last_seq.max(seq.unwrap_or(0));
+        let first = match new_output_since(partial, &mut self.streamed) {
+            Some(delta) => FollowEvent::Delta(delta.to_string()),
+            None => FollowEvent::KeepAlive,
+        };
+
+        if is_terminal(order_status(&snap)) {
+            self.pending = Some(FollowEvent::Terminal(Box::new(snap), self.streamed));
+        } else if self.start.elapsed() >= self.ctx.timeout {
+            self.pending = Some(FollowEvent::Failed(OpenAiError::UpstreamFailure(format!(
+                "order {} did not complete within {}s",
+                self.order_id,
+                self.ctx.timeout.as_secs()
+            ))));
+        } else {
+            self.poll_deadline = tokio::time::Instant::now() + self.ctx.poll;
+        }
+        first
+    }
+}
+
 /// Terminal error frames for the streaming path: a normal-shaped
 /// `chat.completion.chunk` sequence — an error-text content chunk, then a
 /// `finish_reason: "stop"` chunk, then `[DONE]` — rather than a dedicated
@@ -2595,31 +2689,20 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             yield Ok(chunk_event(&order_id, &requested_model, json!({"role": "assistant"}), None));
 
             let mut streamed = 0usize;
-            let start = Instant::now();
+            let mut follower = OrderFollower::new(&ctx, &auth, &order_id);
             let snap = loop {
-                let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        for ev in error_events(&order_id, &requested_model, OpenAiError::from(e)) { yield Ok(ev); }
+                match follower.next_event().await {
+                    FollowEvent::Delta(delta) => yield Ok(chunk_event(&order_id, &requested_model, json!({"content": delta}), None)),
+                    FollowEvent::KeepAlive => yield Ok(Event::default().comment("owallet: waiting on the model")),
+                    FollowEvent::Terminal(snap, streamed_bytes) => {
+                        streamed = streamed_bytes;
+                        break *snap;
+                    }
+                    FollowEvent::Failed(err) => {
+                        for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
                         return;
                     }
-                };
-                let (partial, _seq) = partial_output(&snap);
-                match new_output_since(partial, &mut streamed) {
-                    Some(delta) => yield Ok(chunk_event(&order_id, &requested_model, json!({"content": delta}), None)),
-                    None => yield Ok(Event::default().comment("owallet: waiting on the model")),
                 }
-                if is_terminal(order_status(&snap)) {
-                    break snap;
-                }
-                if start.elapsed() >= ctx.timeout {
-                    let err = OpenAiError::UpstreamFailure(format!(
-                        "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
-                    ));
-                    for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
-                    return;
-                }
-                tokio::time::sleep(ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             let mut usage = TurnUsage::default();
@@ -2700,33 +2783,20 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             }
 
             let mut streamed = 0usize;
-            let start = Instant::now();
+            let mut follower = OrderFollower::new(&ctx, &auth, &order_id);
             let snap = loop {
-                let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
+                match follower.next_event().await {
+                    FollowEvent::Delta(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
+                    FollowEvent::KeepAlive => yield Ok(Event::default().comment("owallet: waiting on the model")),
+                    FollowEvent::Terminal(snap, streamed_bytes) => {
+                        streamed = streamed_bytes;
+                        break *snap;
+                    }
+                    FollowEvent::Failed(err) => {
+                        for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
                         return;
                     }
-                };
-
-                let (partial, _seq) = partial_output(&snap);
-                match new_output_since(partial, &mut streamed) {
-                    Some(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
-                    None => yield Ok(Event::default().comment("owallet: waiting on the model")),
                 }
-
-                if is_terminal(order_status(&snap)) {
-                    break snap;
-                }
-                if start.elapsed() >= ctx.timeout {
-                    let err = OpenAiError::UpstreamFailure(format!(
-                        "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
-                    ));
-                    for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
-                    return;
-                }
-                tokio::time::sleep(ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             usage.add_order(&snap, redeemed_cents);
@@ -2949,31 +3019,20 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             yield Ok(chunk_event(&response_id, &last_model, json!({"role": "assistant"}), None));
         }
         let mut streamed = 0usize;
-        let start = Instant::now();
+        let mut follower = OrderFollower::new(&ctx, &auth, &order_id);
         let snap = loop {
-            let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
-                Ok(s) => s,
-                Err(e) => {
-                    for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
+            match follower.next_event().await {
+                FollowEvent::Delta(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
+                FollowEvent::KeepAlive => yield Ok(Event::default().comment("owallet: waiting on the model")),
+                FollowEvent::Terminal(snap, streamed_bytes) => {
+                    streamed = streamed_bytes;
+                    break *snap;
+                }
+                FollowEvent::Failed(err) => {
+                    for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
                     return;
                 }
-            };
-            let (partial, _seq) = partial_output(&snap);
-            match new_output_since(partial, &mut streamed) {
-                Some(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
-                None => yield Ok(Event::default().comment("owallet: waiting on the model")),
             }
-            if is_terminal(order_status(&snap)) {
-                break snap;
-            }
-            if start.elapsed() >= ctx.timeout {
-                let err = OpenAiError::UpstreamFailure(format!(
-                    "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
-                ));
-                for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
-                return;
-            }
-            tokio::time::sleep(ctx.poll).await;
         };
         net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
         usage.add_order(&snap, redeemed_cents);
