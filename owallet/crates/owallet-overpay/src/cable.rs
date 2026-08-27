@@ -104,9 +104,20 @@ async fn pump(
     let mut subscribed = false;
 
     loop {
-        let msg = match source.next().await {
-            Some(Ok(m)) => m,
-            Some(Err(_)) | None => break,
+        // Watch for the consumer dropping alongside the socket read. The
+        // only other place we notice a gone receiver is a failed
+        // `tx.send`, which is reached solely for *data* frames — and once
+        // an order delivers, the topic carries nothing but ActionCable's
+        // periodic keep-alive pings. Without this arm the task would spin
+        // on those pings forever, leaking a socket, a task, and a
+        // server-side cable connection for every streamed turn.
+        let msg = tokio::select! {
+            biased;
+            _ = tx.closed() => break,
+            msg = source.next() => match msg {
+                Some(Ok(m)) => m,
+                Some(Err(_)) | None => break,
+            },
         };
         let text = match msg {
             Message::Text(t) => t,
