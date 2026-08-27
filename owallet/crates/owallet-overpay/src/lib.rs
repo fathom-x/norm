@@ -17,6 +17,7 @@
 //!   methods directly; the actual NIP-98 signing happens in
 //!   `owallet_crypto::nip98`)
 
+pub mod cable;
 pub mod client;
 pub mod error;
 pub mod models;

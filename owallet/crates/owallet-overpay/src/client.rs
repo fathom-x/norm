@@ -103,6 +103,12 @@ impl OverpayClient {
     /// it from the client means a caller can't file a bearer under one host
     /// and look it up under another. See [`host_key`].
     #[must_use]
+    /// The Overpay API base URL this client talks to. The cable
+    /// subscriber derives its WebSocket endpoint from it.
+    pub fn base_url_str(&self) -> &str {
+        self.base_url.as_str()
+    }
+
     pub fn host_key(&self) -> String {
         host_key(self.base_url.as_str())
     }
@@ -239,6 +245,25 @@ impl OverpayClient {
     pub async fn get_order_value(&self, id: &str, auth: Auth<'_>) -> Result<Value, OverpayError> {
         self.get_json_value(&format!("/api/v1/orders/{id}"), auth)
             .await
+    }
+
+    /// [`get_order_value`] with a conditional-streaming hint: when
+    /// `since_seq` matches the order's current `partial_seq`, a Rails
+    /// that understands the param omits the (up to 32 KB) partial buffer
+    /// from the payload — `partial_seq` still rides along as the change
+    /// signal. Older marketplaces ignore the param and return the full
+    /// payload, so callers need no capability check.
+    pub async fn get_order_value_since(
+        &self,
+        id: &str,
+        since_seq: Option<u64>,
+        auth: Auth<'_>,
+    ) -> Result<Value, OverpayError> {
+        let path = match since_seq {
+            Some(seq) => format!("/api/v1/orders/{id}?since_seq={seq}"),
+            None => format!("/api/v1/orders/{id}"),
+        };
+        self.get_json_value(&path, auth).await
     }
 
     pub async fn create_order(
