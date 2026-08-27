@@ -241,7 +241,9 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   unified) subscribes to the order's `payment_status` ActionCable topic
   (`owallet_overpay::cable`, anonymous — the order UUID is the
   credential, same as the order page) and applies delta frames as they
-  arrive; the poll drops to the fallback cadence as a safety net,
+  arrive (the connect is spawned and raced against the poll timer, never
+  awaited — a blackholed upgrade must not add its timeout to
+  first-token latency); the poll drops to the fallback cadence as a safety net,
   `since_seq` makes every poll conditional (the marketplace omits an
   unchanged partial buffer), a seq gap or refresh frame triggers an
   immediate conditional GET, and any socket failure downgrades to the
