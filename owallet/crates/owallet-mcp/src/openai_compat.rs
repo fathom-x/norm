@@ -1800,9 +1800,14 @@ async fn place_and_pay_order(
             .map_err(|e| OpenAiError::internal(format!("could not encode buyer_note: {e}")))?,
     };
 
+    // One request creates AND settles when the marketplace understands
+    // `pay: "merchant_credits"` (its response then carries a `payment`
+    // key) — halving the Rails round trips of the hottest call in the
+    // module. An older marketplace ignores the param and returns only
+    // the order; the separate redeem call below covers it.
     let order = state
         .overpay
-        .create_order_value(listing_id, Some(&note_str), auth.as_auth())
+        .create_and_pay_order_value(listing_id, Some(&note_str), auth.as_auth())
         .await?;
     let order_id = order
         .get("data")
@@ -1811,19 +1816,22 @@ async fn place_and_pay_order(
         .ok_or_else(|| OpenAiError::internal("create_order response missing id"))?
         .to_string();
 
-    let redeem = state
-        .overpay
-        .redeem_merchant_credits_value(seller_slug, &order_id, auth.as_auth())
-        .await?;
-    let status = redeem
-        .get("data")
-        .and_then(|d| d.get("status"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let payment = match order.get("payment") {
+        Some(p) => p.clone(),
+        None => {
+            let redeem = state
+                .overpay
+                .redeem_merchant_credits_value(seller_slug, &order_id, auth.as_auth())
+                .await?;
+            redeem.get("data").cloned().unwrap_or(Value::Null)
+        }
+    };
+
+    let status = payment.get("status").and_then(Value::as_str).unwrap_or("");
     if status != "fully_paid" && status != "already_paid" {
-        let message = redeem
-            .get("data")
-            .and_then(|d| d.get("message"))
+        let message = payment
+            .get("message")
+            .or_else(|| payment.get("error"))
             .and_then(Value::as_str)
             .unwrap_or("insufficient Overpay merchant credits");
         return Err(OpenAiError::PaymentRequired(format!(
@@ -1841,8 +1849,8 @@ async fn place_and_pay_order(
     // the returned cents to [`net_key_budget_from_delivery`] once they
     // hold the terminal snapshot.
     let mut redeemed_cents: i64 = 0;
-    if let Some(cents) = redeem
-        .pointer("/data/amount_redeemed_cents")
+    if let Some(cents) = payment
+        .get("amount_redeemed_cents")
         .and_then(Value::as_f64)
     {
         record_key_budget(state, key_id, cents / 100.0);
@@ -3372,6 +3380,76 @@ mod tests {
             })))
             .mount(overpay)
             .await;
+    }
+
+    /// place_and_pay against a marketplace that settles in the create
+    /// call itself: the response carries a `payment` key, and the
+    /// separate redeem endpoint must never be hit (no mock is mounted
+    /// for it — a call would 404 and fail the request).
+    #[tokio::test]
+    async fn place_and_pay_uses_the_one_call_path_when_the_marketplace_settles_on_create() {
+        let overpay = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .and(body_partial_json(json!({"pay": "merchant_credits"})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "ONECALL", "payment_status": "paid"},
+                "payment": {"status": "fully_paid", "amount_redeemed_cents": 7}
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+
+        let (order_id, redeemed) = place_and_pay_order(
+            &state,
+            &auth,
+            "L1",
+            "openrouter-bot",
+            &json!({"model": "default"}),
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("one-call path failed: {}", e.message()));
+        assert_eq!(order_id, "ONECALL");
+        assert_eq!(redeemed, 7);
+    }
+
+    /// A one-call redemption failure surfaces as PaymentRequired, same
+    /// as the two-call path's insufficient-credits case.
+    #[tokio::test]
+    async fn place_and_pay_reports_a_one_call_redemption_failure() {
+        let overpay = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "BROKE", "payment_status": "pending"},
+                "payment": {"status": "failed", "error": "no merchant credits"}
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+
+        let err = place_and_pay_order(
+            &state,
+            &auth,
+            "L1",
+            "openrouter-bot",
+            &json!({"model": "default"}),
+            None,
+        )
+        .await
+        .expect_err("must not treat a failed payment as paid");
+        assert!(
+            err.message().contains("no merchant credits"),
+            "got: {}",
+            err.message()
+        );
     }
 
     /// The exact `run_python` tool definition `run_python_tool_def` builds

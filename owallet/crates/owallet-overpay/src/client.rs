@@ -297,6 +297,26 @@ impl OverpayClient {
         self.post_json_value("/api/v1/orders", auth, &body).await
     }
 
+    /// [`create_order_value`] asking the marketplace to settle the new
+    /// order with merchant credits in the same request. A marketplace
+    /// that understands `pay` returns a top-level `payment` key with the
+    /// redemption outcome; an older one ignores the param and returns
+    /// only the order — callers detect that and fall back to the
+    /// separate redeem call.
+    pub async fn create_and_pay_order_value(
+        &self,
+        listing_id: &str,
+        buyer_note: Option<&str>,
+        auth: Auth<'_>,
+    ) -> Result<Value, OverpayError> {
+        let body = serde_json::json!({
+            "listing_id": listing_id,
+            "buyer_note": buyer_note,
+            "pay": "merchant_credits",
+        });
+        self.post_json_value("/api/v1/orders", auth, &body).await
+    }
+
     /// Raw-`Value` fetch of a single listing (`GET /api/v1/listings/{id}`).
     /// Returns the full Rails response including the `{data: {...}}`
     /// envelope and any `buyer_note_schema` / `checkout_schema` fields.
