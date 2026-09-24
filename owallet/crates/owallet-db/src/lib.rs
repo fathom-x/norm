@@ -127,6 +127,21 @@ pub struct Database {
     data_dir: PathBuf,
 }
 
+/// Tighten a freshly created wallet path to owner-only access. Best effort:
+/// a filesystem without Unix permissions (or a path that vanished) is not a
+/// reason to fail wallet creation. No-op on non-Unix targets.
+fn restrict_permissions(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+}
+
 impl Database {
     /// Create a new encrypted database at `path` with the given password.
     /// Fails if the file already exists.
@@ -137,10 +152,17 @@ impl Database {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).ok();
+                // The wallet directory holds encrypted seeds and tokens; keep
+                // it owner-only rather than inheriting the process umask.
+                restrict_permissions(parent, 0o700);
             }
         }
 
         let conn = Connection::open(path)?;
+        // Same reasoning for the database file itself: the contents are
+        // AES-GCM encrypted, but a world-readable seed store hands anyone on
+        // the machine an offline brute-force target for free.
+        restrict_permissions(path, 0o600);
         schema::create(&conn)?;
 
         let mut salt = [0u8; owallet_crypto::SALT_LEN];

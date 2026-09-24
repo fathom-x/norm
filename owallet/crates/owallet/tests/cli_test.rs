@@ -343,3 +343,116 @@ fn provider_key_create_rejects_bad_budget() {
         .failure()
         .stderr(contains("budget"));
 }
+
+// --- regression tests for the wallet-setup fixes -------------------------
+
+/// `generate` used to persist the wallet (and promote it to default) *before*
+/// prompting for the per-wallet password. A failed prompt therefore left an
+/// orphan default wallet whose seed phrase was never displayed and whose
+/// dashboard password could never be set. Nothing may be written when the
+/// prompt cannot be satisfied.
+#[test]
+fn failed_generate_leaves_no_wallet() {
+    let tmp = TempDir::new().unwrap();
+    owallet(&tmp, "pw").arg("init").assert().success();
+
+    let mut cmd = Command::cargo_bin("owallet").expect("binary exists");
+    cmd.env("OWALLET_DB_PATH", tmp.path().join("test.db"));
+    cmd.env("OWALLET_PASSWORD", "pw");
+    cmd.env("HOME", tmp.path());
+    // No OWALLET_WALLET_PASSWORD and no TTY under the harness: the per-wallet
+    // password prompt must fail.
+    cmd.env_remove("OWALLET_WALLET_PASSWORD");
+    cmd.arg("generate").assert().failure();
+
+    // The database must be exactly as `init` left it.
+    owallet(&tmp, "pw")
+        .arg("select")
+        .assert()
+        .failure()
+        .stderr(contains("no wallets stored"));
+}
+
+/// The same ordering bug existed in `import`.
+#[test]
+fn failed_import_leaves_no_wallet() {
+    let tmp = TempDir::new().unwrap();
+    owallet(&tmp, "pw").arg("init").assert().success();
+
+    let mut cmd = Command::cargo_bin("owallet").expect("binary exists");
+    cmd.env("OWALLET_DB_PATH", tmp.path().join("test.db"));
+    cmd.env("OWALLET_PASSWORD", "pw");
+    cmd.env("HOME", tmp.path());
+    cmd.env_remove("OWALLET_WALLET_PASSWORD");
+    cmd.args(["import", "--mnemonic", ABANDON_12])
+        .assert()
+        .failure();
+
+    owallet(&tmp, "pw")
+        .arg("select")
+        .assert()
+        .failure()
+        .stderr(contains("no wallets stored"));
+}
+
+/// A missing terminal must name the variable that fixes it, not surface a raw
+/// `/dev/tty` errno ("No such device or address (os error 6)").
+#[test]
+fn missing_tty_names_the_env_var() {
+    let tmp = TempDir::new().unwrap();
+    owallet(&tmp, "pw").arg("init").assert().success();
+
+    let mut cmd = Command::cargo_bin("owallet").expect("binary exists");
+    cmd.env("OWALLET_DB_PATH", tmp.path().join("test.db"));
+    cmd.env("OWALLET_PASSWORD", "pw");
+    cmd.env("HOME", tmp.path());
+    cmd.env_remove("OWALLET_WALLET_PASSWORD");
+    cmd.arg("generate")
+        .assert()
+        .failure()
+        .stderr(contains("OWALLET_WALLET_PASSWORD"));
+}
+
+/// The wallet database holds encrypted seeds; it must not be world-readable.
+#[cfg(unix)]
+#[test]
+fn init_creates_owner_only_db() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    // A nested path so the created parent directory is checked too.
+    let db = tmp.path().join("wallet").join("test.db");
+    let mut cmd = Command::cargo_bin("owallet").expect("binary exists");
+    cmd.env("OWALLET_DB_PATH", &db);
+    cmd.env("OWALLET_PASSWORD", "pw");
+    cmd.env("HOME", tmp.path());
+    cmd.arg("init").assert().success();
+
+    let file_mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+    assert_eq!(file_mode, 0o600, "wallet db should be owner-only");
+    let dir_mode = std::fs::metadata(db.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(dir_mode, 0o700, "wallet dir should be owner-only");
+}
+
+/// `owallet password set` did not exist, so a wallet stored without a dashboard
+/// password could never get one.
+#[test]
+fn password_set_replaces_the_wallet_password() {
+    let tmp = TempDir::new().unwrap();
+    owallet(&tmp, "pw").arg("init").assert().success();
+    owallet(&tmp, "pw").arg("generate").assert().success();
+
+    let mut cmd = Command::cargo_bin("owallet").expect("binary exists");
+    cmd.env("OWALLET_DB_PATH", tmp.path().join("test.db"));
+    cmd.env("OWALLET_PASSWORD", "pw");
+    cmd.env("HOME", tmp.path());
+    cmd.env("OWALLET_WALLET_PASSWORD", "new-dashboard-pw");
+    cmd.args(["password", "set"])
+        .assert()
+        .success()
+        .stdout(contains("Replaced the wallet password"));
+}

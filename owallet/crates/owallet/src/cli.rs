@@ -91,6 +91,13 @@ pub enum Command {
         identifier: Option<String>,
     },
 
+    /// Manage the per-wallet password used to log into the owallet dashboard
+    /// (distinct from the database password that encrypts secrets at rest).
+    Password {
+        #[command(subcommand)]
+        what: PasswordWhat,
+    },
+
     /// Export key material for the default wallet (or `--npub <npub>`).
     Export {
         #[command(subcommand)]
@@ -325,4 +332,15 @@ pub fn multi_config(args: &Cli) -> bool {
         .filter(|b| **b)
         .count()
         > 1
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum PasswordWhat {
+    /// Set or replace the wallet's dashboard password. Prompts twice;
+    /// `OWALLET_WALLET_PASSWORD` short-circuits the prompt.
+    Set {
+        /// Choose a non-default wallet by npub.
+        #[arg(long, value_name = "NPUB")]
+        npub: Option<String>,
+    },
 }
