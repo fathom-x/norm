@@ -47,7 +47,7 @@ function copilotTotalNanoAiu(value: unknown) {
 // an integer, because it is real money. OpenAI's usage schema has no cost
 // field, so the AI SDK's standard mapping drops it and only the raw chunk
 // carries it. Same predicament as Copilot's AIU above, same treatment.
-function overpayChargedCents(value: unknown) {
+export function overpayChargedCents(value: unknown) {
   if (!value || typeof value !== "object") return
   const raw = value as Record<string, unknown>
   const response =
@@ -56,7 +56,13 @@ function overpayChargedCents(value: unknown) {
   if (!usage || typeof usage !== "object") return
   const cents = (usage as Record<string, unknown>).charged_cents
   if (typeof cents !== "number" || !Number.isFinite(cents) || cents < 0) return
-  return cents
+  // owallet also reports what its spending tools moved during the request
+  // (credit purchases/redemptions) as `wallet_spent_cents`. That money left
+  // the wallet on this turn too, so it counts toward the turn's cost — and
+  // with it the conversation's spend that /budget limits.
+  const wallet = (usage as Record<string, unknown>).wallet_spent_cents
+  const walletCents = typeof wallet === "number" && Number.isFinite(wallet) && wallet > 0 ? wallet : 0
+  return cents + walletCents
 }
 
 function usage(value: unknown) {
