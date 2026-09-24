@@ -6079,12 +6079,28 @@ mod tests {
         // marketplace traffic (no mocks mounted — a network call would 404
         // into a different error).
         let chat_state = state.with_provider_key(chat_key.id.clone(), false);
-        for tool in ["create_order", "pay_order", "buy", "load_core_credits"] {
+        for tool in ["create_order", "pay_order", "buy"] {
             let err = crate::tools::dispatch(&chat_state, tool, json!({}), None)
                 .await
                 .expect_err("chat-scoped key must not spend");
             assert!(err.to_string().contains("chat-scoped"), "{tool}: {err}");
         }
+
+        // Minting a Lightning invoice moves nothing out of the wallet, so a
+        // chat-scoped key passes the gate (and fails later on the unmocked
+        // marketplace instead).
+        let err = crate::tools::dispatch(
+            &chat_state,
+            "load_core_credits",
+            json!({"amount_usd": 5.0}),
+            None,
+        )
+        .await
+        .expect_err("unmocked marketplace");
+        assert!(
+            !err.to_string().contains("chat-scoped"),
+            "load_core_credits must not need the spend scope: {err}"
+        );
 
         // Raw-address sends refuse for ANY provider key, spend scope
         // included — they belong to the wallet owner's own hands.
