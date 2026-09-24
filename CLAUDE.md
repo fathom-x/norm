@@ -103,10 +103,11 @@ state). The wordmark/TUI logo spell "norm" (`packages/tui/src/logo.ts`,
 Deliberately *kept* from upstream for compatibility and cheap merges:
 `OPENCODE_*` env vars, `opencode.json`/`opencode.jsonc` config file
 names, project `.opencode/` dirs, the `$schema` URL, and internal
-`@opencode-ai/*` package names. Known follow-ups: the npm-platform
-install path in `bin/norm` still references upstream's `opencode-*`
-platform packages, and `norm upgrade` targets upstream releases —
-point both at norm's release artifacts.
+`@opencode-ai/*` package names. norm ships only through the `install`
+script: `norm upgrade` recognises only installer locations and refuses
+package-manager methods (probing for `opencode`/`opencode-ai` would find a
+*stock opencode* install), and `bin/norm` resolves `norm-<platform>-<arch>`
+packages should npm distribution ever be added.
 
 ## Installing
 
