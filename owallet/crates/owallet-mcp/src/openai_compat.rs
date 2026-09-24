@@ -315,8 +315,28 @@ impl OpenAiError {
     }
 }
 
+/// What a caller with no credits should do. Shared by every "can't pay"
+/// path so the advice is the same wherever it surfaces. The CLI defaults to
+/// prod, so the env flag has to be spelled out for staging/dev serves.
+const LOAD_CREDITS_HINT: &str =
+    "load Overpay credits with `owallet credits load --amount-cents 500 --wait` \
+     (pass the same --staging/--dev flag this server runs with) or top up on the Overpay site";
+
 impl From<OverpayError> for OpenAiError {
     fn from(e: OverpayError) -> Self {
+        // Overpay refuses to place or settle an order for a wallet with no
+        // credits as a bare 422 ("No available credits for this seller").
+        // That is the single most common first-run failure — every model,
+        // ":free" ones included, is paid from credits — so turn it into a
+        // payment error that says what to do instead of an opaque upstream
+        // failure.
+        if let OverpayError::HttpStatus { status, body } = &e {
+            if (*status == 422 || *status == 402) && body.to_ascii_lowercase().contains("credits") {
+                return Self::PaymentRequired(format!(
+                    "no Overpay credits to pay for this request — {LOAD_CREDITS_HINT}"
+                ));
+            }
+        }
         Self::UpstreamFailure(e.to_string())
     }
 }
@@ -1774,7 +1794,7 @@ async fn place_and_pay_order(
             .and_then(Value::as_str)
             .unwrap_or("insufficient Overpay merchant credits");
         return Err(OpenAiError::PaymentRequired(format!(
-            "{message} — load more with the wallet's `load_core_credits` MCP tool or the dashboard"
+            "{message} — {LOAD_CREDITS_HINT}"
         )));
     }
 
@@ -2949,6 +2969,27 @@ fn unix_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn no_credits_422_becomes_actionable_payment_error() {
+        let err: OpenAiError = OverpayError::HttpStatus {
+            status: 422,
+            body: r#"{"error":"No available credits for this seller"}"#.into(),
+        }
+        .into();
+        assert!(matches!(err, OpenAiError::PaymentRequired(_)));
+        assert!(err.message().contains("owallet credits load"));
+    }
+
+    #[test]
+    fn other_422s_stay_upstream_failures() {
+        let err: OpenAiError = OverpayError::HttpStatus {
+            status: 422,
+            body: r#"{"error":"listing is paused"}"#.into(),
+        }
+        .into();
+        assert!(matches!(err, OpenAiError::UpstreamFailure(_)));
+    }
+
     use super::*;
     use axum_test::TestServer;
     use owallet_db::Database;
@@ -3615,10 +3656,12 @@ mod tests {
         res.assert_status(StatusCode::PAYMENT_REQUIRED);
         let body: Value = res.json();
         assert_eq!(body["error"]["type"], "insufficient_quota");
+        // Points at something a user with zero credits can actually run —
+        // not an MCP tool, which needs a (paid) model turn to invoke.
         assert!(body["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("load_core_credits"));
+            .contains("owallet credits load"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
