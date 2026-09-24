@@ -252,7 +252,7 @@ async fn wallet_status(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, OpenAiError> {
-    let (state, _can_spend, key_id) = authenticate_provider_key(&ctx.mcp, &headers)?;
+    let (state, can_spend, key_id) = authenticate_provider_key(&ctx.mcp, &headers)?;
     let out = crate::tools::dispatch(&state, "get_account_info", json!({}), None)
         .await
         .map_err(|e| OpenAiError::internal(format!("get_account_info: {e}")))?;
@@ -269,6 +269,9 @@ async fn wallet_status(
     if let Some(key) = read_key(&state, key_id.as_deref()) {
         map.insert("key_budget".into(), key_budget_json(&key));
     }
+    // Whether the calling key carries the `spend` scope — lets a client
+    // (norm) notice it is still holding a chat-only key and replace it.
+    map.insert("key_can_spend".into(), Value::Bool(can_spend));
     // The marketplace this wallet is pointed at (env-resolved, so norm's
     // sidebar links the right Overpay per staging/prod build without its
     // own copy of the URL table).
@@ -3359,6 +3362,10 @@ mod tests {
         assert_eq!(body["key_budget"]["daily_budget_usd"], 5.0);
         assert_eq!(body["key_budget"]["spent_today_usd"], 0.0);
         assert_eq!(body["key_budget"]["remaining_today_usd"], 5.0);
+        assert_eq!(
+            body["key_can_spend"], false,
+            "a chat-scoped key reports no spend scope"
+        );
         assert!(
             body["balance_error"].is_string(),
             "dead RPC surfaces balance_error"
