@@ -69,23 +69,31 @@ before funding the wallet), export it explicitly:
 owallet export key --format mnemonic
 ```
 
-### Funding the wallet
+### Paying for Norm: Overpay credits
 
-Norm pays for his own inference, so a connected wallet still needs a balance
-before he can answer anything:
+Norm pays for every prompt — including models marked `:free` — out of your
+**Overpay credits**, a balance held on your Overpay account. Until you have
+some, every prompt fails, and the owallet panel in Norm's sidebar says so.
 
-```bash
-owallet account          # balances + your Base USDC and Zcash receive addresses
-owallet credits          # load marketplace credits via a Lightning invoice
-```
+Load credits either way:
 
-Sending USDC (on Base) or ZEC to the addresses `owallet account` prints funds
-the wallet. `owallet list` shows what the marketplace currently sells.
+- **On the Overpay site** (the link at the bottom of the sidebar) — top up
+  your account there.
+- **From the terminal**, paying a Lightning invoice:
 
-If you use your own (non-bundled) owallet install instead, norm falls back
-to offering the manual steps interactively (`owallet init` +
-`owallet generate`), and you can always run those — and
-`owallet authorize` — yourself.
+  ```bash
+  owallet --staging credits load --amount-cents 500 --wait
+  ```
+
+  Keep `--staging` while Norm targets staging: plain `owallet` talks to
+  production, a different account balance.
+
+Your wallet also holds on-chain funds (USDC and ETH on Base, and ZEC — see
+`owallet account`). Those are **not** spent on inference. The key Norm mints
+for himself on first launch can chat but not spend, so he can't use them to
+buy on the marketplace either unless you give him a key with the `spend`
+scope and a daily budget (`owallet provider-key create --spend --budget-usd 5`).
+The wallet runs on Base mainnet, so anything you send it is real money.
 
 ### Trying it without touching your wallet
 
