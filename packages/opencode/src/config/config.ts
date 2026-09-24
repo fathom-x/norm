@@ -588,6 +588,10 @@ const layer = Layer.effect(
           result.compaction = { ...result.compaction, prune: false }
         }
 
+        // norm: Overpay is the only AI provider. Applied last, after every
+        // config source, so project or user config cannot widen it.
+        if (!Norm.disabled()) Norm.enforceProviders(result)
+
         return {
           config: result,
           directories,
