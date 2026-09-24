@@ -113,6 +113,12 @@ const BUY_CREDITS_TOOL: &str = "buy_credits";
 const DEFAULT_SPEND_CAP_USD: f64 = 20.0;
 /// Environment variable overriding [`DEFAULT_SPEND_CAP_USD`].
 const SPEND_CAP_ENV: &str = "OWALLET_V1_SPEND_CAP_USD";
+/// Request header a client (norm's per-conversation `/budget`) sends to
+/// *lower* this request's spending allowance: the wallet spending tools may
+/// move at most this many USD, and a value of 0 or less refuses the request
+/// before any order is placed. It can never raise the cap — the wallet's own
+/// setting and the key's daily budget still apply on top.
+pub const SPEND_LIMIT_HEADER: &str = "x-owallet-spend-limit-usd";
 
 /// A model id that always works, without needing a live catalog fetch to
 /// validate it: `validate_request` accepts it unconditionally and
@@ -185,6 +191,9 @@ struct Ctx {
     /// a wallet-level dashboard setting takes precedence per request via
     /// [`effective_spend_cap`].
     spend_cap_usd: f64,
+    /// This request's client-supplied limit ([`SPEND_LIMIT_HEADER`]), if any.
+    /// Set per request; `None` at construction.
+    request_spend_limit_usd: Option<f64>,
     /// Per-router cache of `provider_tool`-marked listings. On `Ctx`
     /// rather than a process-global so each serve env (and each test
     /// router) resolves its own marketplace's tools.
@@ -221,6 +230,7 @@ fn router_with_config(state: McpState, timeout: Duration, poll: Duration, cap: f
         can_spend: false,
         key_id: None,
         spend_cap_usd: cap,
+        request_spend_limit_usd: None,
         listing_tools: Arc::new(OnceCell::new()),
     };
     Router::new()
@@ -1056,13 +1066,36 @@ pub(crate) fn read_key(
 /// fallback (`OWALLET_V1_SPEND_CAP_USD` env override or
 /// [`DEFAULT_SPEND_CAP_USD`]).
 fn effective_spend_cap(ctx: &Ctx) -> f64 {
-    ctx.mcp
+    let wallet_cap = ctx
+        .mcp
         .db
         .lock()
         .ok()
         .and_then(|db| db.read_spend_cap_usd_cents().ok().flatten())
         .map(|cents| cents as f64 / 100.0)
-        .unwrap_or(ctx.spend_cap_usd)
+        .unwrap_or(ctx.spend_cap_usd);
+    // A client limit only ever narrows the allowance.
+    match ctx.request_spend_limit_usd {
+        Some(limit) => wallet_cap.min(limit.max(0.0)),
+        None => wallet_cap,
+    }
+}
+
+/// Parse [`SPEND_LIMIT_HEADER`]. Absent → `Ok(None)`; present but not a
+/// finite number → an error rather than silently ignoring a limit the
+/// client meant to impose.
+fn request_spend_limit(headers: &HeaderMap) -> Result<Option<f64>, OpenAiError> {
+    let Some(raw) = headers.get(SPEND_LIMIT_HEADER) else {
+        return Ok(None);
+    };
+    raw.to_str()
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .map(Some)
+        .ok_or_else(|| {
+            OpenAiError::InvalidRequest(format!("{SPEND_LIMIT_HEADER} must be a number of USD"))
+        })
 }
 
 /// `Some(refusal)` when the key's daily budget is spent. Checked at
@@ -1646,12 +1679,30 @@ async fn chat_completions(
         Ok(auth) => auth,
         Err(e) => return e.into_response(),
     };
+    let request_spend_limit_usd = match request_spend_limit(&headers) {
+        Ok(limit) => limit,
+        Err(e) => return e.into_response(),
+    };
     let ctx = Ctx {
         mcp,
         can_spend,
         key_id,
+        request_spend_limit_usd,
         ..ctx
     };
+    // The client says this request may spend nothing (e.g. a conversation
+    // whose budget is used up): refuse before any order — each chat turn is
+    // itself a paid order.
+    if let Some(limit) = ctx.request_spend_limit_usd {
+        if limit <= 0.0 {
+            return OpenAiError::PaymentRequired(
+                "spending limit reached: the client allows this request no further spend \
+                 (raise the conversation budget to continue)"
+                    .into(),
+            )
+            .into_response();
+        }
+    }
     // The daily budget bounds *everything* the key costs — each chat turn
     // is itself a paid order — so an exhausted key refuses cleanly before
     // any order is placed rather than erroring mid-conversation.
@@ -1896,6 +1947,11 @@ pub(crate) struct TurnUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
     charged_cents: i64,
+    /// What the wallet spending tools moved during the request (credit
+    /// purchases and redemptions), separate from `charged_cents` — the
+    /// request's own operating cost. Reported so a client tracking a budget
+    /// can count money that left the wallet, not just inference.
+    wallet_spent_cents: i64,
 }
 
 impl TurnUsage {
@@ -1927,7 +1983,14 @@ impl TurnUsage {
             "total_tokens": self.prompt_tokens.saturating_add(self.completion_tokens),
             "cost": self.charged_cents as f64 / 100.0,
             "charged_cents": self.charged_cents,
+            "wallet_spent_cents": self.wallet_spent_cents,
         })
+    }
+
+    /// Carry the request's wallet-tool spend onto the reported usage.
+    fn with_wallet_spend(mut self, ledger: &SpendLedger) -> Self {
+        self.wallet_spent_cents = (ledger.spent_usd * 100.0).round() as i64;
+        self
     }
 }
 
@@ -2199,7 +2262,7 @@ async fn run_agentic_loop(
                 model: last_model,
                 order_id,
                 tool_calls: Vec::new(),
-                usage,
+                usage: usage.with_wallet_spend(&ledger),
             });
         }
 
@@ -2259,7 +2322,7 @@ async fn run_agentic_loop(
         model: last_model,
         order_id,
         tool_calls: Vec::new(),
-        usage,
+        usage: usage.with_wallet_spend(&ledger),
     })
 }
 
@@ -2686,7 +2749,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
 
             if delivered.tool_calls.is_empty() {
                 yield Ok(chunk_event(&response_id, &last_model, json!({}), Some("stop")));
-                yield Ok(usage_event(&response_id, &last_model, usage));
+                yield Ok(usage_event(&response_id, &last_model, usage.with_wallet_spend(&ledger)));
                 yield Ok(Event::default().data("[DONE]"));
                 return;
             }
@@ -2934,7 +2997,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             return;
         }
         yield Ok(chunk_event(&response_id, &last_model, json!({}), Some("stop")));
-        yield Ok(usage_event(&response_id, &last_model, usage));
+        yield Ok(usage_event(&response_id, &last_model, usage.with_wallet_spend(&ledger)));
         yield Ok(Event::default().data("[DONE]"));
     };
     Sse::new(stream).into_response()
@@ -5339,6 +5402,116 @@ mod tests {
             body["choices"][0]["message"]["content"],
             "That exceeds this request's spending allowance."
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spend_limit_header_lowers_the_request_cap() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        // $10 fits the built-in $20 cap but not the client's $5 limit —
+        // expect(0) proves the header refused the spend.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/acme/purchase"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "order_id": "never", "order_url": "never"
+            })))
+            .expect(0)
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_1", "buy_credits",
+                        r#"{"seller_slug": "acme", "amount_usd": 10.0}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-1", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content(
+                        "That exceeds this conversation's budget.", "openai/gpt-5-mini", false
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server_with_scopes(seeded_state(&overpay.uri(), &tmp), "chat spend");
+        let res = s
+            .post("/chat/completions")
+            .add_header(SPEND_LIMIT_HEADER, "5")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "load ten dollars"}],
+            }))
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "That exceeds this conversation's budget."
+        );
+        assert_eq!(body["usage"]["wallet_spent_cents"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zero_spend_limit_refuses_before_any_order() {
+        // No marketplace mocks: any order attempt would fail differently.
+        let overpay = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+        let s = test_server_with_scopes(seeded_state(&overpay.uri(), &tmp), "chat spend");
+        let res = s
+            .post("/chat/completions")
+            .add_header(SPEND_LIMIT_HEADER, "0")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+            }))
+            .await;
+        res.assert_status(StatusCode::PAYMENT_REQUIRED);
+        let body: Value = res.json();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("spending limit reached"));
+        assert!(overpay.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_spend_limit_is_rejected_not_ignored() {
+        let overpay = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+        let s = test_server_with_scopes(seeded_state(&overpay.uri(), &tmp), "chat spend");
+        let res = s
+            .post("/chat/completions")
+            .add_header(SPEND_LIMIT_HEADER, "five dollars")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+            }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn usage_reports_what_the_wallet_tools_spent() {
+        let mut ledger = SpendLedger::new(20.0);
+        ledger.try_spend(1.25).unwrap();
+        ledger.record(0.5);
+        let usage = TurnUsage::default().with_wallet_spend(&ledger).to_json();
+        assert_eq!(usage["wallet_spent_cents"], 175);
+        assert_eq!(usage["charged_cents"], 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
