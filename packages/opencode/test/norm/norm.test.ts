@@ -291,3 +291,11 @@ test("overpay-authorized marker merges with the auto-setup marker", async () => 
   await Norm.recordOverpayAuthorized(true)
   expect(await Norm.readOverpayAuthorized()).toBe(true)
 })
+
+test("isOwalletErrorText recognises owallet's in-stream error marker", () => {
+  // Exactly what the title generator received when the wallet had no credits.
+  expect(Norm.isOwalletErrorText('\n\n[owallet error] HTTP 422: {"error":"No available credits for this seller"}')).toBe(true)
+  expect(Norm.isOwalletErrorText("[owallet error] no Overpay credits")).toBe(true)
+  expect(Norm.isOwalletErrorText("Fixing the owallet error handler")).toBe(false)
+  expect(Norm.isOwalletErrorText("Debug session")).toBe(false)
+})
