@@ -1,7 +1,7 @@
 <h1 align="center">norm</h1>
 <p align="center">Independent coding agent: no credit card required.</p>
 
-<img width="1208" height="637" alt="Screenshot 2026-08-19 at 12 00 27 PM" src="https://github.com/user-attachments/assets/e4b5f572-b51d-4bdf-b77f-3f64556aa8c9" />
+<img width="1208" height="637" alt="norm running in a terminal, with the owallet sidebar showing wallet balances" src=".github/assets/screenshot.png" />
 
 ---
 
@@ -11,7 +11,14 @@ Norm buys what he needs to accomplish whatever you ask him to do. Even his own e
 
 Norm is not a human, so he cannot have a bank account. He pays for his expenses using cryptocurrency.
 
-Not many businesses accept crypto yet, so Norm shops at Overpay.com to pay for things like servers, domain names, and even the cost of his own thinking - something known as "AI inference."
+Not many businesses accept crypto yet, so Norm shops at Overpay to pay for things like servers, domain names, and even the cost of his own thinking - something known as "AI inference."
+
+> [!IMPORTANT]
+> Until Overpay opens to the public, norm ships pointed at Overpay's
+> **staging** environment: <https://overpay-eykm.onrender.com>. Create your
+> account there — an account on `overpay.com` is a different environment and
+> norm will not see it. `NORM_OWALLET_ENV=prod` switches to production once
+> it is open.
 
 This page describes how to wake up Norm on your computer, so he can start helping you out with whatever you need.
 
@@ -29,14 +36,9 @@ Norm is a fork of [opencode](https://opencode.ai), the open source AI coding age
 curl -fsSL https://raw.githubusercontent.com/fathom-x/norm/main/install | bash
 ```
 
-> [!NOTE]
-> While this repo is private, both the script fetch and the release download need a token with repo read access:
->
-> ```bash
-> curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
->   https://raw.githubusercontent.com/fathom-x/norm/main/install \
->   | GITHUB_TOKEN=$GITHUB_TOKEN bash
-> ```
+The installer downloads the norm binary and a matching owallet into
+`~/.norm/bin` and adds it to your PATH. To try a throwaway copy instead, see
+[Trying it without touching your wallet](#trying-it-without-touching-your-wallet).
 
 ### Getting started
 
@@ -66,6 +68,19 @@ before funding the wallet), export it explicitly:
 ```bash
 owallet export key --format mnemonic
 ```
+
+### Funding the wallet
+
+Norm pays for his own inference, so a connected wallet still needs a balance
+before he can answer anything:
+
+```bash
+owallet account          # balances + your Base USDC and Zcash receive addresses
+owallet credits          # load marketplace credits via a Lightning invoice
+```
+
+Sending USDC (on Base) or ZEC to the addresses `owallet account` prints funds
+the wallet. `owallet list` shows what the marketplace currently sells.
 
 If you use your own (non-bundled) owallet install instead, norm falls back
 to offering the manual steps interactively (`owallet init` +
@@ -109,7 +124,18 @@ This is used internally and can be invoked using `@general` in messages.
 
 ### Documentation
 
-Norm keeps opencode's configuration surface (`opencode.json`, `.opencode/` dirs, `OPENCODE_*` env vars), so the [opencode docs](https://opencode.ai/docs) apply. For the norm layer itself — the Overpay provider, the owallet MCP server, and its env knobs — see [CLAUDE.md](CLAUDE.md) and [owallet/README.md](owallet/).
+Norm keeps opencode's configuration surface (`opencode.json`, `.opencode/` dirs, `OPENCODE_*` env vars), so the [opencode docs](https://opencode.ai/docs) apply. For the norm layer itself — the Overpay provider, the owallet MCP server, and its env knobs — see [owallet/README.md](owallet/README.md). The norm layer adds these environment variables:
+
+| Variable | Effect |
+| --- | --- |
+| `OWALLET_PASSWORD` | Wallet admin password. Export it to skip the launch prompt. |
+| `NORM_HOME` | Put everything norm owns under one directory (see above). |
+| `NORM_OWALLET_ENV` | `staging` (default), `prod`, or `dev` — picks the Overpay environment and owallet port. |
+| `NORM_OWALLET_URL` | Point at an owallet server explicitly. Ignored under `NORM_HOME`. |
+| `NORM_DISABLE=1` | Turn the norm layer off and run as plain opencode. |
+| `NORM_DEBUG=1` | Bootstrap diagnostics on stderr. |
+
+Maintainer notes (release process, upstream syncs, internals) live in [CLAUDE.md](CLAUDE.md).
 
 ### Contributing
 

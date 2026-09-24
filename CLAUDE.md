@@ -118,14 +118,9 @@ PATH):
 curl -fsSL https://raw.githubusercontent.com/fathom-x/norm/main/install | bash
 ```
 
-While the repo is private, both the script fetch and the release
-download need a token with repo read access:
-
-```bash
-curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-  https://raw.githubusercontent.com/fathom-x/norm/main/install \
-  | GITHUB_TOKEN=$GITHUB_TOKEN bash
-```
+The repository and its releases are public — no token needed. `GITHUB_TOKEN` /
+`GH_TOKEN` are still honoured by `install` (they raise the GitHub API rate
+limit).
 
 Releases are produced by `.github/workflows/norm-release.yml` on bare
 `v*` tags: one ubuntu runner cross-compiles every target via
