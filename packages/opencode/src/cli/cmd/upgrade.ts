@@ -9,7 +9,7 @@ export const UpgradeCommand = {
   // norm: `update` is the same command — half of muscle memory types one,
   // half the other (yargs aliases share the builder and handler).
   aliases: ["update"],
-  describe: "upgrade opencode to the latest or a specific version",
+  describe: "upgrade norm to the latest or a specific version",
   builder: (yargs: Argv) => {
     return yargs
       .positional("target", {
