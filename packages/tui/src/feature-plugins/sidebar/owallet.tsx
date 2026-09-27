@@ -2,6 +2,7 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
 import { createSignal, For, onCleanup, Show } from "solid-js"
 import { Global } from "@opencode-ai/core/global"
+import { NormBudget } from "@opencode-ai/core/norm-budget"
 import path from "node:path"
 import fs from "node:fs/promises"
 import open from "open"
@@ -155,6 +156,84 @@ function usd(value: number | null | undefined) {
   return `$${value.toFixed(2)}`
 }
 
+/** The session the TUI is showing, if any. */
+function currentSessionID(api: TuiPluginApi): string | undefined {
+  const current = api.route.current
+  return current.name === "session" && "params" in current ? (current.params?.sessionID as string | undefined) : undefined
+}
+
+/** TUI-side SessionAccess over the plugin's (v2) SDK client — same totals
+ * the server plugin enforces, subagent sessions included. */
+function sessionAccess(api: TuiPluginApi): NormBudget.SessionAccess {
+  return {
+    async parentOf(sessionID) {
+      const res: any = await api.client.session.get({ sessionID })
+      return res?.data?.parentID || undefined
+    },
+    async childrenOf(sessionID) {
+      const res: any = await api.client.session.children({ sessionID })
+      return (res?.data ?? []).map((s: any) => s.id).filter((id: unknown) => typeof id === "string")
+    },
+    async costOf(sessionID) {
+      const res: any = await api.client.session.messages({ sessionID })
+      return (res?.data ?? []).reduce(
+        (sum: number, m: any) => sum + (m?.info?.role === "assistant" && Number.isFinite(m.info.cost) ? m.info.cost : 0),
+        0,
+      )
+    },
+  }
+}
+
+/** `/budget`: show and change the current conversation's spending limit. */
+async function openBudgetDialog(api: TuiPluginApi) {
+  const sessionID = currentSessionID(api)
+  if (!sessionID) {
+    api.ui.toast({ variant: "info", message: "Open a conversation first — /budget sets that conversation's limit." })
+    return
+  }
+  const access = sessionAccess(api)
+  const current = await NormBudget.status(access, sessionID).catch(() => undefined)
+  if (!current) {
+    api.ui.toast({ variant: "error", message: "Couldn't read this conversation's spending." })
+    return
+  }
+  const DialogPrompt = api.ui.DialogPrompt
+  api.ui.dialog.replace(() => (
+    <DialogPrompt
+      title="Conversation budget"
+      description={() => (
+        <text>
+          Spent {usd(current.spent)} of {NormBudget.format(current.budget)} in this conversation. Enter a new limit
+          in USD, or "off" for none. The ${NormBudget.DEFAULT_DAILY_BUDGET_USD}/day cap on Norm's key still applies.
+        </text>
+      )}
+      placeholder="e.g. 5"
+      value={current.budget === null ? "off" : String(current.budget)}
+      onConfirm={(value) => {
+        const next = NormBudget.parse(value)
+        if (next === undefined) {
+          api.ui.toast({ variant: "error", message: `Not a budget: "${value}". Try 5, 2.50, or off.` })
+          return
+        }
+        void NormBudget.set(current.root, next).then(
+          () => {
+            api.ui.dialog.clear()
+            api.ui.toast({
+              variant: "success",
+              message:
+                next === null
+                  ? "No limit for this conversation (daily cap still applies)."
+                  : `Budget for this conversation: ${NormBudget.format(next)}.`,
+            })
+          },
+          () => api.ui.toast({ variant: "error", message: "Couldn't save the budget." }),
+        )
+      }}
+      onCancel={() => api.ui.dialog.clear()}
+    />
+  ))
+}
+
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const base = owalletUrl()
@@ -193,6 +272,19 @@ function View(props: { api: TuiPluginApi }) {
   const waiting = () => status() === undefined
   const error = () => stateLine(outcome())
 
+  const [chatBudget, setChatBudget] = createSignal<NormBudget.Status>()
+  const refreshChatBudget = () => {
+    const sessionID = currentSessionID(props.api)
+    if (!sessionID) return setChatBudget(undefined)
+    void NormBudget.status(sessionAccess(props.api), sessionID).then(
+      (next) => !disposed && setChatBudget(next),
+      () => {},
+    )
+  }
+  refreshChatBudget()
+  const chatBudgetTimer = setInterval(refreshChatBudget, 5_000)
+  onCleanup(() => clearInterval(chatBudgetTimer))
+
   const needsLogin = () => status()?.overpay_connected === false
   // Every model — ":free" ones included — is paid by redeeming Overpay
   // credits, so a linked wallet with none can't answer a single prompt; the
@@ -217,6 +309,21 @@ function View(props: { api: TuiPluginApi }) {
         <text fg={theme().warning}>no Overpay credits — prompts will fail until you load some:</text>
         <text fg={theme().warning}>  owallet {owalletEnvFlag()}credits load --amount-cents 500 --wait</text>
         <text fg={theme().textMuted}>  (Lightning; or top up on the Overpay site below)</text>
+      </Show>
+      <Show when={chatBudget()}>
+        <Show
+          when={chatBudget()!.budget !== null && chatBudget()!.remaining === 0}
+          fallback={
+            <text fg={theme().textMuted}>
+              this chat <span style={{ fg: theme().text }}>{usd(chatBudget()!.spent)}</span> /{" "}
+              {NormBudget.format(chatBudget()!.budget)} · /budget
+            </text>
+          }
+        >
+          <text fg={theme().warning}>
+            this chat's {NormBudget.format(chatBudget()!.budget)} budget is used — /budget to raise it
+          </text>
+        </Show>
       </Show>
       <Show when={coreCredits()}>
         <text fg={theme().textMuted}>
@@ -290,6 +397,20 @@ function View(props: { api: TuiPluginApi }) {
 
 const tui: TuiPlugin = async (api) => {
   if (normDisabled()) return
+  api.keymap.registerLayer({
+    commands: [
+      {
+        name: "norm.budget",
+        title: "Set conversation budget",
+        slashName: "budget",
+        category: "Session",
+        namespace: "palette",
+        run() {
+          void openBudgetDialog(api)
+        },
+      },
+    ],
+  })
   api.slots.register({
     order: 250,
     slots: {

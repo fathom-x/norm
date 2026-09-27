@@ -377,9 +377,14 @@ fn gate_provider_key(state: &McpState, name: &str, args: &Value) -> Result<Optio
     if matches!(name, "send_usdc" | "send_zcash") {
         return Err(ToolError::ProviderKeySends);
     }
+    // `load_core_credits` is deliberately *not* spend-scoped: it only mints a
+    // Lightning invoice that the user pays from their own Lightning wallet —
+    // nothing leaves this wallet. Gating it left a chat-scoped key (what norm
+    // mints by default) with no in-chat way to top up the very credits that
+    // pay for chat.
     let spend_scoped = matches!(
         name,
-        "create_order" | "pay_order" | "redeem_merchant_credits" | "buy" | "load_core_credits"
+        "create_order" | "pay_order" | "redeem_merchant_credits" | "buy"
     );
     if spend_scoped && !state.provider_key_can_spend {
         return Err(ToolError::ProviderKeyScope);
