@@ -576,7 +576,13 @@ export async function firstRunWalletSetup(
   if (!process.stdin.isTTY || !process.stdout.isTTY) return
   if (!(await needsWalletSetup())) return
   const bin = (await owalletBinary())!
-  if (bin === bundledOwalletPath()) return autoWalletSetup(bin, askSecret)
+  // Inside a NORM_HOME sandbox every wallet is throwaway and the binary is
+  // picked without prompting, so the zero-question path applies even when the
+  // binary came from PATH rather than <NORM_HOME>/bin. Without this, pointing
+  // NORM_HOME at an empty directory silently exercises the *interactive*
+  // first-run instead of the one real users get — a sandbox that quietly
+  // tests the wrong code path is worse than no sandbox.
+  if (bin === bundledOwalletPath() || normHome()) return autoWalletSetup(bin, askSecret)
   process.stderr.write(
     [
       "",
@@ -1117,4 +1123,32 @@ export async function bootstrap(): Promise<void> {
   await ensureProviderKey().catch((error) => {
     debug("provider key provisioning failed:", error)
   })
+  await noteSetupIncomplete().catch(() => {})
+}
+
+/**
+ * First-run setup (wallet creation, the Overpay connect) is driven from the TUI
+ * command, before it takes the screen — it needs a terminal to prompt on. Every
+ * other entry point (`norm run`, `norm serve`, acp, github) skips it silently
+ * and, with no wallet or no Overpay link, fails later with a bare provider
+ * error that names neither cause nor cure. Say it once here instead. Only a
+ * note: these paths deliberately never prompt.
+ */
+async function noteSetupIncomplete(): Promise<void> {
+  // The interactive launch path prompts for all of this itself, so saying it
+  // there would just be noise ahead of the real prompt.
+  if (process.stdin.isTTY && process.stdout.isTTY) return
+  if (await needsWalletSetup()) {
+    process.stderr.write(
+      "[norm] no owallet wallet yet — run `norm` once (interactively) to set one up,\n" +
+        "       or `owallet init` and `owallet generate` yourself.\n",
+    )
+    return
+  }
+  if ((await readOverpayAuthorized()) === false) {
+    process.stderr.write(
+      "[norm] this wallet is not linked to an Overpay account yet, so the overpay\n" +
+        "       provider will reject requests — run `owallet authorize` (or launch `norm`).\n",
+    )
+  }
 }
