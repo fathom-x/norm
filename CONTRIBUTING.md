@@ -29,10 +29,21 @@ Want to take on an issue? Leave a comment and a maintainer may assign it to you 
 New providers shouldn't require many if ANY code changes, but if you want to add support for a new provider first make a PR to:
 https://github.com/anomalyco/models.dev
 
-## Developing OpenCode
+## Developing norm
 
-- Requirements: Bun 1.3+
-- Install dependencies and start the dev server from the repo root:
+Requirements:
+
+- **Bun 1.3.14** — the version `packageManager` pins.
+- **Node.js 20+ with `node-gyp` on PATH.** Several dependencies
+  (`tree-sitter-powershell`, `node-pty`) build native code through node-gyp, so
+  a bun-only machine fails at install with
+  `error: Executable not found in $PATH: "node-gyp"`. Install Node, then
+  `npm i -g node-gyp`.
+- **A C/C++ toolchain and Python 3** for those same native builds
+  (`make`, `g++`/`cc`; on Debian/Ubuntu: `apt install build-essential python3`).
+- **Rust 1.81+** only if you are working in `owallet/` (see `owallet/CLAUDE.md`).
+
+Install dependencies and start the dev server from the repo root:
 
   ```bash
   bun install

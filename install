@@ -2,13 +2,11 @@
 # norm installer — downloads the right binary from fathom-x/norm GitHub
 # releases and puts it on your PATH.
 #
-# Public repo / release:
+# Install:
 #   curl -fsSL https://raw.githubusercontent.com/fathom-x/norm/main/install | bash
 #
-# While the repo is private, pass a token with repo read access:
-#   curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
-#     https://raw.githubusercontent.com/fathom-x/norm/main/install \
-#     | GITHUB_TOKEN=$GITHUB_TOKEN bash
+# The repo and its releases are public. GITHUB_TOKEN / GH_TOKEN are optional and
+# only raise the GitHub API rate limit.
 set -euo pipefail
 
 APP=norm
@@ -31,8 +29,8 @@ Options:
         --no-modify-path    Don't modify shell config files (.zshrc, .bashrc, etc.)
 
 Environment:
-    GITHUB_TOKEN / GH_TOKEN Token used for API + asset downloads (required
-                            while the repository is private)
+    GITHUB_TOKEN / GH_TOKEN Optional token for API + asset downloads; only
+                            needed to raise the GitHub API rate limit
     VERSION                 Same as --version
     NORM_HOME               Install everything under this directory instead of
                             ~/.norm/bin (implies --no-modify-path). Export the
@@ -196,7 +194,7 @@ else
         # List releases (newest first) and take the newest bare v* norm tag.
         releases=$(api "https://api.github.com/repos/$REPO/releases?per_page=100") || {
             echo -e "${RED}Failed to fetch releases from $REPO${NC}"
-            [ -z "$token" ] && echo -e "${MUTED}If the repository is private, set GITHUB_TOKEN.${NC}"
+            [ -z "$token" ] && echo -e "${MUTED}If you are being rate limited by the GitHub API, set GITHUB_TOKEN.${NC}"
             exit 1
         }
         latest_tag=$(echo "$releases" | tr ',' '\n' | sed -n 's/.*"tag_name": *"\(v[0-9][^"]*\)".*/\1/p' | head -1)
