@@ -56,6 +56,7 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { Norm } from "@/norm/norm"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -245,7 +246,9 @@ const layer = Layer.effect(
         .split("\n")
         .map((line) => line.trim())
         .find((line) => line.length > 0)
-      if (!cleaned) return
+      // norm: an owallet failure (e.g. no Overpay credits) arrives as reply
+      // text; keep the default title so it isn't stuck on the error message.
+      if (!cleaned || Norm.isOwalletErrorText(cleaned)) return
       const t = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
       yield* sessions
         .setTitle({ sessionID: input.session.id, title: t })

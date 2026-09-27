@@ -202,6 +202,18 @@ function homeDir() {
   return process.env.HOME || os.homedir()
 }
 
+/**
+ * owallet reports a failure that happens mid-stream as ordinary assistant
+ * text starting with this marker (its HTTP status is already committed to
+ * 200 by then). Callers that treat the reply as data — the session title
+ * generator — must not mistake it for content.
+ */
+export const OWALLET_ERROR_MARKER = "[owallet error]"
+
+export function isOwalletErrorText(text: string): boolean {
+  return text.trimStart().startsWith(OWALLET_ERROR_MARKER)
+}
+
 /** Where owallet keeps its encrypted DB (mirrors `owallet_db::default_db_path`). */
 export function owalletDbPath() {
   if (process.env.OWALLET_DB_PATH) return process.env.OWALLET_DB_PATH

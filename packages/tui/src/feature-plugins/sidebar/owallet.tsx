@@ -42,6 +42,15 @@ function sandboxPort(root: string): string {
   return String(SANDBOX_PORT_BASE + (hash % SANDBOX_PORT_SPAN))
 }
 
+/** The `owallet` CLI selector matching the environment norm talks to. Plain
+ * `owallet` targets prod, so a bare `owallet credits load` on a staging
+ * install would load credits into a different Overpay environment. */
+function owalletEnvFlag() {
+  const env = process.env.NORM_OWALLET_ENV
+  const resolved = env === "prod" || env === "dev" || env === "staging" ? env : DEFAULT_ENV
+  return resolved === "prod" ? "" : `--${resolved} `
+}
+
 function owalletUrl() {
   // A NORM_HOME sandbox is absolute: its own port, ambient NORM_OWALLET_URL
   // ignored (norm.ts prints the notice).
@@ -185,6 +194,14 @@ function View(props: { api: TuiPluginApi }) {
   const error = () => stateLine(outcome())
 
   const needsLogin = () => status()?.overpay_connected === false
+  // Every model — ":free" ones included — is paid by redeeming Overpay
+  // credits, so a linked wallet with none can't answer a single prompt; the
+  // first attempt fails with a raw 422. The status poll already knows the
+  // balance, so say it up front, with the exact command for this env.
+  const spendableCents = () =>
+    (status()?.merchant_credits ?? []).reduce((sum, row) => sum + Math.max(0, row.balance_cents ?? 0), 0)
+  const needsCredits = () =>
+    !needsLogin() && status()?.merchant_credits !== undefined && spendableCents() === 0
 
   return (
     <box>
@@ -195,6 +212,11 @@ function View(props: { api: TuiPluginApi }) {
           so first, ahead of every balance line. */}
       <Show when={needsLogin()}>
         <text fg={theme().warning}>log in to Overpay to get started — owallet authorize</text>
+      </Show>
+      <Show when={needsCredits()}>
+        <text fg={theme().warning}>no Overpay credits — prompts will fail until you load some:</text>
+        <text fg={theme().warning}>  owallet {owalletEnvFlag()}credits load --amount-cents 500 --wait</text>
+        <text fg={theme().textMuted}>  (Lightning; or top up on the Overpay site below)</text>
       </Show>
       <Show when={coreCredits()}>
         <text fg={theme().textMuted}>
@@ -224,7 +246,7 @@ function View(props: { api: TuiPluginApi }) {
           </text>
         )}
       </For>
-      <Show when={status()?.merchant_credits !== undefined && credits().length === 0}>
+      <Show when={!needsCredits() && status()?.merchant_credits !== undefined && credits().length === 0}>
         <text fg={theme().textMuted}>no merchant credits</text>
       </Show>
       <Show when={budget()}>
