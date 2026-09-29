@@ -354,6 +354,117 @@ async fn authorize_drives_full_pkce_flow_against_fake_rails() {
     assert_eq!(token.as_deref(), Some("tok_test"));
 }
 
+/// Remote login (e.g. over SSH): the browser runs on another machine, so its
+/// redirect to 127.0.0.1 never reaches this one. The user pastes the address
+/// the browser landed on into the terminal instead, and the login completes
+/// without the loopback callback ever being hit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn authorize_completes_from_a_pasted_callback_address() {
+    use std::io::Write;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/clients"))
+        .respond_with(
+            ResponseTemplate::new(201).set_body_json(json!({"client_id": "client_test_id"})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "tok_pasted", "token_type": "Bearer",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/account"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"username": "alice"})))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.db");
+    let server_uri = server.uri();
+    let config = write_test_config(tmp.path(), &server_uri);
+    let db_path2 = db_path.clone();
+    tokio::task::spawn_blocking(move || init_and_import(&db_path2))
+        .await
+        .unwrap();
+
+    let mut child = std::process::Command::new(cargo_bin("owallet"))
+        .env("OWALLET_DB_PATH", &db_path)
+        .env("OWALLET_PASSWORD", "pw")
+        .env("BROWSER", "/bin/true")
+        .arg("--config")
+        .arg(&config)
+        .arg("authorize")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut accum = String::new();
+    let mut auth_url = None;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        let mut line = String::new();
+        let n = tokio::task::block_in_place(|| reader.read_line(&mut line)).unwrap_or(0);
+        if n == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        accum.push_str(&line);
+        let trimmed = line.trim();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            auth_url = Some(trimmed.to_string());
+            break;
+        }
+    }
+    let auth_url = auth_url.unwrap_or_else(|| panic!("authorize URL not printed:\n{accum}"));
+    let pairs: std::collections::HashMap<_, _> = url::Url::parse(&auth_url)
+        .unwrap()
+        .query_pairs()
+        .into_owned()
+        .collect();
+    let state = pairs.get("state").cloned().unwrap();
+    let redirect_uri = pairs.get("redirect_uri").cloned().unwrap();
+
+    // A wrong-attempt paste first: must be refused without ending the login.
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "{redirect_uri}?code=NOPE&state=some-other-attempt").unwrap();
+    // Then the real one, exactly as a browser address bar shows it.
+    writeln!(stdin, "{redirect_uri}?code=THE_CODE&state={state}").unwrap();
+    stdin.flush().unwrap();
+
+    let mut rest = String::new();
+    tokio::task::block_in_place(|| {
+        let _ = reader.read_to_string(&mut rest);
+    });
+    accum.push_str(&rest);
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "failed.\nstdout:\n{accum}\nstderr:\n{stderr}"
+    );
+    assert!(accum.contains("Authorized"), "stdout: {accum}");
+    assert!(
+        stderr.contains("different login attempt"),
+        "stderr: {stderr}"
+    );
+
+    let host = server_uri.trim_end_matches('/').to_string();
+    let mut db = owallet_db::Database::open(&db_path).unwrap();
+    assert!(db.unlock("pw").unwrap());
+    let npub = db.read_default_npub().unwrap().unwrap();
+    assert_eq!(
+        db.read_token(&npub, &host).unwrap().as_deref(),
+        Some("tok_pasted")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // login (needs a stored token)
 // ---------------------------------------------------------------------------

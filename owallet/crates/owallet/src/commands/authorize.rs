@@ -82,7 +82,7 @@ pub fn run() -> Result<()> {
 
         let app = Router::new()
             .route("/callback", get(callback))
-            .with_state(inbound);
+            .with_state(inbound.clone());
 
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -90,6 +90,15 @@ pub fn run() -> Result<()> {
 
         println!("Opening the Overpay authorize URL in your browser…");
         println!("If it doesn't open automatically, visit:\n  {auth_url}");
+        println!();
+        println!("Logging in from another device (e.g. this is an SSH session)?");
+        println!("After you approve, your browser lands on a page that fails to load —");
+        println!("its address starts with {redirect_uri}. Paste that whole address");
+        println!("here (or just its `code` value) and press Enter.");
+        // Paste path: runs alongside the loopback callback; whichever
+        // delivers first wins. A plain std thread (not spawn_blocking) so a
+        // read still pending on stdin never holds the process open.
+        spawn_paste_reader(inbound.clone());
         // Detached: never wait for the browser-opener to exit. On a
         // current-thread runtime a blocking `open::that` would monopolise the
         // only thread and starve the callback server task below — deadlocking
@@ -147,6 +156,95 @@ fn derive_private_key(seed: &str) -> Result<PrivateKey> {
     }
 }
 
+// ---- Pasted callback (remote / headless login) ----
+
+/// Read pasted callback URLs (or bare codes) from stdin until one is valid
+/// or the flow has already completed. Invalid input explains itself and
+/// keeps waiting rather than failing the login; EOF (no terminal attached)
+/// just ends the reader and leaves the loopback callback to finish.
+fn spawn_paste_reader(inbound: Arc<InboundState>) {
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match stdin.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            match parse_pasted(&line, &inbound.expected_state) {
+                Ok(result) => {
+                    if let Some(tx) = inbound.tx.blocking_lock().take() {
+                        let _ = tx.send(result);
+                    }
+                    return;
+                }
+                Err(why) => eprintln!("{why}"),
+            }
+        }
+    });
+}
+
+/// Interpret what the user pasted: the full callback address, just its
+/// query string, or the bare `code`. A pasted `state` must match this
+/// login's (CSRF protection, same as the loopback handler); a bare code
+/// carries no state, which is still safe — PKCE binds the code to this
+/// process's verifier, so a code from anywhere else cannot be exchanged.
+fn parse_pasted(input: &str, expected_state: &str) -> std::result::Result<CallbackResult, String> {
+    let text = input.trim().trim_matches(|c| c == '"' || c == '\'');
+    if text.contains("code_challenge=") {
+        return Err(
+            "That's the login address itself — open it in a browser, approve, then paste the \
+             address the browser ends up on."
+                .into(),
+        );
+    }
+    let query = match text.split_once('?') {
+        Some((_, q)) => Some(q),
+        None if text.contains('=') => Some(text),
+        None => None,
+    };
+    let Some(query) = query else {
+        let looks_like_code = text.len() >= 16 && !text.chars().any(char::is_whitespace);
+        return if looks_like_code {
+            Ok(CallbackResult::Code(text.to_string()))
+        } else {
+            Err("That doesn't look like the callback address or a code — try again.".into())
+        };
+    };
+    let params: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(query.split('#').next().unwrap_or(query).as_bytes())
+            .into_owned()
+            .collect();
+    if let Some(err) = params.get("error") {
+        return Ok(CallbackResult::Error(format!(
+            "{err}: {}",
+            params
+                .get("error_description")
+                .map(String::as_str)
+                .unwrap_or_default()
+        )));
+    }
+    if let Some(state) = params.get("state") {
+        if state != expected_state {
+            return Err(
+                "That address is from a different login attempt (state doesn't match) — \
+                 paste the one from this login."
+                    .into(),
+            );
+        }
+    }
+    match params.get("code") {
+        Some(code) if !code.is_empty() => Ok(CallbackResult::Code(code.clone())),
+        _ => Err(
+            "No `code` in that address — paste the full address the browser ended up on.".into(),
+        ),
+    }
+}
+
 // ---- Callback handler ----
 
 enum CallbackResult {
@@ -194,4 +292,71 @@ async fn callback(
         "<h2>Authorization failed.</h2><p>See terminal output.</p>"
     };
     (StatusCode::OK, Html(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn code(r: std::result::Result<CallbackResult, String>) -> String {
+        match r {
+            Ok(CallbackResult::Code(c)) => c,
+            Ok(CallbackResult::Error(e)) => panic!("oauth error: {e}"),
+            Err(e) => panic!("rejected: {e}"),
+        }
+    }
+
+    #[test]
+    fn accepts_the_full_callback_address() {
+        let pasted = "http://127.0.0.1:43967/callback?code=DLObtVIH_Bvl&state=S1\n";
+        assert_eq!(code(parse_pasted(pasted, "S1")), "DLObtVIH_Bvl");
+    }
+
+    #[test]
+    fn accepts_just_the_query_and_quotes() {
+        assert_eq!(code(parse_pasted("'code=abc&state=S1'", "S1")), "abc");
+    }
+
+    #[test]
+    fn accepts_a_bare_code() {
+        assert_eq!(
+            code(parse_pasted("  DLObtVIH_BvlHcLzngjM  ", "S1")),
+            "DLObtVIH_BvlHcLzngjM"
+        );
+    }
+
+    #[test]
+    fn rejects_a_callback_from_another_attempt() {
+        let err = parse_pasted("http://127.0.0.1:1/callback?code=x&state=OTHER", "S1")
+            .err()
+            .unwrap();
+        assert!(err.contains("different login attempt"), "{err}");
+    }
+
+    #[test]
+    fn explains_when_the_login_url_itself_is_pasted() {
+        let err = parse_pasted(
+            "https://overpay.example/oauth/authorize?response_type=code&code_challenge=abc&state=S1",
+            "S1",
+        )
+        .err()
+        .unwrap();
+        assert!(err.contains("login address itself"), "{err}");
+    }
+
+    #[test]
+    fn surfaces_an_oauth_denial() {
+        match parse_pasted(
+            "http://127.0.0.1:1/callback?error=access_denied&state=S1",
+            "S1",
+        ) {
+            Ok(CallbackResult::Error(e)) => assert!(e.contains("access_denied")),
+            _ => panic!("expected an oauth error"),
+        }
+    }
+
+    #[test]
+    fn rejects_junk() {
+        assert!(parse_pasted("hello", "S1").is_err());
+    }
 }
