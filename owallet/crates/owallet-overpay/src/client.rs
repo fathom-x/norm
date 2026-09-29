@@ -241,6 +241,47 @@ impl OverpayClient {
             .await
     }
 
+    /// Largest delivered file [`Self::fetch_delivered_content`] reads.
+    pub const MAX_DELIVERED_CONTENT_BYTES: usize = 16 * 1024 * 1024;
+
+    /// Fetch an order's result when Rails delivered it as a file
+    /// (`delivered_content_url`, an Active Storage link) instead of inline
+    /// `delivered_content`. The link is signed, so no auth header is sent;
+    /// it must point at this marketplace's own origin (base or public URL) —
+    /// the redirect it answers with, to blob storage, is followed.
+    pub async fn fetch_delivered_content(&self, url: &str) -> Result<String, OverpayError> {
+        let target = Url::parse(url)?;
+        let same_origin = |known: &Url| {
+            known.scheme() == target.scheme()
+                && known.host_str() == target.host_str()
+                && known.port_or_known_default() == target.port_or_known_default()
+        };
+        if !same_origin(&self.base_url) && !same_origin(&self.public_url) {
+            return Err(OverpayError::Delivery(format!(
+                "refusing to fetch from {}, which is not this marketplace",
+                target.host_str().unwrap_or("an unknown host")
+            )));
+        }
+        let resp = self.http.get(target).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(OverpayError::HttpStatus {
+                status: status.as_u16(),
+                body: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let bytes = resp.bytes().await?;
+        if bytes.len() > Self::MAX_DELIVERED_CONTENT_BYTES {
+            return Err(OverpayError::Delivery(format!(
+                "file is {} bytes, over the {}-byte limit",
+                bytes.len(),
+                Self::MAX_DELIVERED_CONTENT_BYTES
+            )));
+        }
+        String::from_utf8(bytes.to_vec())
+            .map_err(|_| OverpayError::Delivery("file is not UTF-8 text".into()))
+    }
+
     pub async fn create_order(
         &self,
         listing_id: &str,

@@ -16,4 +16,7 @@ pub enum OverpayError {
     AuthRequired,
     #[error("nip98 sign: {0}")]
     Sign(String),
+    /// A delivered file could not be retrieved or was not usable.
+    #[error("delivered content: {0}")]
+    Delivery(String),
 }
