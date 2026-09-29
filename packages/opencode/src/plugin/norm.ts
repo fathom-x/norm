@@ -21,6 +21,11 @@ export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
     // sends nothing; the key's daily budget still applies either way.
     "chat.headers": async (hook, output) => {
       if (Norm.disabled() || hook.model.providerID !== Norm.PROVIDER_ID) return
+      // The conversation's key for OpenRouter's sticky routing: every turn of
+      // one session lands on the same upstream provider, so its prompt cache
+      // stays warm from the first turn. owallet never forwards it as-is — it
+      // sends an HMAC of it, and only once Overpay accepts the field.
+      output.headers["x-session-id"] = hook.sessionID
       const budget = await NormBudget.status(sessions, hook.sessionID).catch(() => undefined)
       if (!budget || budget.remaining === null) return
       output.headers[NormBudget.SPEND_LIMIT_HEADER] = budget.remaining.toFixed(2)
