@@ -285,7 +285,10 @@ async fn authorize_drives_full_pkce_flow_against_fake_rails() {
     let mut reader = BufReader::new(stdout);
     let mut accum = String::new();
     let mut auth_url: Option<String> = None;
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    // Generous: in a debug build, init + unlock (PBKDF2) for several tests
+    // running in parallel can take well over 20s before the URL prints. The
+    // deadline only bounds how long a *failing* test takes to report.
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
     while std::time::Instant::now() < deadline {
         let mut line = String::new();
         let n = tokio::task::block_in_place(|| reader.read_line(&mut line)).unwrap_or(0);
@@ -407,7 +410,10 @@ async fn authorize_completes_from_a_pasted_callback_address() {
     let mut reader = BufReader::new(child.stdout.take().unwrap());
     let mut accum = String::new();
     let mut auth_url = None;
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    // Generous: in a debug build, init + unlock (PBKDF2) for several tests
+    // running in parallel can take well over 20s before the URL prints. The
+    // deadline only bounds how long a *failing* test takes to report.
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
     while std::time::Instant::now() < deadline {
         let mut line = String::new();
         let n = tokio::task::block_in_place(|| reader.read_line(&mut line)).unwrap_or(0);
