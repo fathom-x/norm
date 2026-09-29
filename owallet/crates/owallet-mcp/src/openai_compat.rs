@@ -1895,6 +1895,12 @@ fn net_charged_cents(snap: &Value, redeemed_cents: i64) -> i64 {
 pub(crate) struct TurnUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
+    /// Prompt tokens OpenRouter served from its prompt cache — the only
+    /// signal of whether a conversation is actually hitting the cache.
+    cached_tokens: u64,
+    /// Prompt tokens written into a new cache entry (a first long turn, or a
+    /// miss after the prefix changed / routing moved providers).
+    cache_write_tokens: u64,
     charged_cents: i64,
 }
 
@@ -1915,6 +1921,10 @@ impl TurnUsage {
         self.completion_tokens = self
             .completion_tokens
             .saturating_add(delivered.completion_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(delivered.cached_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(delivered.cache_write_tokens);
     }
 
     /// OpenAI's `usage` shape plus two extensions: `cost` (USD, the
@@ -1925,6 +1935,13 @@ impl TurnUsage {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.prompt_tokens.saturating_add(self.completion_tokens),
+            // OpenAI's own shape for cache reads, which OpenAI-compatible
+            // clients (the AI SDK, so norm) already understand; the write
+            // count rides along under OpenRouter's name.
+            "prompt_tokens_details": {
+                "cached_tokens": self.cached_tokens,
+                "cache_write_tokens": self.cache_write_tokens,
+            },
             "cost": self.charged_cents as f64 / 100.0,
             "charged_cents": self.charged_cents,
         })
@@ -1940,6 +1957,8 @@ struct OpenRouterDelivered {
     tool_calls: Vec<Value>,
     prompt_tokens: u64,
     completion_tokens: u64,
+    cached_tokens: u64,
+    cache_write_tokens: u64,
 }
 
 fn extract_openrouter_delivered(snap: &Value) -> Result<OpenRouterDelivered, OpenAiError> {
@@ -1966,6 +1985,8 @@ fn extract_openrouter_delivered(snap: &Value) -> Result<OpenRouterDelivered, Ope
         // tokens rather than a guess.
         prompt_tokens: delivered_usage_tokens(&inner, "prompt_tokens"),
         completion_tokens: delivered_usage_tokens(&inner, "completion_tokens"),
+        cached_tokens: delivered_cache_tokens(&inner, "cached_tokens"),
+        cache_write_tokens: delivered_cache_tokens(&inner, "cache_write_tokens"),
     })
 }
 
@@ -1973,6 +1994,17 @@ fn delivered_usage_tokens(inner: &Value, field: &str) -> u64 {
     inner
         .pointer("/usage")
         .and_then(|usage| usage.get(field))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// OpenRouter's prompt-cache counts from the delivered usage
+/// (`usage.prompt_tokens_details.{cached_tokens,cache_write_tokens}`);
+/// zero when the upstream reports none.
+fn delivered_cache_tokens(inner: &Value, field: &str) -> u64 {
+    inner
+        .pointer("/usage/prompt_tokens_details")
+        .and_then(|details| details.get(field))
         .and_then(Value::as_u64)
         .unwrap_or(0)
 }
@@ -2949,6 +2981,44 @@ fn unix_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_carries_openrouter_prompt_cache_counts() {
+        let delivered = |cached: u64, written: u64| {
+            json!({"data": {"delivered_content": serde_json::to_string(&json!({
+                "description": "ok", "model": "deepseek/deepseek-chat", "error": false,
+                "usage": {
+                    "prompt_tokens": 2000, "completion_tokens": 5,
+                    "prompt_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written},
+                },
+            })).unwrap()}})
+        };
+        // Two turns of one request: a cache write, then a hit.
+        let mut usage = TurnUsage::default();
+        usage.add_tokens(
+            &extract_openrouter_delivered(&delivered(0, 1900))
+                .ok()
+                .unwrap(),
+        );
+        usage.add_tokens(
+            &extract_openrouter_delivered(&delivered(1900, 0))
+                .ok()
+                .unwrap(),
+        );
+        let out = usage.to_json();
+        assert_eq!(out["prompt_tokens"], 4000);
+        assert_eq!(out["prompt_tokens_details"]["cached_tokens"], 1900);
+        assert_eq!(out["prompt_tokens_details"]["cache_write_tokens"], 1900);
+
+        // A seller that reports no details yields zeros, not missing fields.
+        let bare = json!({"data": {"delivered_content": serde_json::to_string(&json!({
+            "description": "ok", "model": "m", "error": false,
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+        })).unwrap()}});
+        let mut usage = TurnUsage::default();
+        usage.add_tokens(&extract_openrouter_delivered(&bare).ok().unwrap());
+        assert_eq!(usage.to_json()["prompt_tokens_details"]["cached_tokens"], 0);
+    }
+
     use super::*;
     use axum_test::TestServer;
     use owallet_db::Database;
