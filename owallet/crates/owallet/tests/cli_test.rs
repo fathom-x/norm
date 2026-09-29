@@ -438,6 +438,30 @@ fn init_creates_owner_only_db() {
     assert_eq!(dir_mode, 0o700, "wallet dir should be owner-only");
 }
 
+/// Only a directory `init` creates is tightened: a pre-existing parent may be
+/// shared (think OWALLET_DB_PATH=/tmp/w.db), and must keep its permissions.
+#[cfg(unix)]
+#[test]
+fn init_leaves_an_existing_parent_directory_alone() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let shared = tmp.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let db = shared.join("test.db");
+    let mut cmd = Command::cargo_bin("owallet").expect("binary exists");
+    cmd.env("OWALLET_DB_PATH", &db);
+    cmd.env("OWALLET_PASSWORD", "pw");
+    cmd.env("HOME", tmp.path());
+    cmd.arg("init").assert().success();
+
+    let dir_mode = std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777;
+    assert_eq!(dir_mode, 0o755, "a pre-existing directory keeps its mode");
+    let file_mode = std::fs::metadata(&db).unwrap().permissions().mode() & 0o777;
+    assert_eq!(file_mode, 0o600, "the database itself is still owner-only");
+}
+
 /// `owallet password set` did not exist, so a wallet stored without a dashboard
 /// password could never get one.
 #[test]
