@@ -151,10 +151,16 @@ impl Database {
         }
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
+                // Only a directory created here is tightened. A pre-existing
+                // parent may be shared — OWALLET_DB_PATH=/tmp/w.db must not
+                // chmod /tmp, nor a DB in $HOME the home directory.
+                let created = !parent.exists();
                 std::fs::create_dir_all(parent).ok();
-                // The wallet directory holds encrypted seeds and tokens; keep
-                // it owner-only rather than inheriting the process umask.
-                restrict_permissions(parent, 0o700);
+                if created && parent.is_dir() {
+                    // Holds encrypted seeds and tokens: owner-only rather
+                    // than the process umask.
+                    restrict_permissions(parent, 0o700);
+                }
             }
         }
 
