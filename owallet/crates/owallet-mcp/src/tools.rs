@@ -346,7 +346,7 @@ pub async fn dispatch(
         "get_purchase" => get_purchase(state, args).await?,
         "sync_purchases" => sync_purchases(state, args).await?,
         "load_core_credits" => load_core_credits(state, args).await?,
-        other => match marketplace_tool_call(state, other, &args).await? {
+        other => match marketplace_tool_call(state, other, &args, progress).await? {
             Some(data) => data,
             None => {
                 return Err(ToolError::InvalidArg {
@@ -463,6 +463,12 @@ fn settle_provider_key_budget(
 // One-shot marketplace purchase tools — /v1's high-level roster on /mcp
 // ---------------------------------------------------------------------------
 
+/// How long a one-shot purchase polls when the MCP client did not opt into
+/// progress: under the 60s request timeout MCP clients commonly default to,
+/// so the paid order's id comes back as a pending result instead of being
+/// dropped with a client-side timeout.
+const UNSTREAMED_ONE_SHOT_TIMEOUT: Duration = Duration::from_secs(50);
+
 /// Marketplace-backed one-shot tools appended to `tools/list`:
 /// `run_python` plus every `provider_tool`-marked listing, mirroring the
 /// `/v1` endpoint's roster (and executed by the very same helpers). One
@@ -517,8 +523,20 @@ async fn marketplace_tool_call(
     state: &McpState,
     name: &str,
     args: &Value,
+    progress: Option<&ProgressSink>,
 ) -> Result<Option<Value>, ToolError> {
     use crate::openai_compat as v1;
+
+    // With progress streaming, each poll's notification resets the MCP
+    // client's request timeout, so the full /v1 deadline applies. Without
+    // it, nothing resets the client's clock (commonly 60s): stop short of
+    // it and hand back the paid order's id as a pending result, rather
+    // than let the client abandon the call and lose it.
+    let timeout = if progress.is_some_and(ProgressSink::wants_progress) {
+        v1::REQUEST_TIMEOUT
+    } else {
+        UNSTREAMED_ONE_SHOT_TIMEOUT
+    };
 
     // One-shots are operating cost, allowed for chat-scoped keys like
     // /v1's own turns — but an exhausted daily budget refuses up front,
@@ -541,10 +559,11 @@ async fn marketplace_tool_call(
             state,
             &auth,
             args,
-            v1::REQUEST_TIMEOUT,
+            timeout,
             v1::POLL_INTERVAL,
             key_id,
             &mut usage,
+            progress,
         )
         .await
         .map_err(|e| ToolError::Internal(e.message().to_string()))?;
@@ -561,10 +580,11 @@ async fn marketplace_tool_call(
         &auth,
         &tool,
         args,
-        v1::REQUEST_TIMEOUT,
+        timeout,
         v1::POLL_INTERVAL,
         key_id,
         &mut usage,
+        progress,
     )
     .await
     .map_err(|e| ToolError::Internal(e.message().to_string()))?;

@@ -241,6 +241,49 @@ impl OverpayClient {
             .await
     }
 
+    /// Download an order's offloaded `delivered_content` from the
+    /// `delivered_content_url` the order API returned in its place. Rails
+    /// moves any delivery over 4 KB to object storage and hands back a
+    /// signed ActiveStorage link, so a long chat reply or tool result only
+    /// exists behind that URL. The link is self-authorizing — no
+    /// `Authorization` header is sent, so the bearer never follows the
+    /// storage redirect off-host. Bodies over `max_bytes` are refused.
+    pub async fn fetch_delivered_content(
+        &self,
+        url: &str,
+        max_bytes: usize,
+    ) -> Result<String, OverpayError> {
+        let url = Url::parse(url)?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(OverpayError::HttpStatus {
+                status: 0,
+                body: format!(
+                    "refusing non-http delivered_content_url scheme '{}'",
+                    url.scheme()
+                ),
+            });
+        }
+        let resp = self.http.get(url).send().await?;
+        let status = resp.status();
+        let bytes = resp.bytes().await?;
+        if !status.is_success() {
+            return Err(OverpayError::HttpStatus {
+                status: status.as_u16(),
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            });
+        }
+        if bytes.len() > max_bytes {
+            return Err(OverpayError::HttpStatus {
+                status: status.as_u16(),
+                body: format!(
+                    "delivered content is {} bytes, over the {max_bytes}-byte limit",
+                    bytes.len()
+                ),
+            });
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     pub async fn create_order(
         &self,
         listing_id: &str,

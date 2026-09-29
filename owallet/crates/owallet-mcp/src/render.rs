@@ -47,10 +47,69 @@ pub fn render(tool: &str, data: &Value) -> String {
         "list_purchases" => render_purchases(data),
         "get_purchase" => render_purchase(data),
         "sync_purchases" => render_sync(data),
-        // Unknown tool name: never happens (dispatch already rejected it),
-        // but stay total and fall back to compact JSON.
-        _ => compact(data),
+        // Any other name is a one-shot marketplace purchase tool
+        // (run_python or a provider_tool listing) — dispatch rejected
+        // truly unknown names already.
+        _ => render_one_shot(data),
     }
+}
+
+/// A one-shot purchase's result: the deliverable, readable, then which
+/// order it was and what it cost. Soft errors (failed / still-pending
+/// orders) went through [`render_soft_error`] already.
+///
+/// JSON deliverables arrive as a JSON *string* inside the result;
+/// dumping the result as JSON double-encoded them (`"{\"description\":…`).
+/// They're decoded and pretty-printed here instead.
+fn render_one_shot(data: &Value) -> String {
+    let mut out = String::new();
+    if data.get("exit_code").is_some() || data.get("stdout").is_some() {
+        // run_python's documented shape.
+        let code = data
+            .get("exit_code")
+            .map(compact)
+            .unwrap_or_else(|| "?".into());
+        let _ = write!(out, "exit_code: {code}");
+        if data.get("timed_out").and_then(Value::as_bool) == Some(true) {
+            out.push_str(" (timed out)");
+        }
+        for key in ["stdout", "stderr"] {
+            if let Some(s) = data
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                let _ = write!(out, "\n{key}:\n{}", truncate(s, 8000));
+            }
+        }
+    } else if let Some(c) = data.get("delivered_content").and_then(Value::as_str) {
+        match serde_json::from_str::<Value>(c) {
+            Ok(v @ (Value::Object(_) | Value::Array(_))) => {
+                out.push_str(&serde_json::to_string_pretty(&v).unwrap_or_else(|_| c.to_string()));
+            }
+            _ => out.push_str(c),
+        }
+        if data
+            .get("delivered_content_truncated")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            out.push_str("\n… (truncated)");
+        }
+    } else if data.get("order_id").is_none() {
+        // Not a shape we know — stay total.
+        return compact(data);
+    }
+    if let Some(url) = data.get("delivered_content_url").and_then(Value::as_str) {
+        let _ = write!(out, "\nDownload: {url}");
+    }
+    if let Some(id) = data.get("order_id").and_then(Value::as_str) {
+        let _ = write!(out, "\nOrder {id}");
+        if let Some(c) = data.get("charged_cents").and_then(Value::as_f64) {
+            let _ = write!(out, " · charged {}", fmt_cents(c));
+        }
+    }
+    out.trim_start().to_string()
 }
 
 /// Render a [`ToolError`] into a friendly, actionable message: the
@@ -90,7 +149,10 @@ pub fn render_error(e: &ToolError) -> String {
         ToolError::ProviderKeyBudget(_) => {
             "Next: wait for the daily reset, or ask the wallet owner to raise this key's budget on the dashboard."
         }
-        ToolError::Internal(_) => "Next: this is an internal error — retry; if it persists, report it.",
+        ToolError::Internal(_) => {
+            "Next: this is an internal error. If the call was a purchase, check get_wallet_orders \
+             before retrying — the order may already be paid; otherwise retry, and report it if it persists."
+        }
     };
     format!("⚠️ {base}\n{hint}")
 }
@@ -230,6 +292,9 @@ fn render_listings(data: &Value) -> String {
         if let Some(eta) = l.get("delivery_eta_seconds").and_then(Value::as_i64) {
             let _ = write!(out, " · ~{}", human_duration(eta));
         }
+        if let Some(tool) = provider_tool_name(l) {
+            let _ = write!(out, " · one-shot tool: {tool}");
+        }
         out.push('\n');
     }
     if let Some(c) = data.get("next_cursor").and_then(Value::as_str) {
@@ -238,8 +303,22 @@ fn render_listings(data: &Value) -> String {
             "More available — pass cursor=\"{c}\" for the next page."
         );
     }
-    out.push_str("Next: call get_listing(listing_id) to see its buyer_note_schema, then create_order(listing_id).");
+    out.push_str(
+        "A listing marked \"one-shot tool\" can be bought in a single call to that tool \
+         (order + pay + wait + result). Every listing — marked or not — can be bought with \
+         create_order → pay_order → wait_for_order.\n",
+    );
+    out.push_str("Next: call get_listing(listing_id) to see its price and buyer_note_schema, then create_order(listing_id).");
     out
+}
+
+/// The one-shot tool name a listing is offered under (Rails' curated
+/// `provider_tool: {name}` field), if any.
+fn provider_tool_name(l: &Value) -> Option<&str> {
+    let pt = l.get("provider_tool")?;
+    pt.get("name")
+        .and_then(Value::as_str)
+        .or_else(|| pt.as_str())
 }
 
 /// `get_listing`: single listing + whether a structured buyer_note is required.
@@ -255,24 +334,72 @@ fn render_listing(data: &Value) -> String {
         let _ = write!(out, " · seller @{seller}");
     }
     out.push('\n');
+    if let Some(tool) = provider_tool_name(inner) {
+        let _ = writeln!(
+            out,
+            "One-shot tool: {tool} (buys this listing in one call with the fields below as arguments)"
+        );
+    }
 
     let schema = inner.get("buyer_note_schema");
     let has_schema = matches!(schema, Some(Value::Object(m)) if !m.is_empty());
     if has_schema {
-        let schema = schema.unwrap();
-        if let Some(req) = schema.get("required").and_then(Value::as_array) {
-            let fields: Vec<&str> = req.iter().filter_map(Value::as_str).collect();
-            if !fields.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "Requires a structured buyer_note with: {}",
-                    fields.join(", ")
-                );
-            }
-        }
-        out.push_str("Next: build a buyer_note matching buyer_note_schema (in structuredContent), then call create_order(listing_id, buyer_note).");
+        out.push_str(&render_schema(schema.unwrap()));
+        out.push_str("Next: build a buyer_note matching the fields above, then call create_order(listing_id, buyer_note).");
     } else {
         out.push_str("Next: call create_order(listing_id) — a free-form buyer_note is optional.");
+    }
+    out
+}
+
+/// A buyer_note_schema as model-readable lines: one per property with its
+/// type, allowed values, default, and (truncated) description, required
+/// fields marked. The model only reads `content`, so a schema left in
+/// `structuredContent` alone is a schema it never sees.
+fn render_schema(schema: &Value) -> String {
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        // A bare (non-object) schema: the note is a single value.
+        let ty = schema.get("type").and_then(Value::as_str).unwrap_or("any");
+        let mut out = format!("buyer_note: a single {ty} value");
+        if let Some(d) = schema.get("description").and_then(Value::as_str) {
+            let _ = write!(out, " — {}", truncate(d, 160));
+        }
+        out.push('\n');
+        return out;
+    };
+    let mut out = String::from("buyer_note fields:\n");
+    for (name, p) in props {
+        let ty = match p.get("type") {
+            Some(Value::String(t)) => t.clone(),
+            Some(Value::Array(ts)) => ts
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("|"),
+            _ => "any".to_string(),
+        };
+        let _ = write!(out, "  - {name} ({ty}");
+        if required.contains(&name.as_str()) {
+            out.push_str(", required");
+        }
+        out.push(')');
+        if let Some(vals) = p.get("enum").and_then(Value::as_array) {
+            let shown: Vec<String> = vals.iter().take(12).map(compact).collect();
+            let more = if vals.len() > 12 { ", …" } else { "" };
+            let _ = write!(out, " one of: {}{more}", shown.join(", "));
+        }
+        if let Some(d) = p.get("default") {
+            let _ = write!(out, " · default {}", compact(d));
+        }
+        if let Some(d) = p.get("description").and_then(Value::as_str) {
+            let _ = write!(out, " — {}", truncate(d, 160));
+        }
+        out.push('\n');
     }
     out
 }
@@ -291,8 +418,13 @@ fn render_orders(data: &Value) -> String {
         let id = field_str(o, &["order_id", "id"]);
         let pay = field_str(o, &["payment_status"]);
         let ful = field_str(o, &["fulfillment_status"]);
-        let total = price_cell(o);
-        let _ = writeln!(out, "• {id} · payment={pay} · fulfillment={ful} · {total}");
+        let title = field_str(o, &["product_title", "title"]);
+        let total = order_amount_cell(o);
+        let _ = write!(out, "• {id}");
+        if title != "—" {
+            let _ = write!(out, " · {title}");
+        }
+        let _ = writeln!(out, " · payment={pay} · fulfillment={ful} · {total}");
     }
     if let Some(c) = data.get("next_cursor").and_then(Value::as_str) {
         let _ = writeln!(
@@ -311,9 +443,13 @@ fn render_order(tool: &str, data: &Value) -> String {
     let id = field_str(order, &["order_id", "id"]);
     let pay = field_str(order, &["payment_status"]);
     let ful = field_str(order, &["fulfillment_status"]);
-    let total = price_cell(order);
+    let total = order_amount_cell(order);
 
-    let mut out = format!("Order {id}\nPayment: {pay} · Fulfillment: {ful} · {total}");
+    let mut out = format!("Order {id}");
+    if let Some(title) = order.get("product_title").and_then(Value::as_str) {
+        let _ = write!(out, " · {title}");
+    }
+    let _ = write!(out, "\nPayment: {pay} · Fulfillment: {ful} · {total}");
 
     if let Some(t) = order.get("tracking_number").and_then(Value::as_str) {
         let carrier = order.get("tracking_carrier").and_then(Value::as_str);
@@ -616,26 +752,62 @@ fn field_str<'a>(v: &'a Value, keys: &[&str]) -> &'a str {
     "—"
 }
 
-/// Render a price cell from whatever price field is present.
+/// Render a listing's price cell from whatever price field is present.
+/// Rails sends `price_usd` as a *formatted string* (`"$0.05"`, `"Free"`)
+/// next to the numeric `price_cents` (a float for sub-cent prices); older
+/// shapes carried a numeric `price_usd`. Accept all of them — a price that
+/// renders as "—" leaves the model no way to know what a purchase costs.
 fn price_cell(v: &Value) -> String {
     if let Some(s) = v.get("formatted_price").and_then(Value::as_str) {
         return s.to_string();
     }
-    if let Some(cents) = v
-        .get("price_usd_cents")
-        .or_else(|| v.get("total_usd_cents"))
-        .and_then(Value::as_i64)
-    {
-        return fmt_usd_cents(cents);
+    if v.get("free").and_then(Value::as_bool) == Some(true) {
+        return "Free".to_string();
     }
-    if let Some(usd) = v
-        .get("price_usd")
-        .or_else(|| v.get("total_usd"))
-        .and_then(Value::as_f64)
-    {
-        return format!("${}", trim_float(usd));
+    for key in ["price_usd", "total_usd"] {
+        match v.get(key) {
+            Some(Value::String(s)) if !s.is_empty() => return s.clone(),
+            Some(n) if n.is_f64() || n.is_i64() || n.is_u64() => {
+                return format!("${}", trim_float(n.as_f64().unwrap_or(0.0)));
+            }
+            _ => {}
+        }
+    }
+    for key in ["price_cents", "price_usd_cents", "total_usd_cents"] {
+        if let Some(cents) = v.get(key).and_then(Value::as_f64) {
+            return fmt_cents(cents);
+        }
     }
     "—".to_string()
+}
+
+/// An order's amount: what it cost up front, plus what was actually charged
+/// once a metered seller settled it below that (e.g. an inference deposit).
+fn order_amount_cell(o: &Value) -> String {
+    let total = o
+        .get("total_usd_cents")
+        .and_then(Value::as_f64)
+        .map(fmt_cents)
+        .unwrap_or_else(|| price_cell(o));
+    let settled = o.get("settled_amount_cents").and_then(Value::as_f64);
+    let total_cents = o.get("total_usd_cents").and_then(Value::as_f64);
+    match (settled, total_cents) {
+        (Some(s), Some(t)) if (s - t).abs() > f64::EPSILON => {
+            format!("{total} (charged {})", fmt_cents(s))
+        }
+        (Some(s), None) => format!("charged {}", fmt_cents(s)),
+        _ => total,
+    }
+}
+
+/// Cents that may be fractional (sub-cent pricing) → `$X.YZ`, or up to six
+/// dollar decimals when the amount isn't a whole cent.
+fn fmt_cents(cents: f64) -> String {
+    if cents.fract() == 0.0 {
+        return fmt_usd_cents(cents as i64);
+    }
+    let sign = if cents < 0.0 { "-" } else { "" };
+    format!("{sign}${}", trim_float(cents.abs() / 100.0))
 }
 
 /// Render a credit-balance cell.
@@ -731,6 +903,94 @@ mod tests {
         assert!(out.contains("~8s"), "{out}");
         assert!(out.contains("abc123"), "cursor echoed: {out}");
         assert!(out.contains("get_listing"), "steer present: {out}");
+    }
+
+    /// The shapes Rails actually sends: `price_usd` is a formatted string
+    /// and `price_cents` may be fractional. These rendered "—" before.
+    #[test]
+    fn listings_render_rails_string_prices_and_tool_marker() {
+        let data = json!({"data": [
+            {"listing_id": "L1", "title": "Forecast", "price_usd": "$0.05", "price_cents": 5,
+             "provider_tool": {"name": "forecast"}},
+            {"listing_id": "L2", "title": "Amazon Order", "price_cents": 0.5},
+            {"listing_id": "L3", "title": "Hello", "price_usd": "Free", "free": true},
+        ]});
+        let out = render("list_marketplace", &data);
+        assert!(out.contains("$0.05"), "{out}");
+        assert!(out.contains("$0.005"), "sub-cent from price_cents: {out}");
+        assert!(out.contains("Free"), "{out}");
+        assert!(out.contains("one-shot tool: forecast"), "{out}");
+        assert!(!out.contains(" · — "), "no missing price: {out}");
+    }
+
+    #[test]
+    fn listing_surfaces_schema_fields_types_enums_defaults() {
+        let data = json!({"data": {
+            "listing_id": "L9", "title": "Web Fetch", "price_usd": "$0.01",
+            "provider_tool": {"name": "web_fetch"},
+            "buyer_note_schema": {"type": "object", "required": ["url"], "properties": {
+                "url": {"type": "string", "description": "Page to fetch"},
+                "output_format": {"type": "string", "enum": ["markdown", "html"], "default": "markdown"}
+            }}
+        }});
+        let out = render("get_listing", &data);
+        assert!(out.contains("Price: $0.01"), "{out}");
+        assert!(
+            out.contains("url (string, required) — Page to fetch"),
+            "{out}"
+        );
+        assert!(out.contains(r#"one of: "markdown", "html""#), "{out}");
+        assert!(out.contains(r#"default "markdown""#), "{out}");
+        assert!(out.contains("One-shot tool: web_fetch"), "{out}");
+        assert!(!out.contains("structuredContent"), "{out}");
+    }
+
+    #[test]
+    fn orders_show_amount_and_metered_charge() {
+        let data = json!({"data": [
+            {"order_id": "O1", "product_title": "OpenRouter Inference", "payment_status": "paid",
+             "fulfillment_status": "delivered", "total_usd": "$0.2000", "total_usd_cents": 20,
+             "settled_amount_cents": 3.5},
+            {"order_id": "O2", "payment_status": "paid", "fulfillment_status": "awaiting_seller",
+             "total_usd": "$0.0500", "total_usd_cents": 5, "settled_amount_cents": 5},
+        ]});
+        let out = render("get_wallet_orders", &data);
+        assert!(out.contains("OpenRouter Inference"), "{out}");
+        assert!(out.contains("$0.20 (charged $0.035)"), "{out}");
+        assert!(
+            out.contains("$0.05") && !out.contains("$0.05 (charged"),
+            "{out}"
+        );
+        let one = render("get_order_status", &json!({"data": data["data"][1]}));
+        assert!(one.contains("$0.05"), "{one}");
+    }
+
+    #[test]
+    fn one_shot_results_decode_json_deliverables_and_show_the_charge() {
+        let data = json!({
+            "order_id": "O3", "fulfillment_status": "delivered", "charged_cents": 5,
+            "delivered_content": "{\"description\":\"Sunny, 22C\",\"image_url\":\"https://img/w.png\"}",
+        });
+        let out = render("forecast", &data);
+        assert!(
+            out.contains("\"description\": \"Sunny, 22C\""),
+            "decoded, not escaped: {out}"
+        );
+        assert!(!out.contains("\\\""), "no double encoding: {out}");
+        assert!(out.contains("Order O3 · charged $0.05"), "{out}");
+
+        let py = render(
+            "run_python",
+            &json!({"stdout": "2\n", "stderr": "", "exit_code": 0, "order_id": "O4", "charged_cents": 1}),
+        );
+        assert!(py.starts_with("exit_code: 0"), "{py}");
+        assert!(py.contains("stdout:\n2") && py.contains("Order O4"), "{py}");
+
+        let text = render(
+            "hello",
+            &json!({"order_id": "O5", "delivered_content": "hi!"}),
+        );
+        assert!(text.starts_with("hi!"), "{text}");
     }
 
     #[test]

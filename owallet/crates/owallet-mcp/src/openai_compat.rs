@@ -79,6 +79,7 @@ use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 
+use crate::progress::ProgressSink;
 use crate::state::{McpState, OwnedAuth, ResolveAuthError};
 use crate::tools::{new_output_since, partial_output, WAIT_TERMINAL_STATUSES};
 use owallet_overpay::models::ListingFilters;
@@ -701,6 +702,7 @@ pub(crate) async fn run_listing_tool(
     poll: Duration,
     key_id: Option<&str>,
     usage: &mut TurnUsage,
+    progress: Option<&ProgressSink>,
 ) -> Result<Value, OpenAiError> {
     let buyer_note = listing_tool_buyer_note(tool, arguments);
     let (order_id, redeemed_cents) = place_and_pay_order(
@@ -712,10 +714,103 @@ pub(crate) async fn run_listing_tool(
         key_id,
     )
     .await?;
-    let snap = wait_for_order_terminal(state, auth, &order_id, timeout, poll).await?;
-    net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
+    let (snap, terminal) = poll_one_shot(state, auth, &order_id, timeout, poll, progress).await?;
     usage.add_order(&snap, redeemed_cents);
-    Ok(extract_listing_delivered(&order_id, &snap))
+    if !terminal {
+        return Ok(pending_order_result(
+            &order_id,
+            &snap,
+            redeemed_cents,
+            timeout,
+        ));
+    }
+    net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
+    let mut out = extract_listing_delivered(&order_id, &snap);
+    out["charged_cents"] = json!(net_charged_cents(&snap, redeemed_cents));
+    Ok(out)
+}
+
+/// Poll a one-shot purchase (listing tool / run_python) until it reaches a
+/// terminal status or `timeout` passes. Returns the last snapshot and
+/// whether it was terminal — running out of time is *not* an error here:
+/// the order is already paid, so the caller hands back its id rather than
+/// losing it (a live session was charged for a stalled `forecast` and got
+/// back nothing to follow up with).
+///
+/// When the `/mcp` caller opted into progress, every in-flight poll emits a
+/// `notifications/progress` — the seller's new partial output when there
+/// is some, else a status line — which also resets the MCP client's
+/// request timeout (opencode's is 60s, reset on progress; a silent
+/// 120s poll tripped it and the client dropped the paid result).
+async fn poll_one_shot(
+    state: &McpState,
+    auth: &OwnedAuth,
+    order_id: &str,
+    timeout: Duration,
+    poll: Duration,
+    progress: Option<&ProgressSink>,
+) -> Result<(Value, bool), OpenAiError> {
+    let start = Instant::now();
+    let mut tick = 0u64;
+    let mut streamed = 0usize;
+    loop {
+        let snap = order_snapshot(state, auth, order_id).await?;
+        let status = order_status(&snap);
+        if is_terminal(status) {
+            return Ok((snap, true));
+        }
+        if start.elapsed() >= timeout {
+            return Ok((snap, false));
+        }
+        if let Some(sink) = progress.filter(|s| s.wants_progress()) {
+            tick += 1;
+            let (partial, _seq) = partial_output(&snap);
+            let message = match new_output_since(partial, &mut streamed) {
+                Some(delta) => delta.to_string(),
+                None => format!(
+                    "order {order_id} paid, {} — waited {}s",
+                    status.unwrap_or("in flight"),
+                    start.elapsed().as_secs()
+                ),
+            };
+            sink.emit(
+                tick,
+                None,
+                message,
+                json!({"order_id": order_id, "fulfillment_status": status}),
+            );
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// The tool result for a one-shot order that is paid but not yet
+/// delivered when the call's time runs out: its id, where it stands, and
+/// an explicit "don't buy again" — a model that reads a bare timeout
+/// error retries, which pays a second time.
+fn pending_order_result(
+    order_id: &str,
+    snap: &Value,
+    redeemed_cents: i64,
+    timeout: Duration,
+) -> Value {
+    let status = order_status(snap).unwrap_or("in_progress");
+    json!({
+        "order_id": order_id,
+        "payment_status": "paid",
+        "fulfillment_status": status,
+        "pending": true,
+        "charged_cents": redeemed_cents,
+        "error": format!(
+            "order {order_id} is paid but the seller has not delivered after {}s (status: {status}) — \
+             it may still complete; do not buy again",
+            timeout.as_secs()
+        ),
+        "hint": format!(
+            "wait_for_order(order_id=\"{order_id}\", until_status=\"delivered\") to keep following it, \
+             or get_order_status(order_id=\"{order_id}\") later"
+        ),
+    })
 }
 
 /// The buyer_note for a listing-tool call: the arguments verbatim, or —
@@ -1889,6 +1984,63 @@ fn net_key_budget_from_delivery(
     }
 }
 
+/// Largest offloaded delivery [`order_snapshot`] downloads. Far above any
+/// chat reply or text tool result; a bigger blob stays a URL.
+const DELIVERED_BLOB_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// One poll of an order, with a terminal snapshot's offloaded delivery
+/// pulled back inline. Rails stores any `delivered_content` over 4 KB in
+/// object storage and returns `delivered_content_url` instead — so without
+/// this, every chat turn whose reply (JSON-wrapped) passed 4 KB failed with
+/// "order has no delivered_content" after being paid for, and a metered
+/// turn's `charged_cents` went unread. Every order poll on this surface
+/// goes through here.
+///
+/// Only text-shaped deliveries are hydrated (JSON, `text/*`, or untyped):
+/// an image stays a download URL, which is what a model can use anyway.
+pub(crate) async fn order_snapshot(
+    state: &McpState,
+    auth: &OwnedAuth,
+    order_id: &str,
+) -> Result<Value, owallet_overpay::OverpayError> {
+    let mut snap = state
+        .overpay
+        .get_order_value(order_id, auth.as_auth())
+        .await?;
+    if order_status(&snap) != Some("delivered") {
+        return Ok(snap);
+    }
+    let order = match snap.get_mut("data") {
+        Some(d) if d.is_object() => d,
+        _ => &mut snap,
+    };
+    if order.get("delivered_content").is_some_and(Value::is_string) {
+        return Ok(snap);
+    }
+    let Some(url) = order
+        .get("delivered_content_url")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return Ok(snap);
+    };
+    let text_shaped = match order.get("delivered_content_type").and_then(Value::as_str) {
+        None | Some("") => true,
+        Some(t) => t.starts_with("text/") || t.contains("json"),
+    };
+    if !text_shaped {
+        return Ok(snap);
+    }
+    let content = state
+        .overpay
+        .fetch_delivered_content(&url, DELIVERED_BLOB_MAX_BYTES)
+        .await?;
+    if let Some(obj) = order.as_object_mut() {
+        obj.insert("delivered_content".into(), json!(content));
+    }
+    Ok(snap)
+}
+
 /// Poll an order silently until it reaches a terminal status. Used by the
 /// buffered path and by every `run_python` tool execution (which never
 /// streams — the caller only sees the outer OpenRouter turns' text). The
@@ -1904,10 +2056,7 @@ async fn wait_for_order_terminal(
 ) -> Result<Value, OpenAiError> {
     let start = Instant::now();
     loop {
-        let snap = state
-            .overpay
-            .get_order_value(order_id, auth.as_auth())
-            .await?;
+        let snap = order_snapshot(state, auth, order_id).await?;
         if is_terminal(order_status(&snap)) {
             return Ok(snap);
         }
@@ -2125,20 +2274,23 @@ async fn execute_tool_call(
     }
 
     if let Some(tool) = listing_tool {
-        return match run_listing_tool(state, auth, &tool, &arguments, timeout, poll, key_id, usage)
-            .await
+        return match run_listing_tool(
+            state, auth, &tool, &arguments, timeout, poll, key_id, usage, None,
+        )
+        .await
         {
             Ok(result) => result.to_string(),
             Err(e) => json!({"error": e.message()}).to_string(),
         };
     }
 
-    match run_python_tool(state, auth, &arguments, timeout, poll, key_id, usage).await {
+    match run_python_tool(state, auth, &arguments, timeout, poll, key_id, usage, None).await {
         Ok(result) => result.to_string(),
         Err(e) => json!({"error": e.message()}).to_string(),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_python_tool(
     state: &McpState,
     auth: &OwnedAuth,
@@ -2147,6 +2299,7 @@ pub(crate) async fn run_python_tool(
     poll: Duration,
     key_id: Option<&str>,
     usage: &mut TurnUsage,
+    progress: Option<&ProgressSink>,
 ) -> Result<Value, OpenAiError> {
     let listing_id = resolve_python_listing_id(state).await?;
     let (order_id, redeemed_cents) = place_and_pay_order(
@@ -2158,10 +2311,31 @@ pub(crate) async fn run_python_tool(
         key_id,
     )
     .await?;
-    let snap = wait_for_order_terminal(state, auth, &order_id, timeout, poll).await?;
-    net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
+    let (snap, terminal) = poll_one_shot(state, auth, &order_id, timeout, poll, progress).await?;
     usage.add_order(&snap, redeemed_cents);
-    extract_python_delivered(&snap)
+    if !terminal {
+        return Ok(pending_order_result(
+            &order_id,
+            &snap,
+            redeemed_cents,
+            timeout,
+        ));
+    }
+    net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
+    if order_status(&snap) != Some("delivered") {
+        // Failed / cancelled: the listing-tool projection already words
+        // this case; reuse it rather than erroring on the missing content.
+        return Ok(extract_listing_delivered(&order_id, &snap));
+    }
+    let mut out = extract_python_delivered(&snap)?;
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("order_id".into(), json!(order_id));
+        obj.insert(
+            "charged_cents".into(),
+            json!(net_charged_cents(&snap, redeemed_cents)),
+        );
+    }
+    Ok(out)
 }
 
 // ---- buffered ----
@@ -2595,7 +2769,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             let mut streamed = 0usize;
             let start = Instant::now();
             let snap = loop {
-                let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                let snap = match order_snapshot(&ctx.mcp, &auth, &order_id).await {
                     Ok(s) => s,
                     Err(e) => {
                         for ev in error_events(&order_id, &requested_model, OpenAiError::from(e)) { yield Ok(ev); }
@@ -2700,7 +2874,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             let mut streamed = 0usize;
             let start = Instant::now();
             let snap = loop {
-                let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                let snap = match order_snapshot(&ctx.mcp, &auth, &order_id).await {
                     Ok(s) => s,
                     Err(e) => {
                         for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
@@ -2819,7 +2993,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     let mut lt_streamed = 0usize;
                     let mut lt_emitted = false;
                     let result_text = loop {
-                        let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                        let snap = match order_snapshot(&ctx.mcp, &auth, &order_id).await {
                             Ok(s) => s,
                             Err(e) => break json!({"error": OpenAiError::from(e).message()}).to_string(),
                         };
@@ -2873,7 +3047,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 let py_start = Instant::now();
                 let python_snap;
                 loop {
-                    let snap = match ctx.mcp.overpay.get_order_value(&python_order_id, auth.as_auth()).await {
+                    let snap = match order_snapshot(&ctx.mcp, &auth, &python_order_id).await {
                         Ok(s) => s,
                         Err(e) => {
                             let result_text = json!({"error": OpenAiError::from(e).message()}).to_string();
@@ -2945,7 +3119,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
         let mut streamed = 0usize;
         let start = Instant::now();
         let snap = loop {
-            let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+            let snap = match order_snapshot(&ctx.mcp, &auth, &order_id).await {
                 Ok(s) => s,
                 Err(e) => {
                     for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
@@ -3649,6 +3823,154 @@ mod tests {
         assert_eq!(body["choices"][0]["message"]["role"], "assistant");
         assert_eq!(body["choices"][0]["message"]["content"], "Hello!");
         assert_eq!(body["choices"][0]["finish_reason"], "stop");
+    }
+
+    /// Rails offloads any delivery over 4 KB to object storage and returns
+    /// `delivered_content_url` in its place. A long reply used to fail the
+    /// (already paid) turn with "order has no delivered_content".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_completion_reads_a_long_reply_offloaded_to_a_blob_url() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "O1", "payment_status": "pending"}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/openrouter-bot/redeem"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"status": "fully_paid", "amount_redeemed_cents": 2, "credit_balance_cents": 100}
+            })))
+            .mount(&overpay)
+            .await;
+        let long_reply = "word ".repeat(1200);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/O1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "O1", "fulfillment_status": "delivered",
+                    "delivered_content_type": "application/json",
+                    "delivered_content_url": format!("{}/rails/active_storage/blobs/b1/delivered-O1.json", overpay.uri()),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rails/active_storage/blobs/b1/delivered-O1.json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(delivered_content(
+                    &long_reply,
+                    "openai/gpt-5-mini",
+                    false,
+                )),
+            )
+            .expect(1)
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "write a lot"}],
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            long_reply.as_str()
+        );
+    }
+
+    /// A one-shot purchase whose seller stalls: the paid order's id comes
+    /// back as a pending result (not a bare timeout error that loses it and
+    /// invites a paid retry), and every in-flight poll streams progress —
+    /// which is what keeps an MCP client's request timeout from firing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_one_shot_returns_the_paid_order_as_pending_and_streams_progress() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "O7", "payment_status": "pending"}
+            })))
+            .expect(1)
+            .mount(&overpay)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/exec/redeem"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"status": "fully_paid", "amount_redeemed_cents": 5, "credit_balance_cents": 95}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/O7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "O7", "payment_status": "paid", "fulfillment_status": "awaiting_seller"}
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = ProgressSink::new(tx, Some(json!("tok")));
+        let mut usage = TurnUsage::default();
+
+        let out = run_python_tool(
+            &state,
+            &auth,
+            &json!({"code": "print(1)"}),
+            Duration::from_millis(80),
+            Duration::from_millis(10),
+            None,
+            &mut usage,
+            Some(&sink),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("a stall is a pending result, not an error: {}", e.message()));
+
+        assert_eq!(out["order_id"], "O7");
+        assert_eq!(out["pending"], true);
+        assert_eq!(out["payment_status"], "paid");
+        assert_eq!(out["fulfillment_status"], "awaiting_seller");
+        assert_eq!(out["charged_cents"], 5);
+        assert!(
+            out["error"].as_str().unwrap().contains("do not buy again"),
+            "{out}"
+        );
+        assert!(
+            out["hint"].as_str().unwrap().contains("wait_for_order"),
+            "{out}"
+        );
+        assert_eq!(
+            usage.charged_cents, 5,
+            "the paid deposit still counts toward the turn"
+        );
+
+        let note = rx.try_recv().expect("in-flight polls stream progress");
+        assert_eq!(note["method"], "notifications/progress");
+        assert_eq!(note["params"]["data"]["order_id"], "O7");
+
+        // The MCP transport's text for it names the order and the next step.
+        let text = crate::render::render(
+            "run_python",
+            &crate::projection::sanitize("run_python", &out),
+        );
+        assert!(
+            text.contains("O7") && text.contains("wait_for_order"),
+            "{text}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

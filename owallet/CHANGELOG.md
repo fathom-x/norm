@@ -4,6 +4,45 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+Fixes from a live marketplace test session.
+
+### Long chat replies no longer fail after being paid for
+
+- Rails moves any `delivered_content` over 4 KB to object storage and
+  returns `delivered_content_url` in its place. `/v1` read only the inline
+  field, so every turn whose reply passed ~4 KB failed with `[owallet error]
+  order has no delivered_content` — already charged, reply lost. Every
+  `/v1` order poll now goes through `order_snapshot`, which downloads a
+  delivered text/JSON blob back inline (no `Authorization` header; 4 MB
+  cap). This also restores the metered `charged_cents` settlement for those
+  turns.
+
+### One-shot purchases never lose a paid order
+
+- A one-shot tool (`run_python` / `provider_tool` listings) whose seller
+  stalls now returns the paid order as a pending result — `order_id`,
+  statuses, `charged_cents`, "do not buy again", and a `wait_for_order`
+  hint — instead of an error without the order id.
+- On `/mcp`, in-flight polls emit `notifications/progress`, which resets
+  the MCP client's request timeout (opencode's 60s tripped on a silent
+  120s poll and dropped the result). A client that didn't opt into
+  progress gets the pending result at 50s, before its own timeout.
+- One-shot results render readably: JSON deliverables decoded instead of
+  double-encoded, `run_python` as exit code + stdout/stderr, followed by
+  the order id and what it charged.
+
+### Prices, amounts, and schemas visible to the model
+
+- `list_marketplace` / `get_listing` showed `Price: —` for every listing:
+  Rails sends `price_usd` as a formatted string, which the renderer
+  ignored. Prices render from `price_usd` or `price_cents` (sub-cent aware).
+- Orders show their amount (and a metered order's settled charge) and
+  product title; projections keep `price_cents` / `total_usd_cents`.
+- `get_listing` renders the buyer_note_schema's fields (type, required,
+  enum, default, description) in the text — it was only in
+  `structuredContent`, which the model never reads.
+- Listings sold through a one-shot tool are marked with its name.
+
 ## 0.1.10
 
 ### `overpay_connected` in `GET /v1/status`
