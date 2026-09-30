@@ -30,7 +30,27 @@ Fixes from a live marketplace test session.
   progress gets the pending result at 50s, before its own timeout.
 - One-shot results render readably: JSON deliverables decoded instead of
   double-encoded, `run_python` as exit code + stdout/stderr, followed by
-  the order id and what it charged.
+  an `order_id: …` line and what it charged.
+- Image (and other binary) deliveries succeed: a paid `generate_image`
+  failed with `delivered content: file is not UTF-8 text` although the
+  seller had delivered a valid PNG. A file delivery now comes back as
+  `delivered_content_url` + `delivered_content_type` +
+  `delivered_content_bytes` ("Delivered a file (image/png, 1.0 MB)" and
+  the download link); binary media types aren't downloaded at all.
+- A one-shot order that was paid but whose result then couldn't be read
+  returns its `order_id`, the charge, and "do not buy again" rather than
+  a bare error.
+
+### Order tools say what the marketplace can't do
+
+- `get_wallet_orders` / `list_orders` declare the real payment and
+  fulfillment status enums, and reject an unknown filter value naming the
+  valid ones — Rails matched e.g. `status=refunded` against nothing and
+  returned an empty list indistinguishable from "none refunded". (There is
+  no refunded state; the error says so.)
+- `pay_order` on a free ($0.00) order no longer sends a credit redemption
+  that Rails answers with a misleading 422 "No available credits for this
+  seller"; it says the order is free and links the order page.
 
 ### Prices, amounts, and schemas visible to the model
 

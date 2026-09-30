@@ -83,7 +83,7 @@ use crate::progress::ProgressSink;
 use crate::state::{McpState, OwnedAuth, ResolveAuthError};
 use crate::tools::{new_output_since, partial_output, WAIT_TERMINAL_STATUSES};
 use owallet_overpay::models::ListingFilters;
-use owallet_overpay::OverpayError;
+use owallet_overpay::{DeliveredContent, OverpayError};
 
 const OPENROUTER_SELLER_SLUG: &str = "openrouter-bot";
 const OPENROUTER_LISTING_TITLE: &str = "OpenRouter Inference";
@@ -734,7 +734,14 @@ pub(crate) async fn run_listing_tool(
         key_id,
     )
     .await?;
-    let (snap, terminal) = poll_one_shot(state, auth, &order_id, timeout, poll, progress).await?;
+    let (snap, terminal) =
+        match poll_one_shot(state, auth, &order_id, timeout, poll, progress).await {
+            Ok(polled) => polled,
+            Err(e) => {
+                usage.add_order(&Value::Null, redeemed_cents);
+                return Ok(unreadable_order_result(&order_id, redeemed_cents, &e));
+            }
+        };
     usage.add_order(&snap, redeemed_cents);
     if !terminal {
         return Ok(pending_order_result(
@@ -833,6 +840,26 @@ fn pending_order_result(
     })
 }
 
+/// The tool result for a one-shot order that was paid but whose snapshot
+/// could not be read or decoded afterwards (a network blip, an odd
+/// delivery): the error *with* the order id, so the model can follow the
+/// order up instead of buying again. A bare error here once cost a paid
+/// image delivery its id ("internal: delivered content: …").
+fn unreadable_order_result(order_id: &str, redeemed_cents: i64, err: &OpenAiError) -> Value {
+    json!({
+        "order_id": order_id,
+        "payment_status": "paid",
+        "charged_cents": redeemed_cents,
+        "error": format!(
+            "order {order_id} is paid, but reading its result failed: {} — do not buy again",
+            err.message()
+        ),
+        "hint": format!(
+            "get_order_status(order_id=\"{order_id}\") to see where it stands"
+        ),
+    })
+}
+
 /// The buyer_note for a listing-tool call: the arguments verbatim, or —
 /// for a wrapped bare-schema listing — the unwrapped `input` value.
 fn listing_tool_buyer_note(tool: &ListingTool, arguments: &Value) -> Value {
@@ -876,7 +903,11 @@ fn extract_listing_delivered(order_id: &str, snap: &Value) -> Value {
             out.insert("delivered_content".into(), json!(content));
         }
     }
-    for key in ["delivered_content_type", "delivered_content_url"] {
+    for key in [
+        "delivered_content_type",
+        "delivered_content_url",
+        "delivered_content_bytes",
+    ] {
         if let Some(v) = order.get(key).filter(|v| !v.is_null()) {
             out.insert(key.into(), v.clone());
         }
@@ -970,8 +1001,8 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
             json!({
                 "type": "object",
                 "properties": {
-                    "payment_status":     {"type": "string", "description": "e.g. pending, paid"},
-                    "fulfillment_status": {"type": "string", "description": "e.g. pending, awaiting_seller, delivered"},
+                    "payment_status":     {"type": "string", "enum": crate::tools::ORDER_PAYMENT_STATUSES},
+                    "fulfillment_status": {"type": "string", "enum": crate::tools::ORDER_FULFILLMENT_STATUSES},
                     "limit":              {"type": "integer", "minimum": 1, "maximum": 20},
                     "cursor":             {"type": "string", "description": "next_cursor from a previous page"},
                 },
@@ -2042,8 +2073,29 @@ async fn get_order_resolved(
             .filter(|u| !u.is_empty())
             .map(str::to_string)
         {
-            let content = state.overpay.fetch_delivered_content(&url).await?;
-            data["delivered_content"] = json!(content);
+            match state.overpay.fetch_delivered_content(&url).await? {
+                DeliveredContent::Text(content) => data["delivered_content"] = json!(content),
+                // An image (or other binary) delivery stays a link: the
+                // caller hands on `delivered_content_url` and its type
+                // rather than bytes nobody can read as text.
+                DeliveredContent::Binary {
+                    content_type,
+                    bytes,
+                } => {
+                    if let Some(ct) = content_type {
+                        if data
+                            .get("delivered_content_type")
+                            .and_then(Value::as_str)
+                            .is_none()
+                        {
+                            data["delivered_content_type"] = json!(ct);
+                        }
+                    }
+                    if let Some(n) = bytes {
+                        data["delivered_content_bytes"] = json!(n);
+                    }
+                }
+            }
         }
     }
     Ok(snap)
@@ -2357,7 +2409,14 @@ pub(crate) async fn run_python_tool(
         key_id,
     )
     .await?;
-    let (snap, terminal) = poll_one_shot(state, auth, &order_id, timeout, poll, progress).await?;
+    let (snap, terminal) =
+        match poll_one_shot(state, auth, &order_id, timeout, poll, progress).await {
+            Ok(polled) => polled,
+            Err(e) => {
+                usage.add_order(&Value::Null, redeemed_cents);
+                return Ok(unreadable_order_result(&order_id, redeemed_cents, &e));
+            }
+        };
     usage.add_order(&snap, redeemed_cents);
     if !terminal {
         return Ok(pending_order_result(
@@ -2373,7 +2432,10 @@ pub(crate) async fn run_python_tool(
         // this case; reuse it rather than erroring on the missing content.
         return Ok(extract_listing_delivered(&order_id, &snap));
     }
-    let mut out = extract_python_delivered(&snap)?;
+    let mut out = match extract_python_delivered(&snap) {
+        Ok(out) => out,
+        Err(e) => return Ok(unreadable_order_result(&order_id, redeemed_cents, &e)),
+    };
     if let Some(obj) = out.as_object_mut() {
         obj.insert("order_id".into(), json!(order_id));
         obj.insert(
@@ -4076,6 +4138,134 @@ mod tests {
             text.contains("O7") && text.contains("wait_for_order"),
             "{text}"
         );
+    }
+
+    /// An image delivery (a generated PNG behind `delivered_content_url`)
+    /// is a success: the result carries the link, its type and size — not
+    /// "delivered content: file is not UTF-8 text", which failed a paid
+    /// generate_image call outright. Binary types are never downloaded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_image_delivery_comes_back_as_a_link_not_an_error() {
+        let overpay = MockServer::start().await;
+        let link = format!(
+            "{}/rails/active_storage/blobs/redirect/img/delivered-G1.png",
+            overpay.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/G1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "G1", "payment_status": "paid", "fulfillment_status": "delivered",
+                         "delivered_content_type": "image/png", "delivered_content_url": link}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/rails/active_storage/blobs/redirect/img/delivered-G1.png",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(vec![0x89, b'P', b'N', b'G', 0xff, 0xfe, 0x00, 0x01]),
+            )
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+        let snap = get_order_resolved(&state, &auth, "G1")
+            .await
+            .unwrap_or_else(|e| panic!("an image is a delivery, not an error: {e}"));
+        let out = extract_listing_delivered("G1", &snap);
+        assert_eq!(out["fulfillment_status"], "delivered");
+        assert_eq!(out["delivered_content_url"], link);
+        assert_eq!(out["delivered_content_type"], "image/png");
+        assert_eq!(out["delivered_content_bytes"], 8);
+        assert!(out.get("delivered_content").is_none(), "{out}");
+        assert!(out.get("error").is_none(), "{out}");
+
+        // A non-UTF-8 file with no telling type is a binary delivery too.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/G2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "G2", "fulfillment_status": "delivered",
+                         "delivered_content_url": format!("{}/blobs/raw", overpay.uri())}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/blobs/raw"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(vec![0xff, 0xfe, 0xfd]),
+            )
+            .mount(&overpay)
+            .await;
+        let snap = get_order_resolved(&state, &auth, "G2").await.unwrap();
+        let out = extract_listing_delivered("G2", &snap);
+        assert_eq!(out["delivered_content_type"], "application/octet-stream");
+        assert_eq!(out["delivered_content_bytes"], 3);
+        assert!(out.get("delivered_content").is_none(), "{out}");
+    }
+
+    /// Paid, then the order can't be read: the result still carries the
+    /// order id (and the charge), so the model follows it up rather than
+    /// buying again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_paid_one_shot_still_returns_its_order_id() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "O8", "payment_status": "pending"}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/exec/redeem"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"status": "fully_paid", "amount_redeemed_cents": 5, "credit_balance_cents": 95}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/O8"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+        let mut usage = TurnUsage::default();
+        let out = run_python_tool(
+            &state,
+            &auth,
+            &json!({"code": "print(1)"}),
+            Duration::from_millis(80),
+            Duration::from_millis(10),
+            None,
+            &mut usage,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("a paid order keeps its id: {}", e.message()));
+        assert_eq!(out["order_id"], "O8");
+        assert_eq!(out["payment_status"], "paid");
+        assert_eq!(out["charged_cents"], 5);
+        assert!(
+            out["error"].as_str().unwrap().contains("do not buy again"),
+            "{out}"
+        );
+        assert_eq!(usage.charged_cents, 5);
+        let text = crate::render::render(
+            "run_python",
+            &crate::projection::sanitize("run_python", &out),
+        );
+        assert!(text.contains("order_id: O8"), "{text}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6817,6 +7007,40 @@ mod tests {
         assert!(
             !err.to_string().contains("chat-scoped"),
             "no scope gate without a key: {err}"
+        );
+    }
+
+    /// A $0.00 order has nothing to redeem; Rails answers a redeem with a
+    /// misleading 422 "No available credits for this seller". pay_order
+    /// must not send it, and must say the order is free instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pay_order_on_a_free_order_explains_instead_of_redeeming() {
+        let overpay = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/FREE-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "FREE-1", "payment_status": "pending", "free": true,
+                         "total_usd": "Free", "total_usd_cents": 0}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/v1/merchant_credits/.*/redeem$"))
+            .respond_with(ResponseTemplate::new(422))
+            .expect(0)
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let out = crate::tools::dispatch(&state, "pay_order", json!({"order_id": "FREE-1"}), None)
+            .await
+            .unwrap_or_else(|e| panic!("free order is a soft result: {e}"));
+        assert_eq!(out.data["status"], "free");
+        assert!(
+            out.text.contains("free ($0.00)") && out.text.contains("/orders/FREE-1"),
+            "{}",
+            out.text
         );
     }
 

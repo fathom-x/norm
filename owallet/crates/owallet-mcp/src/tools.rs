@@ -102,8 +102,9 @@ pub fn catalog() -> Vec<ToolSpec> {
             name: "get_wallet_orders",
             description: "Free — a read, no order is placed and nothing is billed. Fetch the active wallet's orders. Requires authorization.",
             input_schema: schema_object(json!({
-                "status":             {"type": "string"},
-                "fulfillment_status": {"type": "string"},
+                "status":             {"type": "string", "enum": ORDER_PAYMENT_STATUSES,
+                                       "description": "payment status filter"},
+                "fulfillment_status": {"type": "string", "enum": ORDER_FULFILLMENT_STATUSES},
                 "limit":              {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
                 "cursor":             {"type": "string"},
             })),
@@ -872,6 +873,55 @@ async fn list_marketplace(state: &McpState, args: Value) -> Result<Value, ToolEr
     Ok(body)
 }
 
+/// Rails's `Order::PAYMENT_STATUSES` — the values the orders endpoint's
+/// `payment_status` filter can match. Rails passes an unknown value
+/// straight into its `where`, so a typo (or a state that doesn't exist,
+/// like `refunded`) came back as an indistinguishable empty list; the
+/// tool rejects it up front instead. Keep in sync with `order.rb`.
+pub(crate) const ORDER_PAYMENT_STATUSES: &[&str] = &[
+    "awaiting_quote",
+    "quoted",
+    "pending",
+    "paid",
+    "expired",
+    "cancelled",
+];
+
+/// Rails's `Order::FULFILLMENT_STATUSES`. See [`ORDER_PAYMENT_STATUSES`].
+pub(crate) const ORDER_FULFILLMENT_STATUSES: &[&str] = &[
+    "pending",
+    "awaiting_seller",
+    "submitting",
+    "processing",
+    "placed",
+    "shipping",
+    "delivered",
+    "failed",
+    "cancelled",
+];
+
+/// Reject an order-list filter value Rails would silently match nothing
+/// with, naming the valid ones.
+fn check_order_filter(
+    arg: &'static str,
+    value: Option<&str>,
+    valid: &[&str],
+) -> Result<(), ToolError> {
+    let Some(v) = value else { return Ok(()) };
+    if valid.contains(&v) {
+        return Ok(());
+    }
+    let mut reason = format!("unknown value {v:?}; valid values: {}", valid.join(", "));
+    if v.starts_with("refund") {
+        reason.push_str(
+            ". The marketplace has no refund status: a refunded order stays \
+             payment_status=paid, and a credit refund shows as a charged \
+             (settled) amount below its total",
+        );
+    }
+    Err(ToolError::InvalidArg { arg, reason })
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct OrderListArgs {
@@ -891,6 +941,12 @@ async fn get_wallet_orders(state: &McpState, args: Value) -> Result<Value, ToolE
         arg: "arguments",
         reason: e.to_string(),
     })?;
+    check_order_filter("status", args.status.as_deref(), ORDER_PAYMENT_STATUSES)?;
+    check_order_filter(
+        "fulfillment_status",
+        args.fulfillment_status.as_deref(),
+        ORDER_FULFILLMENT_STATUSES,
+    )?;
     let (_npub, auth) = state.resolve_owned_auth()?;
 
     // Rails's NIP-98-authenticated orders endpoint requires a
@@ -1723,6 +1779,27 @@ async fn pay_order(state: &McpState, args: Value) -> Result<Value, ToolError> {
             "message": "Order already paid",
         }));
     }
+    // A $0.00 order has nothing to redeem, and Rails's credit redemption
+    // answers it with a misleading 422 "No available credits for this
+    // seller" (fathom-x/overpay: the redemption loop breaks before its
+    // first pass when nothing is due). Don't send it; say what's going on.
+    let free = order.get("free").and_then(Value::as_bool) == Some(true)
+        || order.get("total_usd_cents").and_then(Value::as_f64) == Some(0.0);
+    if free {
+        let page = state
+            .overpay
+            .public_url()
+            .join(&format!("orders/{}", args.order_id))
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        return Ok(json!({
+            "order_id": args.order_id,
+            "status": "free",
+            "error": "This order is free ($0.00), so there is nothing to pay with credits — \
+                      the marketplace API cannot settle a free order yet. Do not buy credits for it.",
+            "hint": format!("Open the order page to complete it: {page}"),
+        }));
+    }
 
     let seller_slug = match args.seller_slug {
         Some(s) => s,
@@ -2120,6 +2197,31 @@ fn schema_with_required(properties: Value, required: &[&str]) -> Value {
         "required": required,
         "additionalProperties": false,
     })
+}
+
+#[cfg(test)]
+mod order_filter_tests {
+    use super::*;
+
+    /// `status=refunded` used to come back as an empty list, which reads
+    /// as "nothing was refunded". It is not a status at all — say so.
+    #[test]
+    fn an_unknown_status_filter_is_rejected_with_the_valid_values() {
+        let err = check_order_filter("status", Some("refunded"), ORDER_PAYMENT_STATUSES)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"refunded\""), "{err}");
+        assert!(err.contains("paid, expired, cancelled"), "{err}");
+        assert!(err.contains("no refund status"), "{err}");
+        assert!(check_order_filter("status", Some("paid"), ORDER_PAYMENT_STATUSES).is_ok());
+        assert!(check_order_filter("status", None, ORDER_PAYMENT_STATUSES).is_ok());
+        assert!(check_order_filter(
+            "fulfillment_status",
+            Some("failed"),
+            ORDER_FULFILLMENT_STATUSES
+        )
+        .is_ok());
+    }
 }
 
 #[cfg(test)]

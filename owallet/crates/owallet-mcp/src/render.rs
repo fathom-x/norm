@@ -96,6 +96,24 @@ fn render_one_shot(data: &Value) -> String {
         {
             out.push_str("\n… (truncated)");
         }
+    } else if data.get("delivered_content_url").is_some() {
+        // A file delivery (an image, a PDF…) — not text, so not inlined.
+        out.push_str("Delivered a file");
+        let facts: Vec<String> = [
+            data.get("delivered_content_type")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            data.get("delivered_content_bytes")
+                .and_then(Value::as_u64)
+                .map(fmt_bytes),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !facts.is_empty() {
+            let _ = write!(out, " ({})", facts.join(", "));
+        }
+        out.push_str(" — not shown inline; share the download link below.");
     } else if data.get("order_id").is_none() {
         // Not a shape we know — stay total.
         return compact(data);
@@ -104,7 +122,7 @@ fn render_one_shot(data: &Value) -> String {
         let _ = write!(out, "\nDownload: {url}");
     }
     if let Some(id) = data.get("order_id").and_then(Value::as_str) {
-        let _ = write!(out, "\nOrder {id}");
+        let _ = write!(out, "\norder_id: {id}");
         if let Some(c) = data.get("charged_cents").and_then(Value::as_f64) {
             let _ = write!(out, " · charged {}", fmt_cents(c));
         }
@@ -179,7 +197,7 @@ fn render_soft_error(tool: &str, data: &Value) -> Option<String> {
 
     let mut out = format!("⚠️ {err}");
     if let Some(oid) = obj.get("order_id").and_then(Value::as_str) {
-        let _ = write!(out, "\nOrder: {oid}");
+        let _ = write!(out, "\norder_id: {oid}");
     }
     if let Some(url) = obj.get("order_url").and_then(Value::as_str) {
         let _ = write!(out, "\nPay via web checkout: {url}");
@@ -810,6 +828,19 @@ fn fmt_cents(cents: f64) -> String {
     format!("{sign}${}", trim_float(cents.abs() / 100.0))
 }
 
+/// A byte count, human-scaled: `512 B`, `1.0 KB`, `1.0 MB`.
+fn fmt_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    let f = n as f64;
+    if f < KB {
+        format!("{n} B")
+    } else if f < KB * KB {
+        format!("{:.1} KB", f / KB)
+    } else {
+        format!("{:.1} MB", f / (KB * KB))
+    }
+}
+
 /// Render a credit-balance cell.
 fn balance_cell(v: &Value) -> String {
     if let Some(s) = v.get("formatted_balance").and_then(Value::as_str) {
@@ -977,14 +1008,33 @@ mod tests {
             "decoded, not escaped: {out}"
         );
         assert!(!out.contains("\\\""), "no double encoding: {out}");
-        assert!(out.contains("Order O3 · charged $0.05"), "{out}");
+        assert!(out.contains("order_id: O3 · charged $0.05"), "{out}");
 
         let py = render(
             "run_python",
             &json!({"stdout": "2\n", "stderr": "", "exit_code": 0, "order_id": "O4", "charged_cents": 1}),
         );
         assert!(py.starts_with("exit_code: 0"), "{py}");
-        assert!(py.contains("stdout:\n2") && py.contains("Order O4"), "{py}");
+        assert!(
+            py.contains("stdout:\n2") && py.contains("order_id: O4"),
+            "{py}"
+        );
+
+        // An image delivery: a link with its type and size, not bytes.
+        let img = render(
+            "generate_image",
+            &json!({
+                "order_id": "O6", "fulfillment_status": "delivered", "charged_cents": 4,
+                "delivered_content_url": "https://overpay.example/rails/active_storage/blobs/x/delivered-O6.png",
+                "delivered_content_type": "image/png", "delivered_content_bytes": 1_048_576,
+            }),
+        );
+        assert!(
+            img.starts_with("Delivered a file (image/png, 1.0 MB)"),
+            "{img}"
+        );
+        assert!(img.contains("Download: https://overpay.example/"), "{img}");
+        assert!(img.contains("order_id: O6 · charged $0.04"), "{img}");
 
         let text = render(
             "hello",

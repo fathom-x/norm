@@ -365,6 +365,7 @@ pub fn sanitize(tool: &str, data: &Value) -> Value {
                 "delivered_content_truncated",
                 "delivered_content_type",
                 "delivered_content_url",
+                "delivered_content_bytes",
                 "error",
                 "hint",
                 "status",
