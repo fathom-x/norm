@@ -117,7 +117,14 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   listing tools forward their in-flight partial output too, unfenced —
   the preview is buyer-facing markdown — set off by blank lines, with
   keep-alive comments between deltas. First consumer: the weather reporter's
-  `forecast`.
+  `forecast`. **Every order poll goes through `get_order_resolved`**: Rails
+  offloads `delivered_content` over 4 KB to object storage
+  (`delivered_content_url`), and a poll that reads the inline field alone
+  fails every long chat reply after it was paid for. One-shot executions
+  (`run_listing_tool` / `run_python_tool`, via `poll_one_shot`) never error
+  on a stall — the paid order comes back as a pending result with its id —
+  and on `/mcp` they stream progress, which is what resets the MCP
+  client's request timeout.
   **Wallet tools** (`WALLET_TOOLS` in `openai_compat.rs`) sit alongside
   the listing tool: `get_balances` / `browse_marketplace` / `get_listing`
   / `list_orders` / `get_order_status` for any provider key;
