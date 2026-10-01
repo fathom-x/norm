@@ -4,6 +4,18 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### "No credits" says how to get credits
+
+- Overpay refuses to place or settle an order for a wallet with no credits
+  as a bare 422 ("No available credits for this seller"). It is the most
+  common first-run failure — every model, `:free` ones included, is paid
+  from credits — and it surfaced verbatim. `/v1` now answers `402`
+  (`insufficient_quota`) with instructions: `owallet credits load` (noting
+  the `--staging`/`--dev` flag the server runs with) or the Overpay site.
+- The existing "insufficient merchant credits" advice pointed at the
+  `load_core_credits` MCP tool, which needs a paid model turn to invoke —
+  impossible at zero credits. It now gives the same, runnable advice.
+
 ### `/v1` follows file-delivered results and reports failed orders
 
 - Rails can deliver an order's result as a file — a signed Active Storage
