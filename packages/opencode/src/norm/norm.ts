@@ -1054,6 +1054,20 @@ async function restartIfStale(base: string): Promise<boolean> {
  *
  * Returns whether owallet is reachable afterwards.
  */
+/**
+ * The environment for an auto-started `owallet serve`. norm sends each
+ * session's id as `x-session-id` (plugin/norm.ts) so OpenRouter keeps a
+ * conversation on one provider and its prompt cache warm; owallet forwards
+ * an opaque HMAC of it only with `OWALLET_V1_SESSION_ID=1`, because a
+ * marketplace without fathom-x/overpay#445 fails orders whose buyer note
+ * carries the extra key. Staging and dev run #445, so it is on there; prod
+ * stays off until it ships. An explicit `OWALLET_V1_SESSION_ID` wins.
+ */
+export function serveEnv(): NodeJS.ProcessEnv {
+  if (process.env.OWALLET_V1_SESSION_ID !== undefined || owalletEnv() === "prod") return process.env
+  return { ...process.env, OWALLET_V1_SESSION_ID: "1" }
+}
+
 async function ensureServer(base: string): Promise<boolean> {
   if (await probe(base)) {
     if (!(await restartIfStale(base))) return true
@@ -1081,7 +1095,7 @@ async function ensureServer(base: string): Promise<boolean> {
   const child = spawn(bin, args, {
     detached: true,
     stdio: "ignore",
-    env: process.env,
+    env: serveEnv(),
   })
   child.unref()
   debug(`started \`owallet ${args.join(" ")}\` (pid ${child.pid})`)
