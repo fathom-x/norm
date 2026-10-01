@@ -109,6 +109,26 @@ pub(crate) fn order_summary_row(order: &Value) -> Value {
     Value::Object(row)
 }
 
+/// A metered-pricing rejection (`fulfillment_status: "rejected"`) —
+/// why the seller refused the paid order and, for `authorization_too_low`,
+/// the authorization that would have been enough. Field by field, like
+/// every projection here.
+pub(crate) fn rejection(order: &Value) -> Option<Value> {
+    let r = order.get("rejection").filter(|r| r.is_object())?;
+    let out = copy_fields(
+        r,
+        &[
+            "reason_code",
+            "message",
+            "estimated_cost_cents",
+            "required_authorization_cents",
+        ],
+    );
+    out.as_object()
+        .is_some_and(|m| !m.is_empty())
+        .then_some(out)
+}
+
 /// One full order for detail output (`create_order` / `get_order_status`
 /// / `wait_for_order` on the MCP surface). Marketplace-side fields the
 /// buyer acts on survive — statuses, amounts, tracking, the web order
@@ -147,6 +167,9 @@ pub(crate) fn order_detail(order: &Value) -> Value {
         if let Some(v) = order.get(key) {
             row.insert(key.into(), v.clone());
         }
+    }
+    if let Some(r) = rejection(order) {
+        row.insert("rejection".into(), r);
     }
     // The listing pointer lets a caller resolve the seller (pay_order does
     // this server-side too) — id + title only.

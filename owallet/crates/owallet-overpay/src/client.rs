@@ -341,6 +341,29 @@ impl OverpayClient {
         self.post_json_value("/api/v1/orders", auth, &body).await
     }
 
+    /// Create *and pay* an order on a metered listing with a buyer-set
+    /// authorization — the most the seller may charge for it. Rails only
+    /// accepts `authorization_cents` alongside `pay: "merchant_credits"`
+    /// (a partly released hold can only go back as credits), and treats it
+    /// as all-or-nothing: credits that don't cover it cancel the order and
+    /// answer `402 insufficient_credits`. The response carries the order
+    /// (`data`) and the redemption (`payment`).
+    pub async fn create_paid_order_value(
+        &self,
+        listing_id: &str,
+        buyer_note: Option<&str>,
+        authorization_cents: i64,
+        auth: Auth<'_>,
+    ) -> Result<Value, OverpayError> {
+        let body = serde_json::json!({
+            "listing_id": listing_id,
+            "buyer_note": buyer_note,
+            "pay": "merchant_credits",
+            "authorization_cents": authorization_cents,
+        });
+        self.post_json_value("/api/v1/orders", auth, &body).await
+    }
+
     /// Raw-`Value` fetch of a single listing (`GET /api/v1/listings/{id}`).
     /// Returns the full Rails response including the `{data: {...}}`
     /// envelope and any `buyer_note_schema` / `checkout_schema` fields.

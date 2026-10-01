@@ -41,16 +41,34 @@ Fixes from a live marketplace test session.
   returns its `order_id`, the charge, and "do not buy again" rather than
   a bare error.
 
-### Order tools say what the marketplace can't do
+### Compatible with Overpay's metered pricing (overpay#458-#466)
 
-- `get_wallet_orders` / `list_orders` declare the real payment and
-  fulfillment status enums, and reject an unknown filter value naming the
-  valid ones — Rails matched e.g. `status=refunded` against nothing and
-  returned an empty list indistinguishable from "none refunded". (There is
-  no refunded state; the error says so.)
-- `pay_order` on a free ($0.00) order no longer sends a credit redemption
-  that Rails answers with a misleading 422 "No available credits for this
-  seller"; it says the order is free and links the order page.
+- **Long OpenRouter turns are authorized for what they need.** The
+  listing's price is now a per-turn *authorization*, and the seller's
+  exposure guard refuses a turn whose authorization can't cover its input
+  plus output ("needs an authorization of at least N¢") — which a long
+  agent conversation reaches on any model, sooner on premium ones. Every
+  OpenRouter turn now sizes itself from the model variant's published
+  rate card (the guard's own arithmetic: input at its tier, an 8192-token
+  output allowance or the request's smaller `max_tokens`, plus markup)
+  and, when that exceeds the default, creates and pays the order in one
+  request with `authorization_cents`. The unused hold comes back as
+  credits as before. If credits can't cover the larger hold the turn is
+  placed the old way, so a low balance never loses a turn that fits.
+- **`rejected` is a terminal order state.** A seller's refusal of a paid
+  order (credits released in full) used to be polled until the timeout;
+  it now ends the wait, and the error/next step carries the `rejection`
+  reason and, for `authorization_too_low`, the authorization that would
+  have been enough. Order projections keep `rejection` (field by field).
+- **Status filters are Rails's to validate** (overpay#466 answers an
+  unknown value with a 422 naming the allowed ones), so the order tools no
+  longer carry a hardcoded copy of the enums — that copy was already
+  missing `rejected`.
+- **Free orders pay through `pay_order`** again: Rails now settles a $0.00
+  order via the normal redemption, so the client-side "free order"
+  short-circuit is gone.
+- File deliveries take their size from Rails's
+  `delivered_content_byte_size` when the download doesn't state one.
 
 ### Prices, amounts, and schemas visible to the model
 

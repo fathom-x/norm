@@ -522,6 +522,11 @@ fn order_next_step(id: &str, pay: &str, ful: &str, order: &Value) -> String {
         }
         return "Next: done — the order is delivered.".to_string();
     }
+    if ful == "rejected" {
+        return "Next: the seller refused this order and released its credits; see the \
+                rejection reason, then adjust (e.g. a larger authorization) and order again."
+            .to_string();
+    }
     if ful == "failed" || ful == "cancelled" {
         return "Next: the order won't complete; create a new order or contact the seller."
             .to_string();
