@@ -127,6 +127,21 @@ pub struct Database {
     data_dir: PathBuf,
 }
 
+/// Tighten a freshly created wallet path to owner-only access. Best effort:
+/// a filesystem without Unix permissions (or a path that vanished) is not a
+/// reason to fail wallet creation. No-op on non-Unix targets.
+fn restrict_permissions(path: &Path, mode: u32) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+}
+
 impl Database {
     /// Create a new encrypted database at `path` with the given password.
     /// Fails if the file already exists.
@@ -136,11 +151,24 @@ impl Database {
         }
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
+                // Only a directory created here is tightened. A pre-existing
+                // parent may be shared — OWALLET_DB_PATH=/tmp/w.db must not
+                // chmod /tmp, nor a DB in $HOME the home directory.
+                let created = !parent.exists();
                 std::fs::create_dir_all(parent).ok();
+                if created && parent.is_dir() {
+                    // Holds encrypted seeds and tokens: owner-only rather
+                    // than the process umask.
+                    restrict_permissions(parent, 0o700);
+                }
             }
         }
 
         let conn = Connection::open(path)?;
+        // Same reasoning for the database file itself: the contents are
+        // AES-GCM encrypted, but a world-readable seed store hands anyone on
+        // the machine an offline brute-force target for free.
+        restrict_permissions(path, 0o600);
         schema::create(&conn)?;
 
         let mut salt = [0u8; owallet_crypto::SALT_LEN];
@@ -522,6 +550,27 @@ impl Database {
             None => settings::delete(&self.conn, "v1_spend_cap_usd_cents")?,
         }
         Ok(())
+    }
+
+    // ---- OpenRouter conversation ids ----
+
+    /// Random 32-byte secret, created on first use, keying the HMAC that
+    /// turns a client's conversation key into the opaque `session_id` sent
+    /// to OpenRouter (via Overpay). Keeps those ids unguessable and
+    /// unlinkable to the client's own ids; it unlocks nothing, so it lives
+    /// in the plain settings table.
+    pub fn session_id_secret(&self) -> Result<[u8; 32]> {
+        if let Some(stored) = settings::read(&self.conn, "session_id_secret")? {
+            if let Ok(bytes) = hex::decode(stored.trim()) {
+                if let Ok(secret) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                    return Ok(secret);
+                }
+            }
+        }
+        let mut secret = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
+        settings::write(&self.conn, "session_id_secret", &hex::encode(secret))?;
+        Ok(secret)
     }
 
     // ---- Per-wallet encrypted state directory (issue #310) ----
