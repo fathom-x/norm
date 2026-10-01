@@ -59,12 +59,9 @@ export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
 
       const overpay = config.provider?.[Norm.PROVIDER_ID]
       if (!overpay) return
-      const ids = await Norm.marketplaceModels()
-      if (!ids) return
-      overpay.models ??= {}
-      for (const id of ids) {
-        if (!overpay.models[id]) overpay.models[id] = { name: id === "default" ? "Overpay marketplace (default)" : id }
-      }
+      const models = await Norm.marketplaceModels()
+      if (!models) return
+      overpay.models = Norm.mergeModels(overpay.models ?? {}, models)
     },
     auth: {
       provider: Norm.PROVIDER_ID,

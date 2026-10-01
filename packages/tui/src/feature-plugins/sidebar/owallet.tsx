@@ -1,8 +1,9 @@
 import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
-import { createSignal, For, onCleanup, Show } from "solid-js"
+import { createMemo, createSignal, For, onCleanup, Show } from "solid-js"
 import { Global } from "@opencode-ai/core/global"
 import { NormBudget } from "@opencode-ai/core/norm-budget"
+import { NormPricing } from "@opencode-ai/core/norm-pricing"
 import path from "node:path"
 import fs from "node:fs/promises"
 import open from "open"
@@ -78,6 +79,26 @@ async function readProviderKey(): Promise<string | undefined> {
   const entry = store["overpay"]
   if (entry?.type === "api" && typeof entry.key === "string") return entry.key
   return undefined
+}
+
+/** Reads `GET /v1/models` into NormPricing for the picker and the sidebar,
+ * retrying until it works (the bootstrap may still be minting the key),
+ * then hourly — the seller re-prices its catalog about daily. */
+function loadPrices() {
+  const base = owalletUrl()
+  const attempt = async () => {
+    const key = await readProviderKey()
+    const res = key
+      ? await fetch(`${base}/v1/models`, {
+          headers: { authorization: `Bearer ${key}` },
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        }).catch(() => undefined)
+      : undefined
+    const models = res?.ok ? NormPricing.parseModels(await res.json().catch(() => undefined)) : undefined
+    if (models) NormPricing.remember(models)
+    setTimeout(() => void attempt(), models ? 60 * 60_000 : RETRY_MS).unref?.()
+  }
+  void attempt()
 }
 
 type OwalletStatus = {
@@ -342,7 +363,9 @@ function View(props: { api: TuiPluginApi }) {
 
   const [chatBudget, setChatBudget] = createSignal<NormBudget.Status>()
   const [requestMax, setRequestMax] = createSignal<number | null>(NormBudget.DEFAULT_REQUEST_MAX_USD)
+  const [pricesVersion, setPricesVersion] = createSignal(NormPricing.version())
   const refreshChatBudget = () => {
+    setPricesVersion(NormPricing.version())
     void NormBudget.getRequestMax().then(
       (next) => !disposed && setRequestMax(next),
       () => {},
@@ -357,6 +380,26 @@ function View(props: { api: TuiPluginApi }) {
   refreshChatBudget()
   const chatBudgetTimer = setInterval(refreshChatBudget, 5_000)
   onCleanup(() => clearInterval(chatBudgetTimer))
+
+  // What the conversation's next model call would cost on the model it last
+  // used — a list-price estimate (the charge is usually lower), from the
+  // prices loadPrices() read.
+  const nextStep = createMemo(() => {
+    pricesVersion()
+    const sessionID = currentSessionID(props.api)
+    if (!sessionID) return undefined
+    const turns = props.api.state.session
+      .messages(sessionID)
+      .flatMap((message) =>
+        message.role === "assistant" && message.providerID === "overpay"
+          ? [{ modelID: message.modelID, tokens: message.tokens }]
+          : [],
+      )
+    const modelID = turns.at(-1)?.modelID
+    const model = modelID ? NormPricing.get(modelID) : undefined
+    const step = model?.pricing ? NormPricing.nextStep(model.pricing, model.id, turns) : undefined
+    return step && model ? { usd: step.usd, model: model.name ?? model.id } : undefined
+  })
 
   const needsLogin = () => status()?.overpay_connected === false
   // Every model — ":free" ones included — is paid by redeeming Overpay
@@ -404,6 +447,12 @@ function View(props: { api: TuiPluginApi }) {
           </span>{" "}
           · /budget
         </text>
+        <Show when={nextStep()}>
+          <text fg={theme().textMuted}>
+            next step ≈ <span style={{ fg: theme().text }}>{NormPricing.money(nextStep()!.usd)}</span> on{" "}
+            {nextStep()!.model}
+          </text>
+        </Show>
       </Show>
       <Show when={coreCredits()}>
         <text fg={theme().textMuted}>
@@ -477,6 +526,7 @@ function View(props: { api: TuiPluginApi }) {
 
 const tui: TuiPlugin = async (api) => {
   if (normDisabled()) return
+  loadPrices()
   api.keymap.registerLayer({
     commands: [
       {

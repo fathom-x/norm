@@ -7,6 +7,7 @@ import { existsSync, mkdirSync } from "fs"
 import { spawn, execFile } from "child_process"
 import { Global } from "@opencode-ai/core/global"
 import { NormBudget } from "@opencode-ai/core/norm-budget"
+import { NormPricing } from "@opencode-ai/core/norm-pricing"
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 
 // norm is opencode preconfigured for the Overpay owallet-marketplace stack:
@@ -819,16 +820,17 @@ export async function readProviderKey(): Promise<string | undefined> {
   return undefined
 }
 
-let modelsPromise: Promise<string[] | undefined> | undefined
+let modelsPromise: Promise<NormPricing.Model[] | undefined> | undefined
 
 /**
  * The marketplace's live model list from `GET /v1/models` (needs the server
  * up and a provider key — both normally arranged by `bootstrap`). Memoized
  * per process on success; a failure resolves undefined and is retried on the
  * next call. The norm plugin's `config` hook merges these into the overpay
- * provider's model list so the picker offers more than `default`.
+ * provider's model list so the picker offers more than `default` — with each
+ * model's price and context window where owallet reports them.
  */
-export function marketplaceModels(): Promise<string[] | undefined> {
+export function marketplaceModels(): Promise<NormPricing.Model[] | undefined> {
   modelsPromise ??= (async () => {
     try {
       const key = await readProviderKey()
@@ -844,11 +846,7 @@ export function marketplaceModels(): Promise<string[] | undefined> {
         debug(`model discovery: /v1/models responded ${res.status}`)
         return undefined
       }
-      const body: any = await res.json()
-      const ids = (Array.isArray(body?.data) ? body.data : [])
-        .map((entry: any) => entry?.id)
-        .filter((id: any): id is string => typeof id === "string" && id.length > 0)
-      return ids.length ? ids : undefined
+      return NormPricing.parseModels(await res.json())
     } catch (error) {
       debug("model discovery failed:", error)
       return undefined
@@ -858,6 +856,44 @@ export function marketplaceModels(): Promise<string[] | undefined> {
     return result
   })
   return modelsPromise
+}
+
+/**
+ * A marketplace model as an opencode config model: its name, list price as
+ * `cost` (USD per Mtok; the long-context tiers don't fit opencode's schema
+ * and stay with NormPricing's estimates) and its context window as `limit`.
+ * Without a known window opencode reads 0 and never auto-compacts, so a long
+ * conversation re-sends — and pays for — its whole history every turn.
+ */
+export function modelConfig(model: NormPricing.Model) {
+  const pricing = model.pricing
+  return {
+    name: model.id === "default" ? "Overpay marketplace (default)" : (model.name ?? model.id),
+    ...(pricing && {
+      cost: {
+        input: pricing.input,
+        output: pricing.output,
+        ...(pricing.cache_read !== undefined && { cache_read: pricing.cache_read }),
+      },
+    }),
+    ...(model.contextLength && { limit: NormPricing.limit(model.contextLength) }),
+  }
+}
+
+/**
+ * The overpay provider's configured models plus the marketplace's: models
+ * the seller no longer offers (gone from OpenRouter's catalog — every turn
+ * would fail) are left out, and an existing entry (the user's own, or the
+ * seeded `default`) keeps whatever it sets, with the marketplace filling in
+ * the rest.
+ */
+export function mergeModels<T extends Record<string, any>>(configured: Record<string, T>, models: NormPricing.Model[]) {
+  const merged: Record<string, any> = { ...configured }
+  for (const model of models) {
+    if (model.active === false) continue
+    merged[model.id] = { ...modelConfig(model), ...configured[model.id] }
+  }
+  return merged as Record<string, T>
 }
 
 /** True if anything answers HTTP at `base` — any status counts, only a network error is "down". */

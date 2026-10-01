@@ -8,11 +8,13 @@ import { DialogVariant } from "./dialog-variant"
 import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
 import { useSync } from "../context/sync"
+import { useNormModelPrice } from "./norm-model-price"
 
 export function DialogModel(props: { providerID?: string }) {
   const local = useLocal()
   const sync = useSync()
   const dialog = useDialog()
+  const price = useNormModelPrice()
   const [query, setQuery] = createSignal("")
 
   const connected = useConnected()
@@ -41,7 +43,9 @@ export function DialogModel(props: { providerID?: string }) {
             description: provider.name,
             category,
             disabled: provider.id === "opencode" && model.id.includes("-nano"),
-            footer: model.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
+            footer:
+              price.footer(provider.id, model.id, model.cost) ??
+              (model.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined),
             onSelect: () => {
               onSelect(provider.id, model.id)
             },
@@ -79,7 +83,9 @@ export function DialogModel(props: { providerID?: string }) {
               : undefined,
             category: connected() ? provider.name : undefined,
             disabled: provider.id === "opencode" && model.includes("-nano"),
-            footer: info.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined,
+            footer:
+              price.footer(provider.id, model, info.cost) ??
+              (info.cost?.input === 0 && provider.id === "opencode" ? "Free" : undefined),
             onSelect() {
               onSelect(provider.id, model)
             },
@@ -141,6 +147,11 @@ export function DialogModel(props: { providerID?: string }) {
 
   function onSelect(providerID: string, modelID: string) {
     local.model.set({ providerID, modelID }, { recent: true })
+    price.announceSwitch(
+      providerID,
+      modelID,
+      sync.data.provider.find((item) => item.id === providerID)?.models[modelID]?.cost,
+    )
     const list = local.model.variant.list()
     const cur = local.model.variant.selected()
     if (cur === "default" || (cur && list.includes(cur))) {
