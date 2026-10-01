@@ -113,6 +113,14 @@ const BUY_CREDITS_TOOL: &str = "buy_credits";
 const DEFAULT_SPEND_CAP_USD: f64 = 20.0;
 /// Environment variable overriding [`DEFAULT_SPEND_CAP_USD`].
 const SPEND_CAP_ENV: &str = "OWALLET_V1_SPEND_CAP_USD";
+/// Set to `1` to send a `session_id` in OpenRouter buyer notes. Off by
+/// default: before fathom-x/overpay#445 is deployed, the OpenRouter listing
+/// fails any order whose buyer note carries an unknown key. Turn it on per
+/// environment once Overpay confirms that deploy.
+const SESSION_ID_ENV: &str = "OWALLET_V1_SESSION_ID";
+/// Header a client may send its conversation key in (after the body's
+/// `session_id`, before `prompt_cache_key` — OpenRouter's own precedence).
+const SESSION_ID_HEADER: &str = "x-session-id";
 /// Request header a client (norm's per-conversation `/budget`) sends to
 /// *lower* this request's spending allowance: the wallet spending tools may
 /// move at most this many USD, and a value of 0 or less refuses the request
@@ -191,6 +199,11 @@ struct Ctx {
     /// a wallet-level dashboard setting takes precedence per request via
     /// [`effective_spend_cap`].
     spend_cap_usd: f64,
+    /// Whether OpenRouter buyer notes carry a `session_id` ([`SESSION_ID_ENV`]).
+    send_session_id: bool,
+    /// This request's opaque OpenRouter `session_id`, when one applies.
+    /// Set per request; `None` at construction.
+    session_id: Option<String>,
     /// This request's client-supplied limit ([`SPEND_LIMIT_HEADER`]), if any.
     /// Set per request; `None` at construction.
     request_spend_limit_usd: Option<f64>,
@@ -223,6 +236,19 @@ fn router_with_timing(state: McpState, timeout: Duration, poll: Duration) -> Rou
 /// read — tests use this so a parallel test can't race another's
 /// process-global environment.
 fn router_with_config(state: McpState, timeout: Duration, poll: Duration, cap: f64) -> Router {
+    let send_session_id = std::env::var(SESSION_ID_ENV).is_ok_and(|v| v.trim() == "1");
+    router_with_flags(state, timeout, poll, cap, send_session_id)
+}
+
+/// [`router_with_config`] with the `session_id` flag passed in rather than
+/// read from the environment — tests set it without racing each other.
+fn router_with_flags(
+    state: McpState,
+    timeout: Duration,
+    poll: Duration,
+    cap: f64,
+    send_session_id: bool,
+) -> Router {
     let ctx = Ctx {
         mcp: state,
         timeout,
@@ -230,6 +256,8 @@ fn router_with_config(state: McpState, timeout: Duration, poll: Duration, cap: f
         can_spend: false,
         key_id: None,
         spend_cap_usd: cap,
+        send_session_id,
+        session_id: None,
         request_spend_limit_usd: None,
         listing_tools: Arc::new(OnceCell::new()),
     };
@@ -688,6 +716,10 @@ pub(crate) async fn fetch_listing_tools(state: &McpState) -> Result<Vec<ListingT
             wrapped,
         });
     }
+    // Tool definitions open every prompt, so their order is part of the
+    // cached prefix: sort by name rather than trust the marketplace
+    // index's order to stay put between requests.
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(tools)
 }
 
@@ -1619,6 +1651,13 @@ struct ChatCompletionRequest {
     /// server-side loop sets its own).
     #[serde(default)]
     tool_choice: Option<Value>,
+    /// The caller's conversation key, if it sends one (OpenRouter's name).
+    #[serde(default)]
+    session_id: Option<Value>,
+    /// Alternative conversation key (OpenAI's name; `promptCacheKey` is
+    /// what the AI SDK emits when a provider enables cache keys).
+    #[serde(default, alias = "promptCacheKey")]
+    prompt_cache_key: Option<Value>,
 }
 
 impl ChatCompletionRequest {
@@ -1631,22 +1670,75 @@ impl ChatCompletionRequest {
     }
 }
 
-/// `content` is a bare string in the common case, but some OpenAI-compatible
-/// clients send the multipart form (`[{type:"text", text:"..."}]`) even for
-/// plain chat. Text parts are concatenated; non-text parts (image/audio) are
-/// silently dropped — everything downstream of this endpoint is text-only.
-fn message_text(content: &Value) -> Option<String> {
-    match content {
-        Value::String(s) => Some(s.clone()),
+/// Anthropic accepts at most 4 `cache_control` breakpoints per request, and
+/// the OpenRouter listing adds one of its own (on the newest message) for
+/// `anthropic/*` models — so at most this many client markers are forwarded.
+const MAX_CLIENT_CACHE_MARKERS: usize = 3;
+
+/// A text content part, keeping the client's `cache_control` breakpoint.
+fn text_part(text: &str, cache_control: Option<&Value>) -> Value {
+    let mut part = json!({"type": "text", "text": text});
+    if let Some(marker) = cache_control {
+        part["cache_control"] = marker.clone();
+    }
+    part
+}
+
+/// `content` for the buyer note. A plain string stays a string — unless
+/// the message itself carries a `cache_control` (how OpenAI-compatible
+/// clients such as norm mark single-text messages), which becomes a
+/// one-part array so the breakpoint reaches OpenRouter in the shape it
+/// reads. Multipart content stays multipart: text parts pass through with
+/// their `cache_control`, instead of being glued into one string with no
+/// separator (which dropped every breakpoint and silently changed the
+/// prompt). Non-text parts are dropped — downstream is text-only.
+fn normalize_content(entry: &Value) -> Option<Value> {
+    let message_marker = entry.get("cache_control").filter(|v| v.is_object());
+    match entry.get("content")? {
+        Value::String(text) => Some(match message_marker {
+            Some(marker) => json!([text_part(text, Some(marker))]),
+            None => json!(text),
+        }),
         Value::Array(parts) => {
-            let text: String = parts
+            let texts: Vec<Value> = parts
                 .iter()
                 .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .filter_map(|p| {
+                    let text = p.get("text").and_then(Value::as_str)?;
+                    Some(text_part(
+                        text,
+                        p.get("cache_control").filter(|v| v.is_object()),
+                    ))
+                })
                 .collect();
-            (!text.is_empty()).then_some(text)
+            (!texts.is_empty()).then_some(Value::Array(texts))
         }
         _ => None,
+    }
+}
+
+/// Drop client `cache_control` markers beyond [`MAX_CLIENT_CACHE_MARKERS`],
+/// keeping the earliest: the long, stable opening (system prompt, early
+/// history) is what caching pays for, and the newest message is where the
+/// listing places its own marker anyway.
+fn cap_cache_markers(messages: &mut [Value]) {
+    let mut kept = 0;
+    for message in messages.iter_mut() {
+        let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in parts.iter_mut() {
+            let Some(obj) = part.as_object_mut() else {
+                continue;
+            };
+            if obj.contains_key("cache_control") {
+                if kept < MAX_CLIENT_CACHE_MARKERS {
+                    kept += 1;
+                } else {
+                    obj.remove("cache_control");
+                }
+            }
+        }
     }
 }
 
@@ -1661,8 +1753,8 @@ fn normalize_message(entry: &Value) -> Option<Value> {
     let mut out = serde_json::Map::new();
     out.insert("role".to_string(), json!(role));
 
-    if let Some(text) = entry.get("content").and_then(message_text) {
-        out.insert("content".to_string(), json!(text));
+    if let Some(content) = normalize_content(entry) {
+        out.insert("content".to_string(), content);
     }
     if let Some(tool_calls) = entry
         .get("tool_calls")
@@ -1684,13 +1776,86 @@ fn normalize_message(entry: &Value) -> Option<Value> {
 }
 
 fn normalize_messages(raw: &[Value]) -> Result<Vec<Value>, OpenAiError> {
-    let messages: Vec<Value> = raw.iter().filter_map(normalize_message).collect();
+    let mut messages: Vec<Value> = raw.iter().filter_map(normalize_message).collect();
+    cap_cache_markers(&mut messages);
     if messages.is_empty() {
         return Err(OpenAiError::InvalidRequest(
             "messages must contain at least one usable entry".into(),
         ));
     }
     Ok(messages)
+}
+
+/// The caller's conversation key: body `session_id`, then the
+/// [`SESSION_ID_HEADER`] header, then `prompt_cache_key` — OpenRouter's own
+/// precedence. Blank values don't count.
+fn client_conversation_key(req: &ChatCompletionRequest, headers: &HeaderMap) -> Option<String> {
+    let clean = |v: &str| Some(v.trim()).filter(|s| !s.is_empty()).map(str::to_string);
+    req.session_id
+        .as_ref()
+        .and_then(Value::as_str)
+        .and_then(clean)
+        .or_else(|| {
+            headers
+                .get(SESSION_ID_HEADER)
+                .and_then(|h| h.to_str().ok())
+                .and_then(clean)
+        })
+        .or_else(|| {
+            req.prompt_cache_key
+                .as_ref()
+                .and_then(Value::as_str)
+                .and_then(clean)
+        })
+}
+
+/// Opaque, stable `session_id` for one client conversation:
+/// HMAC-SHA256(per-install secret, key), hex (64 chars, under the 256 the
+/// listing accepts). Every Overpay buyer shares one OpenRouter account and
+/// the id lands in Overpay's DB and OpenRouter's logs, so it must be unique
+/// across buyers, reveal nothing about the wallet, and not be linkable to
+/// the client's own id — hence keyed by a secret, not a plain hash.
+fn derive_session_id(secret: &[u8], client_key: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac =
+        Hmac::<sha2::Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(b"owallet/openrouter-session-id/v1\0");
+    mac.update(client_key.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// The `session_id` this request's OpenRouter orders should carry, or
+/// `None`. With a client conversation key: its HMAC. Without one: a random
+/// id for the server-side loop (so at least that request's own orders stick
+/// together), nothing for passthrough (OpenRouter's opening-message hash
+/// still works). Never a per-wallet constant, which would merge — and link —
+/// every conversation.
+fn request_session_id(ctx: &Ctx, client_key: Option<&str>, passthrough: bool) -> Option<String> {
+    if !ctx.send_session_id {
+        return None;
+    }
+    match client_key {
+        Some(key) => {
+            let secret = ctx.mcp.db.lock().ok()?.session_id_secret().ok()?;
+            Some(derive_session_id(&secret, key))
+        }
+        None if passthrough => None,
+        None => {
+            let mut bytes = [0u8; 16];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+            Some(hex::encode(bytes))
+        }
+    }
+}
+
+/// Add this request's `session_id` to an OpenRouter buyer note. OpenRouter
+/// listing orders only — `run_python` and listing tools still reject
+/// unknown buyer-note keys.
+fn with_session_id(mut buyer_note: Value, ctx: &Ctx) -> Value {
+    if let Some(id) = &ctx.session_id {
+        buyer_note["session_id"] = json!(id);
+    }
+    buyer_note
 }
 
 async fn chat_completions(
@@ -1706,13 +1871,15 @@ async fn chat_completions(
         Ok(limit) => limit,
         Err(e) => return e.into_response(),
     };
-    let ctx = Ctx {
+    let mut ctx = Ctx {
         mcp,
         can_spend,
         key_id,
         request_spend_limit_usd,
         ..ctx
     };
+    let client_key = client_conversation_key(&req, &headers);
+    ctx.session_id = request_session_id(&ctx, client_key.as_deref(), req.client_tools().is_some());
     // The client says this request may spend nothing (e.g. a conversation
     // whose budget is used up): refuse before any order — each chat turn is
     // itself a paid order.
@@ -2005,6 +2172,15 @@ fn net_charged_cents(snap: &Value, redeemed_cents: i64) -> i64 {
 pub(crate) struct TurnUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
+    /// Prompt tokens OpenRouter served from its prompt cache — the only
+    /// signal of whether a conversation is actually hitting the cache.
+    /// `None` = no order in the request reported it (unknown, not zero: the
+    /// listing's rebuilt-from-generation usage carries no cache details).
+    cached_tokens: Option<u64>,
+    /// Prompt tokens written into a new cache entry (a first long turn, or a
+    /// miss after the prefix changed / routing moved providers). Same
+    /// unknown-vs-zero rule.
+    cache_write_tokens: Option<u64>,
     charged_cents: i64,
     /// What the wallet spending tools moved during the request (credit
     /// purchases and redemptions), separate from `charged_cents` — the
@@ -2030,6 +2206,19 @@ impl TurnUsage {
         self.completion_tokens = self
             .completion_tokens
             .saturating_add(delivered.completion_tokens);
+        self.cached_tokens = sum_known(self.cached_tokens, delivered.cached_tokens);
+        self.cache_write_tokens = sum_known(self.cache_write_tokens, delivered.cache_write_tokens);
+    }
+
+    fn prompt_tokens_details(&self) -> Value {
+        let mut details = serde_json::Map::new();
+        if let Some(n) = self.cached_tokens {
+            details.insert("cached_tokens".into(), json!(n));
+        }
+        if let Some(n) = self.cache_write_tokens {
+            details.insert("cache_write_tokens".into(), json!(n));
+        }
+        Value::Object(details)
     }
 
     /// OpenAI's `usage` shape plus two extensions: `cost` (USD, the
@@ -2040,6 +2229,11 @@ impl TurnUsage {
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
             "total_tokens": self.prompt_tokens.saturating_add(self.completion_tokens),
+            // OpenAI's own shape for cache reads, which OpenAI-compatible
+            // clients (the AI SDK, so norm) already understand; the write
+            // count rides along under OpenRouter's name. Only counts some
+            // order actually reported appear — absent means unknown.
+            "prompt_tokens_details": self.prompt_tokens_details(),
             "cost": self.charged_cents as f64 / 100.0,
             "charged_cents": self.charged_cents,
             "wallet_spent_cents": self.wallet_spent_cents,
@@ -2062,6 +2256,16 @@ struct OpenRouterDelivered {
     tool_calls: Vec<Value>,
     prompt_tokens: u64,
     completion_tokens: u64,
+    cached_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+}
+
+/// Add two possibly-unknown counters: unknown only if both are.
+fn sum_known(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+    }
 }
 
 fn extract_openrouter_delivered(snap: &Value) -> Result<OpenRouterDelivered, OpenAiError> {
@@ -2088,6 +2292,8 @@ fn extract_openrouter_delivered(snap: &Value) -> Result<OpenRouterDelivered, Ope
         // tokens rather than a guess.
         prompt_tokens: delivered_usage_tokens(&inner, "prompt_tokens"),
         completion_tokens: delivered_usage_tokens(&inner, "completion_tokens"),
+        cached_tokens: delivered_cache_tokens(&inner, "cached_tokens"),
+        cache_write_tokens: delivered_cache_tokens(&inner, "cache_write_tokens"),
     })
 }
 
@@ -2097,6 +2303,17 @@ fn delivered_usage_tokens(inner: &Value, field: &str) -> u64 {
         .and_then(|usage| usage.get(field))
         .and_then(Value::as_u64)
         .unwrap_or(0)
+}
+
+/// OpenRouter's prompt-cache counts from the delivered usage
+/// (`usage.prompt_tokens_details.{cached_tokens,cache_write_tokens}`);
+/// `None` when not reported — `usage` may be null, or rebuilt from the
+/// generation record without cache details.
+fn delivered_cache_tokens(inner: &Value, field: &str) -> Option<u64> {
+    inner
+        .pointer("/usage/prompt_tokens_details")
+        .and_then(|details| details.get(field))
+        .and_then(Value::as_u64)
 }
 
 /// The Python listing's delivered `{stdout, stderr, exit_code, duration_ms,
@@ -2299,12 +2516,15 @@ async fn run_agentic_loop(
         if exhausted_key_budget(&ctx.mcp, ctx.key_id.as_deref()).is_some() {
             break;
         }
-        let buyer_note = json!({
-            "model": requested_model,
-            "messages": messages,
-            "tools": defs,
-            "tool_choice": "auto",
-        });
+        let buyer_note = with_session_id(
+            json!({
+                "model": requested_model,
+                "messages": messages,
+                "tools": defs,
+                "tool_choice": "auto",
+            }),
+            ctx,
+        );
         let (order_id, redeemed_cents) = place_and_pay_order(
             &ctx.mcp,
             auth,
@@ -2355,12 +2575,15 @@ async fn run_agentic_loop(
     // way — an error now would throw that context away. One final turn
     // with tools disabled forces the model to report what it actually did;
     // only if it *still* yields no text does the request fail.
-    let buyer_note = json!({
-        "model": requested_model,
-        "messages": messages,
-        "tools": defs,
-        "tool_choice": "none",
-    });
+    let buyer_note = with_session_id(
+        json!({
+            "model": requested_model,
+            "messages": messages,
+            "tools": defs,
+            "tool_choice": "none",
+        }),
+        ctx,
+    );
     let (order_id, redeemed_cents) = place_and_pay_order(
         &ctx.mcp,
         auth,
@@ -2412,11 +2635,14 @@ async fn run_passthrough_turn(
     tool_choice: Option<&Value>,
 ) -> Result<AgentResult, OpenAiError> {
     let listing_id = resolve_openrouter_listing_id(&ctx.mcp).await?;
-    let mut buyer_note = json!({
-        "model": requested_model,
-        "messages": messages,
-        "tools": tools,
-    });
+    let mut buyer_note = with_session_id(
+        json!({
+            "model": requested_model,
+            "messages": messages,
+            "tools": tools,
+        }),
+        ctx,
+    );
     // Only forwarded when the caller set one — the listing (and OpenRouter
     // beneath it) default to "auto" on their own.
     if let Some(choice) = tool_choice {
@@ -2643,11 +2869,11 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
         // (and the loop below that runs it) never engages. The polling
         // shape mirrors the loop body's, per this generator's convention.
         if let Some(tools) = req.client_tools() {
-            let mut buyer_note = json!({
+            let mut buyer_note = with_session_id(json!({
                 "model": requested_model,
                 "messages": messages,
                 "tools": tools,
-            });
+            }), &ctx);
             if let Some(choice) = req.tool_choice.as_ref() {
                 buyer_note["tool_choice"] = choice.clone();
             }
@@ -2746,12 +2972,12 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             if exhausted_key_budget(&ctx.mcp, ctx.key_id.as_deref()).is_some() {
                 break;
             }
-            let buyer_note = json!({
+            let buyer_note = with_session_id(json!({
                 "model": requested_model,
                 "messages": messages,
                 "tools": defs.clone(),
                 "tool_choice": "auto",
-            });
+            }), &ctx);
             let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
                 Ok(placed) => placed,
                 Err(e) => {
@@ -2992,12 +3218,12 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
         // Cap reached — same landing as run_agentic_loop's: one final turn
         // with tools disabled, streamed like any other, so the client still
         // hears what actually happened (orders may already be paid).
-        let buyer_note = json!({
+        let buyer_note = with_session_id(json!({
             "model": requested_model,
             "messages": messages,
             "tools": defs.clone(),
             "tool_choice": "none",
-        });
+        }), &ctx);
         let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
             Ok(placed) => placed,
             Err(e) => {
@@ -3083,6 +3309,240 @@ fn unix_now() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    // ---- prompt caching: markers, session ids ----
+
+    #[test]
+    fn a_message_level_cache_marker_becomes_a_marked_text_part() {
+        let m = normalize_message(&json!({
+            "role": "system", "content": "long stable prompt",
+            "cache_control": {"type": "ephemeral"},
+        }))
+        .unwrap();
+        assert_eq!(
+            m["content"],
+            json!([{"type": "text", "text": "long stable prompt", "cache_control": {"type": "ephemeral"}}])
+        );
+        // Unmarked strings stay strings.
+        let plain = normalize_message(&json!({"role": "user", "content": "hi"})).unwrap();
+        assert_eq!(plain["content"], json!("hi"));
+    }
+
+    #[test]
+    fn multipart_content_keeps_its_parts_and_markers() {
+        let m = normalize_message(&json!({"role": "user", "content": [
+            {"type": "text", "text": "first"},
+            {"type": "image_url", "image_url": {"url": "x"}},
+            {"type": "text", "text": "second", "cache_control": {"type": "ephemeral"}},
+        ]}))
+        .unwrap();
+        // Parts are no longer glued into "firstsecond"; non-text is dropped.
+        assert_eq!(
+            m["content"],
+            json!([
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second", "cache_control": {"type": "ephemeral"}},
+            ])
+        );
+    }
+
+    #[test]
+    fn at_most_three_client_markers_survive_keeping_the_earliest() {
+        let marked = |role: &str, text: &str| json!({"role": role, "content": text, "cache_control": {"type": "ephemeral"}});
+        let raw = vec![
+            marked("system", "s1"),
+            marked("system", "s2"),
+            marked("user", "u1"),
+            marked("assistant", "a1"),
+            marked("user", "u2"),
+        ];
+        let messages = normalize_messages(&raw).ok().unwrap();
+        let markers: Vec<bool> = messages
+            .iter()
+            .map(|m| {
+                m["content"]
+                    .as_array()
+                    .is_some_and(|p| p[0].get("cache_control").is_some())
+            })
+            .collect();
+        // Anthropic allows 4; the listing adds 1 on the newest message.
+        assert_eq!(markers, vec![true, true, true, false, false]);
+    }
+
+    #[test]
+    fn session_ids_are_stable_opaque_and_keyed() {
+        let a = derive_session_id(&[1u8; 32], "ses_abc");
+        assert_eq!(
+            a,
+            derive_session_id(&[1u8; 32], "ses_abc"),
+            "stable per conversation"
+        );
+        assert_ne!(
+            a,
+            derive_session_id(&[1u8; 32], "ses_abd"),
+            "differs per conversation"
+        );
+        assert_ne!(
+            a,
+            derive_session_id(&[2u8; 32], "ses_abc"),
+            "differs per install"
+        );
+        assert_eq!(a.len(), 64);
+        assert!(!a.contains("ses_abc"), "does not reveal the client key");
+    }
+
+    #[test]
+    fn conversation_key_precedence_is_body_then_header_then_cache_key() {
+        let req = |body: Value| serde_json::from_value::<ChatCompletionRequest>(body).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(SESSION_ID_HEADER, "from-header".parse().unwrap());
+        let all = req(
+            json!({"model": "m", "messages": [], "session_id": "from-body", "prompt_cache_key": "from-pck"}),
+        );
+        assert_eq!(
+            client_conversation_key(&all, &headers).as_deref(),
+            Some("from-body")
+        );
+        let no_body = req(json!({"model": "m", "messages": [], "prompt_cache_key": "from-pck"}));
+        assert_eq!(
+            client_conversation_key(&no_body, &headers).as_deref(),
+            Some("from-header")
+        );
+        // The AI SDK's camelCase spelling is accepted too.
+        let camel = req(json!({"model": "m", "messages": [], "promptCacheKey": "from-camel"}));
+        assert_eq!(
+            client_conversation_key(&camel, &HeaderMap::new()).as_deref(),
+            Some("from-camel")
+        );
+        let blank = req(json!({"model": "m", "messages": [], "session_id": "  "}));
+        assert_eq!(client_conversation_key(&blank, &HeaderMap::new()), None);
+    }
+
+    /// Every OpenRouter buyer note in the request, parsed.
+    async fn openrouter_notes(overpay: &MockServer) -> Vec<Value> {
+        overpay
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/v1/orders")
+            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
+            .filter_map(|b| {
+                b.get("buyer_note")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .filter_map(|n| serde_json::from_str::<Value>(&n).ok())
+            .filter(|n| n.get("messages").is_some())
+            .collect()
+    }
+
+    fn server_with_session_ids(state: McpState, on: bool) -> TestServer {
+        let key = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "test", "chat", None)
+            .unwrap()
+            .1;
+        let router = router_with_flags(
+            state,
+            REQUEST_TIMEOUT,
+            POLL_INTERVAL,
+            DEFAULT_SPEND_CAP_USD,
+            on,
+        );
+        let mut server = TestServer::new(router).unwrap();
+        server.add_header(header::AUTHORIZATION, format!("Bearer {key}"));
+        server
+    }
+
+    async fn passthrough_note(on: bool, header_key: Option<&str>) -> Value {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "id": "OR-0", "fulfillment_status": "delivered",
+                "delivered_content": delivered_content("ok", "openai/gpt-5-mini", false),
+            }})))
+            .mount(&overpay)
+            .await;
+        let tmp = TempDir::new().unwrap();
+        let s = server_with_session_ids(seeded_state(&overpay.uri(), &tmp), on);
+        let mut req = s.post("/chat/completions");
+        if let Some(k) = header_key {
+            req = req.add_header(SESSION_ID_HEADER, k);
+        }
+        req.json(&json!({
+            "model": "openai/gpt-5-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}],
+        }))
+        .await
+        .assert_status_ok();
+        openrouter_notes(&overpay)
+            .await
+            .pop()
+            .expect("an OpenRouter order")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_id_is_sent_only_when_enabled_and_derived_from_the_client_key() {
+        // Flag off (the default until overpay#445 is deployed): nothing extra.
+        let off = passthrough_note(false, Some("ses_client_1")).await;
+        assert!(off.get("session_id").is_none(), "{off}");
+        // Flag on + client key: an opaque derived id, never the raw key.
+        let on = passthrough_note(true, Some("ses_client_1")).await;
+        let id = on["session_id"].as_str().expect("session_id sent");
+        assert_eq!(id.len(), 64);
+        assert_ne!(id, "ses_client_1");
+        // Passthrough without a key sends nothing (OpenRouter hashes instead).
+        let bare = passthrough_note(true, None).await;
+        assert!(bare.get("session_id").is_none(), "{bare}");
+    }
+
+    #[test]
+    fn usage_carries_openrouter_prompt_cache_counts() {
+        let delivered = |cached: u64, written: u64| {
+            json!({"data": {"delivered_content": serde_json::to_string(&json!({
+                "description": "ok", "model": "deepseek/deepseek-chat", "error": false,
+                "usage": {
+                    "prompt_tokens": 2000, "completion_tokens": 5,
+                    "prompt_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written},
+                },
+            })).unwrap()}})
+        };
+        // Two turns of one request: a cache write, then a hit.
+        let mut usage = TurnUsage::default();
+        usage.add_tokens(
+            &extract_openrouter_delivered(&delivered(0, 1900))
+                .ok()
+                .unwrap(),
+        );
+        usage.add_tokens(
+            &extract_openrouter_delivered(&delivered(1900, 0))
+                .ok()
+                .unwrap(),
+        );
+        let out = usage.to_json();
+        assert_eq!(out["prompt_tokens"], 4000);
+        assert_eq!(out["prompt_tokens_details"]["cached_tokens"], 1900);
+        assert_eq!(out["prompt_tokens_details"]["cache_write_tokens"], 1900);
+
+        // A seller that reports no cache details leaves them unknown.
+        let bare = json!({"data": {"delivered_content": serde_json::to_string(&json!({
+            "description": "ok", "model": "m", "error": false,
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+        })).unwrap()}});
+        let mut usage = TurnUsage::default();
+        usage.add_tokens(&extract_openrouter_delivered(&bare).ok().unwrap());
+        // Unknown, not zero: the field is absent.
+        assert!(usage.to_json()["prompt_tokens_details"]
+            .get("cached_tokens")
+            .is_none());
+    }
+
     #[test]
     fn no_credits_422_becomes_actionable_payment_error() {
         let err: OpenAiError = OverpayError::HttpStatus {
@@ -3557,6 +4017,8 @@ mod tests {
             stream: false,
             tools: None,
             tool_choice: None,
+            session_id: None,
+            prompt_cache_key: None,
         };
         assert!(validate_request(&state, &req).await.is_ok());
     }

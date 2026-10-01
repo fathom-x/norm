@@ -25,6 +25,9 @@ serde_json = { workspace = true }
 time = { version = "=0.3.37", default-features = false, features = ["formatting", "macros"] }
 time-tz = "2.0.0"
 hex = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
 # JSON-Schema validator used by `create_order` for pre-flight buyer_note
 # validation against the listing's `buyer_note_schema`. `default-features =
 # false` drops the regex / URL-resolver features we don't need (and keeps
