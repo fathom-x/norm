@@ -131,9 +131,21 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   (`size_openrouter_authorization` mirrors the guard's arithmetic — keep
   the two in step) and, above the default, creates+pays in one request
   with `authorization_cents` (Rails only takes it with `pay:
-  merchant_credits`); a 402 on that hold falls back to the plain path.
-  `rejected` is terminal (`WAIT_TERMINAL_STATUSES`), with its reason in
-  `rejection`.
+  merchant_credits`); a 402 on a hold *above the default* falls back to
+  the plain path. The buyer's cap — `TurnCap`, the lower of
+  `x-owallet-request-max-usd` (per message) and `x-owallet-spend-limit-usd`
+  (the conversation's remainder), via `turn_cap(ctx)` — bounds every
+  order: sizing returns `TurnAuthorization::{Default, Authorize, OverCap}`,
+  and `OverCap` (the turn's input + the guard's 256-token reserve, or the
+  variant's min authorization, over the cap) is refused *before any
+  order*; a fixed-price order over the cap is refused before it is paid.
+  `rejected` is terminal (`WAIT_TERMINAL_STATUSES`); `rejection_error`
+  turns its `reason_code` into a coded error (`authorization_too_low` →
+  `Limit`, `upstream_unavailable` → `Unavailable`), and `delivered_error`
+  does the same for older sellers' error deliveries. Errors carry an
+  `error.code` (`OpenAiError::code`) — keep messages buyer-readable:
+  what happened, that nothing was charged, and what to do
+  (`RAISE_LIMIT_HINT`).
   **Wallet tools** (`WALLET_TOOLS` in `openai_compat.rs`) sit alongside
   the listing tool: `get_balances` / `browse_marketplace` / `get_listing`
   / `list_orders` / `get_order_status` for any provider key;
