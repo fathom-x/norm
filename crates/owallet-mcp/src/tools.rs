@@ -564,6 +564,7 @@ async fn marketplace_tool_call(
             key_id,
             &mut usage,
             progress,
+            None,
         )
         .await
         .map_err(|e| ToolError::Internal(e.message().to_string()))?;
@@ -585,6 +586,7 @@ async fn marketplace_tool_call(
         key_id,
         &mut usage,
         progress,
+        None,
     )
     .await
     .map_err(|e| ToolError::Internal(e.message().to_string()))?;

@@ -4,6 +4,34 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### A per-message spending limit, and errors that say what to do
+
+- **`x-owallet-request-max-usd`**: the most any single order of the
+  request may authorize or cost (norm's `/budget` → "Per-message limit",
+  default $1). Each OpenRouter turn's authorization is sized within it — a
+  tight limit authorizes exactly the limit when the turn still fits — and
+  a turn that can't fit (its input plus the seller's minimal reply, or the
+  model's advertised minimum commitment) is refused **before any order is
+  placed**: "This message (about 40,013 tokens of context on X) needs at
+  least $0.15 — over your $0.10 per-message limit. Nothing was sent or
+  charged. Raise the limit (norm: /budget), start a fresh conversation, or
+  pick a cheaper model." A fixed-price tool purchase over the limit is
+  refused before it is paid.
+- The conversation budget (`x-owallet-spend-limit-usd`) now bounds turn
+  authorizations too, not only the wallet tools; the lower of the two
+  limits applies, and the refusal names which.
+- **Error codes.** `error.code` (was always null) is now
+  `request_limit_exceeded`, `authorization_too_low`, `budget_exhausted`,
+  `insufficient_credits` or `model_unavailable`, so clients can react
+  without parsing messages.
+- **Seller rejections read as such.** An `authorization_too_low`
+  rejection (fathom-x/overpay#473) becomes a limit error with the seller's
+  "needs at least $X" message plus how to proceed; `upstream_unavailable`
+  becomes `model_unavailable` with the seller's message ("No OpenRouter
+  provider can serve X within this request's authorization… Nothing was
+  charged"). Older sellers' error deliveries carrying the same
+  `reason_code` map the same way.
+
 ### Compatible with metered pricing (#458-#466)
 
 - **Long OpenRouter turns are authorized for what they need.** The
