@@ -552,6 +552,27 @@ impl Database {
         Ok(())
     }
 
+    // ---- OpenRouter conversation ids ----
+
+    /// Random 32-byte secret, created on first use, keying the HMAC that
+    /// turns a client's conversation key into the opaque `session_id` sent
+    /// to OpenRouter (via Overpay). Keeps those ids unguessable and
+    /// unlinkable to the client's own ids; it unlocks nothing, so it lives
+    /// in the plain settings table.
+    pub fn session_id_secret(&self) -> Result<[u8; 32]> {
+        if let Some(stored) = settings::read(&self.conn, "session_id_secret")? {
+            if let Ok(bytes) = hex::decode(stored.trim()) {
+                if let Ok(secret) = <[u8; 32]>::try_from(bytes.as_slice()) {
+                    return Ok(secret);
+                }
+            }
+        }
+        let mut secret = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
+        settings::write(&self.conn, "session_id_secret", &hex::encode(secret))?;
+        Ok(secret)
+    }
+
     // ---- Per-wallet encrypted state directory (issue #310) ----
 
     /// Open the per-`npub` encrypted state directory (`<data dir>/<npub>/`).

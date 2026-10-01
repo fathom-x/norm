@@ -4,6 +4,33 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Keeping OpenRouter's prompt cache warm through `/v1`
+
+Synced from fathom-x/overpay#456 (the owallet side of overpay#445's notes).
+
+- **Cache counters in usage.** `usage.prompt_tokens_details` carries
+  OpenRouter's `cached_tokens` / `cache_write_tokens`, summed across a
+  request's orders — and only counts some order actually reported: absent
+  means unknown (the listing's rebuilt-from-generation usage has none), not
+  zero. `cached_tokens` is OpenAI's own field, so OpenAI-compatible clients
+  (the AI SDK, so norm) show cache reads with no change.
+- **Client cache markers survive.** `content` is no longer flattened: text
+  parts pass through with their `cache_control`, and a message-level
+  `cache_control` (how OpenAI-compatible clients mark single-text messages)
+  becomes a marked one-part array. At most 3 client markers are forwarded,
+  keeping the earliest — Anthropic allows 4 and the listing adds one on the
+  newest message. Text parts are no longer glued together with no
+  separator.
+- **`session_id` for sticky routing**, behind `OWALLET_V1_SESSION_ID=1`.
+  The client's conversation key — body `session_id`, then `x-session-id`,
+  then `prompt_cache_key` / `promptCacheKey` — becomes
+  `HMAC-SHA256(per-install secret, key)`, sent on every OpenRouter buyer
+  note of the request; never the raw key or a per-wallet constant. Without
+  a key: a random id for the server-side loop, nothing for passthrough.
+  `run_python` and listing-tool orders never carry it.
+- **Stable tool order.** Listing tools are sorted by name, so the tool
+  block that opens every prompt can't reorder between requests.
+
 Fixes from a live marketplace test session.
 
 ### Long chat replies no longer fail after being paid for
