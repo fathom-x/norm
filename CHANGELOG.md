@@ -4,6 +4,68 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Compatible with metered pricing (#458-#466)
+
+- **Long OpenRouter turns are authorized for what they need.** The
+  listing's price is now a per-turn *authorization*, and the seller's
+  exposure guard refuses a turn whose authorization can't cover its input
+  plus output ("needs an authorization of at least N¢") — which a long
+  agent conversation reaches on any model, sooner on premium ones. Every
+  OpenRouter turn now sizes itself from the model variant's published
+  rate card (the guard's own arithmetic: input at its tier, an 8192-token
+  output allowance or the request's smaller `max_tokens`, plus markup)
+  and, when that exceeds the default, creates and pays the order in one
+  request with `authorization_cents`. The unused hold comes back as
+  credits as before. If credits can't cover the larger hold the turn is
+  placed the old way, so a low balance never loses a turn that fits.
+- **`rejected` is a terminal order state.** A seller's refusal of a paid
+  order (credits released in full) used to be polled until the timeout;
+  it now ends the wait, and the error/next step carries the `rejection`
+  reason and, for `authorization_too_low`, the authorization that would
+  have been enough. Order projections keep `rejection` (field by field).
+- File deliveries take their size from `delivered_content_byte_size`
+  when the download doesn't state one.
+
+### One-shot purchases never lose a paid order
+
+From a live norm test session and an agent's health-check pass over every
+listing.
+
+- A one-shot tool (`run_python` / `provider_tool` listings) whose seller
+  stalls now returns the paid order as a pending result — `order_id`,
+  statuses, `charged_cents`, "do not buy again", and a `wait_for_order`
+  hint — instead of an error without the order id.
+- On `/mcp`, in-flight polls emit `notifications/progress`, which resets
+  the MCP client's request timeout (opencode's 60s tripped on a silent
+  120s poll and dropped the result). A client that didn't opt into
+  progress gets the pending result at 50s, before its own timeout.
+- One-shot polls go through `get_order_resolved` too, so a file-delivered
+  one-shot result is read like a file-delivered chat reply.
+- One-shot results render readably: JSON deliverables decoded instead of
+  double-encoded, `run_python` as exit code + stdout/stderr, followed by
+  an `order_id: …` line and what it charged.
+- Image (and other binary) deliveries succeed: a paid `generate_image`
+  failed with `delivered content: file is not UTF-8 text` although the
+  seller had delivered a valid PNG. A file delivery now comes back as
+  `delivered_content_url` + `delivered_content_type` +
+  `delivered_content_bytes` ("Delivered a file (image/png, 1.0 MB)" and
+  the download link); binary media types aren't downloaded at all.
+- A one-shot order that was paid but whose result then couldn't be read
+  returns its `order_id`, the charge, and "do not buy again" rather than
+  a bare error.
+
+### Prices, amounts, and schemas visible to the model
+
+- `list_marketplace` / `get_listing` showed `Price: —` for every listing:
+  Rails sends `price_usd` as a formatted string, which the renderer
+  ignored. Prices render from `price_usd` or `price_cents` (sub-cent aware).
+- Orders show their amount (and a metered order's settled charge) and
+  product title; projections keep `price_cents` / `total_usd_cents`.
+- `get_listing` renders the buyer_note_schema's fields (type, required,
+  enum, default, description) in the text — it was only in
+  `structuredContent`, which the model never reads.
+- Listings sold through a one-shot tool are marked with its name.
+
 ### Keeping OpenRouter's prompt cache warm through `/v1`
 
 Implements the owallet side of #445's notes.

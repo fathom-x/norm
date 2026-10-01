@@ -79,10 +79,11 @@ use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 
+use crate::progress::ProgressSink;
 use crate::state::{McpState, OwnedAuth, ResolveAuthError};
 use crate::tools::{new_output_since, partial_output, WAIT_TERMINAL_STATUSES};
 use owallet_overpay::models::ListingFilters;
-use owallet_overpay::OverpayError;
+use owallet_overpay::{DeliveredContent, OverpayError};
 
 const OPENROUTER_SELLER_SLUG: &str = "openrouter-bot";
 const OPENROUTER_LISTING_TITLE: &str = "OpenRouter Inference";
@@ -753,6 +754,7 @@ pub(crate) async fn run_listing_tool(
     poll: Duration,
     key_id: Option<&str>,
     usage: &mut TurnUsage,
+    progress: Option<&ProgressSink>,
 ) -> Result<Value, OpenAiError> {
     let buyer_note = listing_tool_buyer_note(tool, arguments);
     let (order_id, redeemed_cents) = place_and_pay_order(
@@ -764,10 +766,130 @@ pub(crate) async fn run_listing_tool(
         key_id,
     )
     .await?;
-    let snap = wait_for_order_terminal(state, auth, &order_id, timeout, poll).await?;
-    net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
+    let (snap, terminal) =
+        match poll_one_shot(state, auth, &order_id, timeout, poll, progress).await {
+            Ok(polled) => polled,
+            Err(e) => {
+                usage.add_order(&Value::Null, redeemed_cents);
+                return Ok(unreadable_order_result(&order_id, redeemed_cents, &e));
+            }
+        };
     usage.add_order(&snap, redeemed_cents);
-    Ok(extract_listing_delivered(&order_id, &snap))
+    if !terminal {
+        return Ok(pending_order_result(
+            &order_id,
+            &snap,
+            redeemed_cents,
+            timeout,
+        ));
+    }
+    net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
+    let mut out = extract_listing_delivered(&order_id, &snap);
+    out["charged_cents"] = json!(net_charged_cents(&snap, redeemed_cents));
+    Ok(out)
+}
+
+/// Poll a one-shot purchase (listing tool / run_python) until it reaches a
+/// terminal status or `timeout` passes. Returns the last snapshot and
+/// whether it was terminal — running out of time is *not* an error here:
+/// the order is already paid, so the caller hands back its id rather than
+/// losing it (a live session was charged for a stalled `forecast` and got
+/// back nothing to follow up with).
+///
+/// When the `/mcp` caller opted into progress, every in-flight poll emits a
+/// `notifications/progress` — the seller's new partial output when there
+/// is some, else a status line — which also resets the MCP client's
+/// request timeout (opencode's is 60s, reset on progress; a silent
+/// 120s poll tripped it and the client dropped the paid result).
+async fn poll_one_shot(
+    state: &McpState,
+    auth: &OwnedAuth,
+    order_id: &str,
+    timeout: Duration,
+    poll: Duration,
+    progress: Option<&ProgressSink>,
+) -> Result<(Value, bool), OpenAiError> {
+    let start = Instant::now();
+    let mut tick = 0u64;
+    let mut streamed = 0usize;
+    loop {
+        let snap = get_order_resolved(state, auth, order_id).await?;
+        let status = order_status(&snap);
+        if is_terminal(status) {
+            return Ok((snap, true));
+        }
+        if start.elapsed() >= timeout {
+            return Ok((snap, false));
+        }
+        if let Some(sink) = progress.filter(|s| s.wants_progress()) {
+            tick += 1;
+            let (partial, _seq) = partial_output(&snap);
+            let message = match new_output_since(partial, &mut streamed) {
+                Some(delta) => delta.to_string(),
+                None => format!(
+                    "order {order_id} paid, {} — waited {}s",
+                    status.unwrap_or("in flight"),
+                    start.elapsed().as_secs()
+                ),
+            };
+            sink.emit(
+                tick,
+                None,
+                message,
+                json!({"order_id": order_id, "fulfillment_status": status}),
+            );
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// The tool result for a one-shot order that is paid but not yet
+/// delivered when the call's time runs out: its id, where it stands, and
+/// an explicit "don't buy again" — a model that reads a bare timeout
+/// error retries, which pays a second time.
+fn pending_order_result(
+    order_id: &str,
+    snap: &Value,
+    redeemed_cents: i64,
+    timeout: Duration,
+) -> Value {
+    let status = order_status(snap).unwrap_or("in_progress");
+    json!({
+        "order_id": order_id,
+        "payment_status": "paid",
+        "fulfillment_status": status,
+        "pending": true,
+        "charged_cents": redeemed_cents,
+        "error": format!(
+            "order {order_id} is paid but the seller has not delivered after {}s (status: {status}) — \
+             it may still complete; do not buy again",
+            timeout.as_secs()
+        ),
+        "hint": format!(
+            "wait_for_order(order_id=\"{order_id}\", until_status=\"delivered\") to keep following it, \
+             or get_order_status(order_id=\"{order_id}\") later"
+        ),
+    })
+}
+
+/// The tool result for a one-shot order that was paid but whose snapshot
+/// could not be read or decoded afterwards (a network blip, an odd
+/// delivery): the error *with* the order id, so the model can follow the
+/// order up instead of buying again. A bare error here once cost a paid
+/// image delivery its id ("internal: delivered content: …").
+fn unreadable_order_result(order_id: &str, redeemed_cents: i64, err: &OpenAiError) -> Value {
+    json!({
+        "order_id": order_id,
+        "payment_status": "paid",
+        "charged_cents": redeemed_cents,
+        "error": format!(
+            "order {order_id} is paid, but reading its result failed: {} — do not buy again",
+            err.message()
+        ),
+        "hint": format!(
+            "get_order_status(order_id=\"{order_id}\") to see where it stands"
+        ),
+    })
 }
 
 /// The buyer_note for a listing-tool call: the arguments verbatim, or —
@@ -794,10 +916,8 @@ fn extract_listing_delivered(order_id: &str, snap: &Value) -> Value {
     out.insert("order_id".into(), json!(order_id));
     out.insert("fulfillment_status".into(), json!(status));
     if status != "delivered" {
-        let reason = order
-            .get("fulfillment_error")
-            .and_then(Value::as_str)
-            .unwrap_or("the seller did not deliver this order");
+        let reason = order_failure_reason(order)
+            .unwrap_or_else(|| "the seller did not deliver this order".into());
         out.insert("error".into(), json!(reason));
         return Value::Object(out);
     }
@@ -813,7 +933,11 @@ fn extract_listing_delivered(order_id: &str, snap: &Value) -> Value {
             out.insert("delivered_content".into(), json!(content));
         }
     }
-    for key in ["delivered_content_type", "delivered_content_url"] {
+    for key in [
+        "delivered_content_type",
+        "delivered_content_url",
+        "delivered_content_bytes",
+    ] {
         if let Some(v) = order.get(key).filter(|v| !v.is_null()) {
             out.insert(key.into(), v.clone());
         }
@@ -907,8 +1031,8 @@ const WALLET_TOOLS: &[WalletToolSpec] = &[
             json!({
                 "type": "object",
                 "properties": {
-                    "payment_status":     {"type": "string", "description": "e.g. pending, paid"},
-                    "fulfillment_status": {"type": "string", "description": "e.g. pending, awaiting_seller, delivered"},
+                    "payment_status":     {"type": "string", "description": crate::tools::ORDER_STATUS_FILTER_HINT},
+                    "fulfillment_status": {"type": "string", "description": crate::tools::ORDER_STATUS_FILTER_HINT},
                     "limit":              {"type": "integer", "minimum": 1, "maximum": 20},
                     "cursor":             {"type": "string", "description": "next_cursor from a previous page"},
                 },
@@ -1373,6 +1497,9 @@ fn project_order_status(data: &Value) -> Value {
         if let Some(v) = order.get(key) {
             out.insert(key.into(), v.clone());
         }
+    }
+    if let Some(r) = crate::projection::rejection(order) {
+        out.insert("rejection".into(), r);
     }
     if let Some(url) = order
         .get("delivered_content_url")
@@ -1988,6 +2115,21 @@ async fn place_and_pay_order(
             .map_err(|e| OpenAiError::internal(format!("could not encode buyer_note: {e}")))?,
     };
 
+    // A metered OpenRouter turn whose prompt outgrew the listing's default
+    // authorization: authorize what it needs up front, or the seller's
+    // exposure guard refuses it ("needs an authorization of at least N¢").
+    if seller_slug == OPENROUTER_SELLER_SLUG {
+        if let Some(cents) = openrouter_authorization_cents(state, listing_id, buyer_note).await {
+            match place_authorized_order(state, auth, listing_id, &note_str, cents, key_id).await {
+                // Credits don't cover the larger hold: fall through to the
+                // default authorization and let the seller judge the turn,
+                // rather than refusing one that might still fit.
+                Err(OpenAiError::PaymentRequired(_)) => {}
+                other => return other,
+            }
+        }
+    }
+
     let order = state
         .overpay
         .create_order_value(listing_id, Some(&note_str), auth.as_auth())
@@ -2038,6 +2180,179 @@ async fn place_and_pay_order(
     }
 
     Ok((order_id, redeemed_cents))
+}
+
+/// Create and pay an order with a buyer-set authorization in one request
+/// (Rails requires both together). Same contract as
+/// [`place_and_pay_order`]; uncovered credits are `PaymentRequired`.
+async fn place_authorized_order(
+    state: &McpState,
+    auth: &OwnedAuth,
+    listing_id: &str,
+    note_str: &str,
+    authorization_cents: i64,
+    key_id: Option<&str>,
+) -> Result<(String, i64), OpenAiError> {
+    let resp = match state
+        .overpay
+        .create_paid_order_value(listing_id, Some(note_str), authorization_cents, auth.as_auth())
+        .await
+    {
+        Ok(resp) => resp,
+        Err(OverpayError::HttpStatus { status: 402, body }) => {
+            return Err(OpenAiError::PaymentRequired(format!(
+                "not enough merchant credits to authorize {} for this turn ({body}) — {LOAD_CREDITS_HINT}",
+                fmt_usd_cents(authorization_cents)
+            )))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let order_id = resp
+        .pointer("/data/id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| OpenAiError::internal("create_order response missing id"))?
+        .to_string();
+    let status = resp
+        .pointer("/payment/status")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if status != "fully_paid" && status != "already_paid" {
+        let message = resp
+            .pointer("/payment/error")
+            .or_else(|| resp.pointer("/payment/message"))
+            .and_then(Value::as_str)
+            .unwrap_or("insufficient Overpay merchant credits");
+        return Err(OpenAiError::PaymentRequired(format!(
+            "{message} — {LOAD_CREDITS_HINT}"
+        )));
+    }
+    let mut redeemed_cents: i64 = 0;
+    if let Some(cents) = resp
+        .pointer("/payment/amount_redeemed_cents")
+        .and_then(Value::as_f64)
+    {
+        record_key_budget(state, key_id, cents / 100.0);
+        redeemed_cents = cents.round() as i64;
+    }
+    Ok((order_id, redeemed_cents))
+}
+
+/// `$X.YZ` for whole cents.
+fn fmt_usd_cents(cents: i64) -> String {
+    format!("${}.{:02}", cents / 100, cents % 100)
+}
+
+/// Mirrors the OpenRouter listing's exposure guard: input bytes per token.
+const OPENROUTER_INPUT_BYTES_PER_TOKEN: f64 = 3.0;
+/// Output a sized turn is authorized for when the request sets no lower
+/// `max_tokens`. The guard caps a turn's output at whatever its
+/// authorization has left after the input, so authorizing only the
+/// guard's 256-token floor would truncate every long-context reply. The
+/// charge is the actual cost; the rest of the hold goes back as credits.
+const OPENROUTER_OUTPUT_ALLOWANCE_TOKENS: f64 = 8192.0;
+/// How long a fetched listing (its variants' rate cards) is reused.
+const LISTING_RATES_TTL: Duration = Duration::from_secs(300);
+
+static LISTING_RATES: std::sync::Mutex<Option<(String, Instant, Value)>> =
+    std::sync::Mutex::new(None);
+
+/// The authorization an OpenRouter turn needs, when it is more than the
+/// listing would authorize by default — `None` otherwise (and whenever the
+/// listing, model or rates are unknown), which keeps the pre-metering
+/// request shape.
+async fn openrouter_authorization_cents(
+    state: &McpState,
+    listing_id: &str,
+    buyer_note: &Value,
+) -> Option<i64> {
+    // Keyed by marketplace too: listing ids repeat across environments
+    // (and across test mock servers).
+    let key = format!("{}#{listing_id}", state.overpay.base_url());
+    let cached = LISTING_RATES.lock().ok().and_then(|c| {
+        c.as_ref()
+            .filter(|(k, at, _)| *k == key && at.elapsed() < LISTING_RATES_TTL)
+            .map(|(_, _, v)| v.clone())
+    });
+    let listing = match cached {
+        Some(v) => v,
+        None => {
+            let v = state.overpay.get_listing_value(listing_id).await.ok()?;
+            if let Ok(mut c) = LISTING_RATES.lock() {
+                *c = Some((key, Instant::now(), v.clone()));
+            }
+            v
+        }
+    };
+    size_openrouter_authorization(&listing, buyer_note)
+}
+
+/// Pure sizing half of [`openrouter_authorization_cents`]: the guard's
+/// arithmetic (input at the model's rate card, its long-context tier when
+/// the prompt reaches one, plus an output allowance, times the markup)
+/// against the listing's default authorization and bounds.
+fn size_openrouter_authorization(listing: &Value, buyer_note: &Value) -> Option<i64> {
+    let data = listing.get("data").unwrap_or(listing);
+    if data.get("pricing_mode").and_then(Value::as_str) != Some("metered") {
+        return None;
+    }
+    let model = buyer_note.get("model").and_then(Value::as_str)?;
+    let variant = data
+        .get("variants")?
+        .as_array()?
+        .iter()
+        .find(|v| v.get("key").and_then(Value::as_str) == Some(model))?;
+    let rates = variant.get("rate_card")?;
+    let num = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64);
+
+    let bytes = serde_json::to_string(&json!([
+        buyer_note.get("messages").cloned().unwrap_or(Value::Null),
+        buyer_note.get("tools").cloned().unwrap_or(Value::Null),
+    ]))
+    .ok()?
+    .len() as f64;
+    let input_tokens = (bytes / OPENROUTER_INPUT_BYTES_PER_TOKEN).ceil();
+
+    let (mut input_rate, mut output_rate) = (
+        num(rates, "input_cents_per_mtok")?,
+        num(rates, "output_cents_per_mtok")?,
+    );
+    if let Some(tiers) = rates.get("long_context").and_then(Value::as_array) {
+        for tier in tiers {
+            if num(tier, "min_input_tokens").is_some_and(|min| input_tokens >= min) {
+                input_rate = num(tier, "input_cents_per_mtok").unwrap_or(input_rate);
+                output_rate = num(tier, "output_cents_per_mtok").unwrap_or(output_rate);
+            }
+        }
+    }
+    let output_tokens = buyer_note
+        .get("max_tokens")
+        .and_then(Value::as_f64)
+        .filter(|t| *t > 0.0)
+        .map_or(OPENROUTER_OUTPUT_ALLOWANCE_TOKENS, |t| {
+            t.min(OPENROUTER_OUTPUT_ALLOWANCE_TOKENS)
+        });
+    let markup = num(rates, "markup").unwrap_or(0.2);
+    let cost = input_rate * input_tokens / 1e6
+        + num(rates, "request_cents").unwrap_or(0.0)
+        + output_rate * output_tokens / 1e6;
+    let needed = (cost * (1.0 + markup)).ceil();
+
+    let min =
+        num(variant, "min_authorization_cents").or_else(|| num(data, "min_authorization_cents"));
+    let max =
+        num(variant, "max_authorization_cents").or_else(|| num(data, "max_authorization_cents"));
+    let mut default = num(data, "price_cents").unwrap_or(0.0);
+    if let Some(min) = min {
+        default = default.max(min);
+    }
+    if let Some(max) = max {
+        default = default.min(max);
+    }
+    if needed <= default {
+        return None;
+    }
+    let sized = max.map_or(needed, |max| needed.min(max.floor()));
+    Some(sized.max(1.0) as i64)
 }
 
 /// Net a metered order's settlement refund back out of the key's daily
@@ -2114,8 +2429,33 @@ async fn get_order_resolved(
             .filter(|u| !u.is_empty())
             .map(str::to_string)
         {
-            let content = state.overpay.fetch_delivered_content(&url).await?;
-            data["delivered_content"] = json!(content);
+            match state.overpay.fetch_delivered_content(&url).await? {
+                DeliveredContent::Text(content) => data["delivered_content"] = json!(content),
+                // An image (or other binary) delivery stays a link: the
+                // caller hands on `delivered_content_url` and its type
+                // rather than bytes nobody can read as text.
+                DeliveredContent::Binary {
+                    content_type,
+                    bytes,
+                } => {
+                    if let Some(ct) = content_type {
+                        if data
+                            .get("delivered_content_type")
+                            .and_then(Value::as_str)
+                            .is_none()
+                        {
+                            data["delivered_content_type"] = json!(ct);
+                        }
+                    }
+                    // Rails states the blob's size too (overpay#466).
+                    let rails_size = data
+                        .get("delivered_content_byte_size")
+                        .and_then(Value::as_u64);
+                    if let Some(n) = bytes.or(rails_size) {
+                        data["delivered_content_bytes"] = json!(n);
+                    }
+                }
+            }
         }
     }
     Ok(snap)
@@ -2324,16 +2664,44 @@ fn extract_python_delivered(snap: &Value) -> Result<Value, OpenAiError> {
     delivered_content_json(snap)
 }
 
+/// Why an order ended without a delivery: the seller's
+/// `fulfillment_error` for a failure, or — for a metered-pricing
+/// rejection — its `rejection` message (else its reason code), plus the
+/// authorization that would have been enough when the seller said.
+fn order_failure_reason(order: &Value) -> Option<String> {
+    if let Some(e) = order
+        .get("fulfillment_error")
+        .and_then(Value::as_str)
+        .filter(|r| !r.is_empty())
+    {
+        return Some(e.to_string());
+    }
+    let rejection = order.get("rejection").filter(|r| r.is_object())?;
+    let mut reason = rejection
+        .get("message")
+        .or_else(|| rejection.get("reason_code"))
+        .and_then(Value::as_str)
+        .filter(|r| !r.is_empty())?
+        .to_string();
+    if let Some(cents) = rejection
+        .get("required_authorization_cents")
+        .and_then(Value::as_f64)
+    {
+        reason.push_str(&format!(
+            " (needs an authorization of at least {})",
+            fmt_usd_cents(cents.ceil() as i64)
+        ));
+    }
+    Some(reason)
+}
+
 fn delivered_content_json(snap: &Value) -> Result<Value, OpenAiError> {
     let data = snap.get("data").unwrap_or(snap);
     // `failed` / `cancelled` also end the wait; they carry the seller's
     // reason, not a deliverable — say that instead of "no delivered_content".
     if let Some(status) = order_status(snap).filter(|s| *s != "delivered") {
-        let reason = data
-            .get("fulfillment_error")
-            .and_then(Value::as_str)
-            .filter(|r| !r.is_empty())
-            .unwrap_or("the seller gave no reason");
+        let reason =
+            order_failure_reason(data).unwrap_or_else(|| "the seller gave no reason".into());
         return Err(OpenAiError::UpstreamFailure(format!(
             "the marketplace order {status}: {reason}"
         )));
@@ -2410,20 +2778,23 @@ async fn execute_tool_call(
     }
 
     if let Some(tool) = listing_tool {
-        return match run_listing_tool(state, auth, &tool, &arguments, timeout, poll, key_id, usage)
-            .await
+        return match run_listing_tool(
+            state, auth, &tool, &arguments, timeout, poll, key_id, usage, None,
+        )
+        .await
         {
             Ok(result) => result.to_string(),
             Err(e) => json!({"error": e.message()}).to_string(),
         };
     }
 
-    match run_python_tool(state, auth, &arguments, timeout, poll, key_id, usage).await {
+    match run_python_tool(state, auth, &arguments, timeout, poll, key_id, usage, None).await {
         Ok(result) => result.to_string(),
         Err(e) => json!({"error": e.message()}).to_string(),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_python_tool(
     state: &McpState,
     auth: &OwnedAuth,
@@ -2432,6 +2803,7 @@ pub(crate) async fn run_python_tool(
     poll: Duration,
     key_id: Option<&str>,
     usage: &mut TurnUsage,
+    progress: Option<&ProgressSink>,
 ) -> Result<Value, OpenAiError> {
     let listing_id = resolve_python_listing_id(state).await?;
     let (order_id, redeemed_cents) = place_and_pay_order(
@@ -2443,10 +2815,41 @@ pub(crate) async fn run_python_tool(
         key_id,
     )
     .await?;
-    let snap = wait_for_order_terminal(state, auth, &order_id, timeout, poll).await?;
-    net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
+    let (snap, terminal) =
+        match poll_one_shot(state, auth, &order_id, timeout, poll, progress).await {
+            Ok(polled) => polled,
+            Err(e) => {
+                usage.add_order(&Value::Null, redeemed_cents);
+                return Ok(unreadable_order_result(&order_id, redeemed_cents, &e));
+            }
+        };
     usage.add_order(&snap, redeemed_cents);
-    extract_python_delivered(&snap)
+    if !terminal {
+        return Ok(pending_order_result(
+            &order_id,
+            &snap,
+            redeemed_cents,
+            timeout,
+        ));
+    }
+    net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
+    if order_status(&snap) != Some("delivered") {
+        // Failed / cancelled: the listing-tool projection already words
+        // this case; reuse it rather than erroring on the missing content.
+        return Ok(extract_listing_delivered(&order_id, &snap));
+    }
+    let mut out = match extract_python_delivered(&snap) {
+        Ok(out) => out,
+        Err(e) => return Ok(unreadable_order_result(&order_id, redeemed_cents, &e)),
+    };
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("order_id".into(), json!(order_id));
+        obj.insert(
+            "charged_cents".into(),
+            json!(net_charged_cents(&snap, redeemed_cents)),
+        );
+    }
+    Ok(out)
 }
 
 // ---- buffered ----
@@ -4200,6 +4603,282 @@ mod tests {
         assert_eq!(body["choices"][0]["message"]["role"], "assistant");
         assert_eq!(body["choices"][0]["message"]["content"], "Hello!");
         assert_eq!(body["choices"][0]["finish_reason"], "stop");
+    }
+
+    /// Rails offloads any delivery over 4 KB to object storage and returns
+    /// `delivered_content_url` in its place. A long reply used to fail the
+    /// (already paid) turn with "order has no delivered_content".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chat_completion_reads_a_long_reply_offloaded_to_a_blob_url() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "O1", "payment_status": "pending"}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/openrouter-bot/redeem"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"status": "fully_paid", "amount_redeemed_cents": 2, "credit_balance_cents": 100}
+            })))
+            .mount(&overpay)
+            .await;
+        let long_reply = "word ".repeat(1200);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/O1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "O1", "fulfillment_status": "delivered",
+                    "delivered_content_type": "application/json",
+                    "delivered_content_url": format!("{}/rails/active_storage/blobs/b1/delivered-O1.json", overpay.uri()),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rails/active_storage/blobs/b1/delivered-O1.json"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(delivered_content(
+                    &long_reply,
+                    "openai/gpt-5-mini",
+                    false,
+                )),
+            )
+            .expect(1)
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "write a lot"}],
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            long_reply.as_str()
+        );
+    }
+
+    /// A one-shot purchase whose seller stalls: the paid order's id comes
+    /// back as a pending result (not a bare timeout error that loses it and
+    /// invites a paid retry), and every in-flight poll streams progress —
+    /// which is what keeps an MCP client's request timeout from firing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_one_shot_returns_the_paid_order_as_pending_and_streams_progress() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "O7", "payment_status": "pending"}
+            })))
+            .expect(1)
+            .mount(&overpay)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/exec/redeem"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"status": "fully_paid", "amount_redeemed_cents": 5, "credit_balance_cents": 95}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/O7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "O7", "payment_status": "paid", "fulfillment_status": "awaiting_seller"}
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sink = ProgressSink::new(tx, Some(json!("tok")));
+        let mut usage = TurnUsage::default();
+
+        let out = run_python_tool(
+            &state,
+            &auth,
+            &json!({"code": "print(1)"}),
+            Duration::from_millis(80),
+            Duration::from_millis(10),
+            None,
+            &mut usage,
+            Some(&sink),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("a stall is a pending result, not an error: {}", e.message()));
+
+        assert_eq!(out["order_id"], "O7");
+        assert_eq!(out["pending"], true);
+        assert_eq!(out["payment_status"], "paid");
+        assert_eq!(out["fulfillment_status"], "awaiting_seller");
+        assert_eq!(out["charged_cents"], 5);
+        assert!(
+            out["error"].as_str().unwrap().contains("do not buy again"),
+            "{out}"
+        );
+        assert!(
+            out["hint"].as_str().unwrap().contains("wait_for_order"),
+            "{out}"
+        );
+        assert_eq!(
+            usage.charged_cents, 5,
+            "the paid deposit still counts toward the turn"
+        );
+
+        let note = rx.try_recv().expect("in-flight polls stream progress");
+        assert_eq!(note["method"], "notifications/progress");
+        assert_eq!(note["params"]["data"]["order_id"], "O7");
+
+        // The MCP transport's text for it names the order and the next step.
+        let text = crate::render::render(
+            "run_python",
+            &crate::projection::sanitize("run_python", &out),
+        );
+        assert!(
+            text.contains("O7") && text.contains("wait_for_order"),
+            "{text}"
+        );
+    }
+
+    /// An image delivery (a generated PNG behind `delivered_content_url`)
+    /// is a success: the result carries the link, its type and size — not
+    /// "delivered content: file is not UTF-8 text", which failed a paid
+    /// generate_image call outright. Binary types are never downloaded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_image_delivery_comes_back_as_a_link_not_an_error() {
+        let overpay = MockServer::start().await;
+        let link = format!(
+            "{}/rails/active_storage/blobs/redirect/img/delivered-G1.png",
+            overpay.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/G1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "G1", "payment_status": "paid", "fulfillment_status": "delivered",
+                         "delivered_content_type": "image/png", "delivered_content_url": link}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/rails/active_storage/blobs/redirect/img/delivered-G1.png",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "image/png")
+                    .set_body_bytes(vec![0x89, b'P', b'N', b'G', 0xff, 0xfe, 0x00, 0x01]),
+            )
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+        let snap = get_order_resolved(&state, &auth, "G1")
+            .await
+            .unwrap_or_else(|e| panic!("an image is a delivery, not an error: {e}"));
+        let out = extract_listing_delivered("G1", &snap);
+        assert_eq!(out["fulfillment_status"], "delivered");
+        assert_eq!(out["delivered_content_url"], link);
+        assert_eq!(out["delivered_content_type"], "image/png");
+        assert_eq!(out["delivered_content_bytes"], 8);
+        assert!(out.get("delivered_content").is_none(), "{out}");
+        assert!(out.get("error").is_none(), "{out}");
+
+        // A non-UTF-8 file with no telling type is a binary delivery too.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/G2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "G2", "fulfillment_status": "delivered",
+                         "delivered_content_url": format!("{}/blobs/raw", overpay.uri())}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/blobs/raw"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/octet-stream")
+                    .set_body_bytes(vec![0xff, 0xfe, 0xfd]),
+            )
+            .mount(&overpay)
+            .await;
+        let snap = get_order_resolved(&state, &auth, "G2").await.unwrap();
+        let out = extract_listing_delivered("G2", &snap);
+        assert_eq!(out["delivered_content_type"], "application/octet-stream");
+        assert_eq!(out["delivered_content_bytes"], 3);
+        assert!(out.get("delivered_content").is_none(), "{out}");
+    }
+
+    /// Paid, then the order can't be read: the result still carries the
+    /// order id (and the charge), so the model follows it up rather than
+    /// buying again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_paid_one_shot_still_returns_its_order_id() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "O8", "payment_status": "pending"}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/exec/redeem"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"status": "fully_paid", "amount_redeemed_cents": 5, "credit_balance_cents": 95}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/O8"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+        let mut usage = TurnUsage::default();
+        let out = run_python_tool(
+            &state,
+            &auth,
+            &json!({"code": "print(1)"}),
+            Duration::from_millis(80),
+            Duration::from_millis(10),
+            None,
+            &mut usage,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("a paid order keeps its id: {}", e.message()));
+        assert_eq!(out["order_id"], "O8");
+        assert_eq!(out["payment_status"], "paid");
+        assert_eq!(out["charged_cents"], 5);
+        assert!(
+            out["error"].as_str().unwrap().contains("do not buy again"),
+            "{out}"
+        );
+        assert_eq!(usage.charged_cents, 5);
+        let text = crate::render::render(
+            "run_python",
+            &crate::projection::sanitize("run_python", &out),
+        );
+        assert!(text.contains("order_id: O8"), "{text}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6941,6 +7620,199 @@ mod tests {
         assert!(
             !err.to_string().contains("chat-scoped"),
             "no scope gate without a key: {err}"
+        );
+    }
+
+    /// The OpenRouter listing as metered pricing publishes it: a 25¢
+    /// deposit, one variant with a rate card ($3/M in, $15/M out, a pricier
+    /// tier from 50k input tokens) and authorization bounds.
+    fn metered_listing() -> Value {
+        json!({"data": {
+            "id": OPENROUTER_ID, "pricing_mode": "metered", "price_cents": 25,
+            "min_authorization_cents": 1, "max_authorization_cents": 500,
+            "variants": [{
+                "key": "anthropic/claude-sonnet-5",
+                "min_authorization_cents": 11, "max_authorization_cents": 500,
+                "rate_card": {
+                    "input_cents_per_mtok": 300.0, "output_cents_per_mtok": 1500.0,
+                    "markup": 0.2,
+                    "long_context": [{"min_input_tokens": 50000,
+                                      "input_cents_per_mtok": 600.0, "output_cents_per_mtok": 2250.0}],
+                },
+            }],
+        }})
+    }
+
+    fn note_with_bytes(model: &str, bytes: usize) -> Value {
+        json!({"model": model, "messages": [{"role": "user", "content": "x".repeat(bytes)}]})
+    }
+
+    /// The guard's arithmetic, client-side: a prompt the 25¢ default
+    /// covers sends nothing extra; a long one is authorized for its input
+    /// plus an output allowance at the long-context tier, capped at the
+    /// variant's maximum.
+    #[test]
+    fn openrouter_turns_are_authorized_for_what_they_need() {
+        let listing = metered_listing();
+        let model = "anthropic/claude-sonnet-5";
+
+        // ~1k tokens: 0.3¢ in + 12.3¢ for 8192 out, x1.2 = 16¢ < 25¢.
+        assert_eq!(
+            size_openrouter_authorization(&listing, &note_with_bytes(model, 3_000)),
+            None
+        );
+
+        // ~40k tokens (base tier): (12¢ + 12.29¢) x 1.2 = 29.15 → 30¢.
+        assert_eq!(
+            size_openrouter_authorization(&listing, &note_with_bytes(model, 120_000)),
+            Some(30)
+        );
+
+        // ~100k tokens (long-context tier): (60¢ + 18.43¢) x 1.2 → 95¢.
+        assert_eq!(
+            size_openrouter_authorization(&listing, &note_with_bytes(model, 300_000)),
+            Some(95)
+        );
+
+        // A small max_tokens shrinks the output allowance.
+        let mut capped = note_with_bytes(model, 120_000);
+        capped["max_tokens"] = json!(1000);
+        assert_eq!(size_openrouter_authorization(&listing, &capped), None);
+
+        // Never past the variant's maximum.
+        assert_eq!(
+            size_openrouter_authorization(&listing, &note_with_bytes(model, 3_000_000)),
+            Some(500)
+        );
+
+        // Unknown model (e.g. "default"), or a fixed-price listing: the
+        // listing's own default applies.
+        assert_eq!(
+            size_openrouter_authorization(&listing, &note_with_bytes("default", 3_000_000)),
+            None
+        );
+        let mut fixed = metered_listing();
+        fixed["data"]["pricing_mode"] = json!("fixed");
+        assert_eq!(
+            size_openrouter_authorization(&fixed, &note_with_bytes(model, 3_000_000)),
+            None
+        );
+    }
+
+    /// A long-context turn is created and paid in one request with its
+    /// authorization; when credits can't cover that hold, the turn falls
+    /// back to the default authorization instead of failing outright.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_long_openrouter_turn_sends_its_authorization() {
+        let overpay = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/listings/{OPENROUTER_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(metered_listing()))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .and(body_partial_json(
+                json!({"pay": "merchant_credits", "authorization_cents": 30}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "AUTH-1", "payment_status": "paid"},
+                "payment": {"status": "fully_paid", "amount_redeemed_cents": 30},
+            })))
+            .expect(1)
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+        let note = note_with_bytes("anthropic/claude-sonnet-5", 120_000);
+        let placed = place_and_pay_order(
+            &state,
+            &auth,
+            OPENROUTER_ID,
+            OPENROUTER_SELLER_SLUG,
+            &note,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("authorized turn: {}", e.message()));
+        assert_eq!(placed, ("AUTH-1".to_string(), 30));
+
+        // Not enough credits for the larger hold: Rails cancels it (402);
+        // the turn is placed the old way and the seller decides.
+        let poor = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/listings/{OPENROUTER_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(metered_listing()))
+            .mount(&poor)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .and(body_partial_json(json!({"authorization_cents": 30})))
+            .respond_with(ResponseTemplate::new(402).set_body_json(json!({
+                "error": "Not enough merchant credits to cover the authorization",
+                "code": "insufficient_credits",
+            })))
+            .expect(1)
+            .mount(&poor)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "data": {"id": "PLAIN-1", "payment_status": "pending"}
+            })))
+            .expect(1)
+            .mount(&poor)
+            .await;
+        mount_redeem_fully_paid(&poor, OPENROUTER_SELLER_SLUG).await;
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&poor.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+        let (order_id, _) = place_and_pay_order(
+            &state,
+            &auth,
+            OPENROUTER_ID,
+            OPENROUTER_SELLER_SLUG,
+            &note,
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("falls back: {}", e.message()));
+        assert_eq!(order_id, "PLAIN-1");
+    }
+
+    /// A seller's metered-pricing rejection ends the wait (it used to be
+    /// polled until the timeout) and says why, with the authorization that
+    /// would have been enough.
+    #[test]
+    fn a_rejected_order_is_terminal_and_explains_itself() {
+        assert!(is_terminal(Some("rejected")));
+        let snap = json!({"data": {
+            "id": "R1", "fulfillment_status": "rejected",
+            "rejection": {"reason_code": "authorization_too_low",
+                          "message": "This request needs more.", "required_authorization_cents": 51,
+                          "seller_internal": "dropped"},
+        }});
+        let err = delivered_content_json(&snap).unwrap_err();
+        assert!(
+            err.message().contains(
+                "rejected: This request needs more. (needs an authorization of at least $0.51)"
+            ),
+            "{}",
+            err.message()
+        );
+        let out = extract_listing_delivered("R1", &snap);
+        assert_eq!(out["fulfillment_status"], "rejected");
+        assert!(out["error"].as_str().unwrap().contains("$0.51"), "{out}");
+        let projected = project_order_status(&snap);
+        assert_eq!(
+            projected["rejection"]["reason_code"],
+            "authorization_too_low"
+        );
+        assert!(
+            projected["rejection"].get("seller_internal").is_none(),
+            "{projected}"
         );
     }
 

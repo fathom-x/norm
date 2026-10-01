@@ -49,6 +49,7 @@ pub(crate) fn listing_row(listing: &Value, detail: bool) -> Value {
         "title",
         "description",
         "price_usd",
+        "price_cents",
         "free",
         "currency",
         "category",
@@ -65,6 +66,14 @@ pub(crate) fn listing_row(listing: &Value, detail: bool) -> Value {
     }
     if let Some(name) = listing.pointer("/seller/name") {
         row.insert("seller_name".into(), name.clone());
+    }
+    // Which one-shot tool (if any) buys this listing in a single call —
+    // the name only, from the curated field Rails exposes.
+    if let Some(name) = listing
+        .pointer("/provider_tool/name")
+        .filter(|v| v.is_string())
+    {
+        row.insert("provider_tool".into(), json!({ "name": name }));
     }
     if detail {
         for key in ["buyer_note_schema", "delivered_content_type"] {
@@ -89,6 +98,7 @@ pub(crate) fn order_summary_row(order: &Value) -> Value {
         "payment_status",
         "fulfillment_status",
         "total_usd",
+        "total_usd_cents",
         "settled_amount_cents",
         "created_at",
     ] {
@@ -97,6 +107,26 @@ pub(crate) fn order_summary_row(order: &Value) -> Value {
         }
     }
     Value::Object(row)
+}
+
+/// A metered-pricing rejection (`fulfillment_status: "rejected"`) —
+/// why the seller refused the paid order and, for `authorization_too_low`,
+/// the authorization that would have been enough. Field by field, like
+/// every projection here.
+pub(crate) fn rejection(order: &Value) -> Option<Value> {
+    let r = order.get("rejection").filter(|r| r.is_object())?;
+    let out = copy_fields(
+        r,
+        &[
+            "reason_code",
+            "message",
+            "estimated_cost_cents",
+            "required_authorization_cents",
+        ],
+    );
+    out.as_object()
+        .is_some_and(|m| !m.is_empty())
+        .then_some(out)
 }
 
 /// One full order for detail output (`create_order` / `get_order_status`
@@ -115,6 +145,7 @@ pub(crate) fn order_detail(order: &Value) -> Value {
         "payment_status",
         "fulfillment_status",
         "total_usd",
+        "total_usd_cents",
         "settled_amount_cents",
         "created_at",
         "paid_at",
@@ -136,6 +167,9 @@ pub(crate) fn order_detail(order: &Value) -> Value {
         if let Some(v) = order.get(key) {
             row.insert(key.into(), v.clone());
         }
+    }
+    if let Some(r) = rejection(order) {
+        row.insert("rejection".into(), r);
     }
     // The listing pointer lets a caller resolve the seller (pay_order does
     // this server-side too) — id + title only.
@@ -328,6 +362,11 @@ pub fn sanitize(tool: &str, data: &Value) -> Value {
                 "exit_code",
                 "duration_ms",
                 "timed_out",
+                "order_id",
+                "fulfillment_status",
+                "payment_status",
+                "pending",
+                "charged_cents",
                 "error",
                 "hint",
             ],
@@ -342,10 +381,14 @@ pub fn sanitize(tool: &str, data: &Value) -> Value {
             &[
                 "order_id",
                 "fulfillment_status",
+                "payment_status",
+                "pending",
+                "charged_cents",
                 "delivered_content",
                 "delivered_content_truncated",
                 "delivered_content_type",
                 "delivered_content_url",
+                "delivered_content_bytes",
                 "error",
                 "hint",
                 "status",
