@@ -4,6 +4,15 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Chat-scoped keys can mint Lightning invoices for core credits
+
+- `load_core_credits` sat behind the `spend` scope with the tools that move
+  wallet funds. It moves none: it mints a Lightning invoice the user pays
+  from their own Lightning wallet. A chat-scoped key — what norm mints by
+  default — therefore had no in-chat way to top up the credits that pay for
+  chat. The scope gate still covers `create_order`, `pay_order`,
+  `redeem_merchant_credits` and `buy`; raw sends stay refused for every key.
+
 ### "No credits" says how to get credits
 
 - Overpay refuses to place or settle an order for a wallet with no credits
