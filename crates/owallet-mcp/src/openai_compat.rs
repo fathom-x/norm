@@ -124,10 +124,18 @@ const SESSION_ID_ENV: &str = "OWALLET_V1_SESSION_ID";
 const SESSION_ID_HEADER: &str = "x-session-id";
 /// Request header a client (norm's per-conversation `/budget`) sends to
 /// *lower* this request's spending allowance: the wallet spending tools may
-/// move at most this many USD, and a value of 0 or less refuses the request
-/// before any order is placed. It can never raise the cap — the wallet's own
-/// setting and the key's daily budget still apply on top.
+/// move at most this many USD, no single order (chat turn included) may
+/// authorize more, and a value of 0 or less refuses the request before any
+/// order is placed. It can never raise the cap — the wallet's own setting
+/// and the key's daily budget still apply on top.
 pub const SPEND_LIMIT_HEADER: &str = "x-owallet-spend-limit-usd";
+/// Request header carrying the buyer's per-message limit (norm's `/budget`
+/// → "Per-message limit"): the most any single order this request places —
+/// each OpenRouter turn, each tool purchase — may authorize or cost, in
+/// USD. A turn that can't be sent within it is refused before any order,
+/// with what it would need. Combined with [`SPEND_LIMIT_HEADER`] (the lower
+/// of the two applies).
+pub const REQUEST_MAX_HEADER: &str = "x-owallet-request-max-usd";
 
 /// A model id that always works, without needing a live catalog fetch to
 /// validate it: `validate_request` accepts it unconditionally and
@@ -208,6 +216,8 @@ struct Ctx {
     /// This request's client-supplied limit ([`SPEND_LIMIT_HEADER`]), if any.
     /// Set per request; `None` at construction.
     request_spend_limit_usd: Option<f64>,
+    /// This request's per-message limit ([`REQUEST_MAX_HEADER`]), if any.
+    request_max_usd: Option<f64>,
     /// Per-router cache of `provider_tool`-marked listings. On `Ctx`
     /// rather than a process-global so each serve env (and each test
     /// router) resolves its own marketplace's tools.
@@ -260,6 +270,7 @@ fn router_with_flags(
         send_session_id,
         session_id: None,
         request_spend_limit_usd: None,
+        request_max_usd: None,
         listing_tools: Arc::new(OnceCell::new()),
     };
     Router::new()
@@ -326,9 +337,45 @@ async fn wallet_status(
 pub(crate) enum OpenAiError {
     InvalidRequest(String),
     Unauthorized(String),
+    /// Not enough Overpay credits (`code: insufficient_credits`).
     PaymentRequired(String),
     UpstreamFailure(String),
     Internal(String),
+    /// A spending limit stopped the request before (or instead of) a
+    /// purchase — the buyer's own per-message limit, the conversation or
+    /// daily budget, or a seller's minimum. A 402 like
+    /// [`Self::PaymentRequired`], with its own `code` (see
+    /// [`ErrorCode`]) so a client can tell which.
+    Limit {
+        code: ErrorCode,
+        message: String,
+    },
+    /// The model couldn't be served right now (a seller's
+    /// `upstream_unavailable` rejection); nothing was charged.
+    Unavailable(String),
+}
+
+/// Machine-readable `error.code` values, so a client can react without
+/// parsing the message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ErrorCode {
+    /// Over the buyer's per-message limit (or the conversation's remaining
+    /// budget) — refused before any order was placed.
+    RequestLimitExceeded,
+    /// The seller refused: the authorization was below what the turn needs.
+    AuthorizationTooLow,
+    /// The conversation's or the key's daily budget is spent.
+    BudgetExhausted,
+}
+
+impl ErrorCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RequestLimitExceeded => "request_limit_exceeded",
+            Self::AuthorizationTooLow => "authorization_too_low",
+            Self::BudgetExhausted => "budget_exhausted",
+        }
+    }
 }
 
 impl OpenAiError {
@@ -336,13 +383,34 @@ impl OpenAiError {
         Self::Internal(msg.into())
     }
 
+    fn limit(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::Limit {
+            code,
+            message: message.into(),
+        }
+    }
+
     fn status_and_type(&self) -> (StatusCode, &'static str) {
         match self {
             Self::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request_error"),
             Self::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "authentication_error"),
-            Self::PaymentRequired(_) => (StatusCode::PAYMENT_REQUIRED, "insufficient_quota"),
-            Self::UpstreamFailure(_) => (StatusCode::BAD_GATEWAY, "api_error"),
+            Self::PaymentRequired(_) | Self::Limit { .. } => {
+                (StatusCode::PAYMENT_REQUIRED, "insufficient_quota")
+            }
+            Self::UpstreamFailure(_) | Self::Unavailable(_) => {
+                (StatusCode::BAD_GATEWAY, "api_error")
+            }
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "api_error"),
+        }
+    }
+
+    /// The `error.code` a client can switch on; `None` for generic errors.
+    pub(crate) fn code(&self) -> Option<&'static str> {
+        match self {
+            Self::PaymentRequired(_) => Some("insufficient_credits"),
+            Self::Limit { code, .. } => Some(code.as_str()),
+            Self::Unavailable(_) => Some("model_unavailable"),
+            _ => None,
         }
     }
 
@@ -352,10 +420,17 @@ impl OpenAiError {
             | Self::Unauthorized(m)
             | Self::PaymentRequired(m)
             | Self::UpstreamFailure(m)
-            | Self::Internal(m) => m,
+            | Self::Internal(m)
+            | Self::Unavailable(m) => m,
+            Self::Limit { message, .. } => message,
         }
     }
 }
+
+/// What a buyer can do when a turn costs more than their limit allows.
+/// Client-neutral, naming norm's command in passing.
+const RAISE_LIMIT_HINT: &str =
+    "Raise the limit (norm: /budget), start a fresh conversation, or pick a cheaper model.";
 
 /// What a caller with no credits should do. Shared by every "can't pay"
 /// path so the advice is the same wherever it surfaces. The CLI defaults to
@@ -403,7 +478,7 @@ impl IntoResponse for OpenAiError {
                 "message": self.message(),
                 "type": err_type,
                 "param": Value::Null,
-                "code": Value::Null,
+                "code": self.code(),
             }
         });
         (status, Json(body)).into_response()
@@ -755,6 +830,7 @@ pub(crate) async fn run_listing_tool(
     key_id: Option<&str>,
     usage: &mut TurnUsage,
     progress: Option<&ProgressSink>,
+    cap: Option<TurnCap>,
 ) -> Result<Value, OpenAiError> {
     let buyer_note = listing_tool_buyer_note(tool, arguments);
     let (order_id, redeemed_cents) = place_and_pay_order(
@@ -764,6 +840,7 @@ pub(crate) async fn run_listing_tool(
         &tool.seller_slug,
         &buyer_note,
         key_id,
+        cap,
     )
     .await?;
     let (snap, terminal) =
@@ -1263,8 +1340,8 @@ fn effective_spend_cap(ctx: &Ctx) -> f64 {
 /// Parse [`SPEND_LIMIT_HEADER`]. Absent → `Ok(None)`; present but not a
 /// finite number → an error rather than silently ignoring a limit the
 /// client meant to impose.
-fn request_spend_limit(headers: &HeaderMap) -> Result<Option<f64>, OpenAiError> {
-    let Some(raw) = headers.get(SPEND_LIMIT_HEADER) else {
+fn usd_header(headers: &HeaderMap, name: &str) -> Result<Option<f64>, OpenAiError> {
+    let Some(raw) = headers.get(name) else {
         return Ok(None);
     };
     raw.to_str()
@@ -1272,9 +1349,7 @@ fn request_spend_limit(headers: &HeaderMap) -> Result<Option<f64>, OpenAiError> 
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|v| v.is_finite())
         .map(Some)
-        .ok_or_else(|| {
-            OpenAiError::InvalidRequest(format!("{SPEND_LIMIT_HEADER} must be a number of USD"))
-        })
+        .ok_or_else(|| OpenAiError::InvalidRequest(format!("{name} must be a number of USD")))
 }
 
 /// `Some(refusal)` when the key's daily budget is spent. Checked at
@@ -1286,12 +1361,15 @@ fn exhausted_key_budget(state: &McpState, key_id: Option<&str>) -> Option<OpenAi
     if key.remaining_today_usd_cents() != Some(0) {
         return None;
     }
-    Some(OpenAiError::PaymentRequired(format!(
-        "daily budget exhausted: this key's ${:.2} daily budget is spent — it resets at \
-         midnight in the wallet's timezone, and the wallet owner can raise it from the \
-         owallet dashboard",
-        key.daily_budget_usd_cents.unwrap_or(0) as f64 / 100.0
-    )))
+    Some(OpenAiError::limit(
+        ErrorCode::BudgetExhausted,
+        format!(
+            "daily budget exhausted: this key's ${:.2} daily budget is spent — it resets at \
+             midnight in the wallet's timezone, and the wallet owner can raise it from the \
+             owallet dashboard",
+            key.daily_budget_usd_cents.unwrap_or(0) as f64 / 100.0
+        ),
+    ))
 }
 
 /// Reserve `amount_usd` against the key's persistent budget, atomically.
@@ -1994,8 +2072,12 @@ async fn chat_completions(
         Ok(auth) => auth,
         Err(e) => return e.into_response(),
     };
-    let request_spend_limit_usd = match request_spend_limit(&headers) {
+    let request_spend_limit_usd = match usd_header(&headers, SPEND_LIMIT_HEADER) {
         Ok(limit) => limit,
+        Err(e) => return e.into_response(),
+    };
+    let request_max_usd = match usd_header(&headers, REQUEST_MAX_HEADER) {
+        Ok(max) => max,
         Err(e) => return e.into_response(),
     };
     let mut ctx = Ctx {
@@ -2003,6 +2085,7 @@ async fn chat_completions(
         can_spend,
         key_id,
         request_spend_limit_usd,
+        request_max_usd,
         ..ctx
     };
     let client_key = client_conversation_key(&req, &headers);
@@ -2012,10 +2095,10 @@ async fn chat_completions(
     // itself a paid order.
     if let Some(limit) = ctx.request_spend_limit_usd {
         if limit <= 0.0 {
-            return OpenAiError::PaymentRequired(
-                "spending limit reached: the client allows this request no further spend \
-                 (raise the conversation budget to continue)"
-                    .into(),
+            return OpenAiError::limit(
+                ErrorCode::BudgetExhausted,
+                "This conversation's spending budget is used up, so nothing was sent or \
+                 charged. Raise it (norm: /budget) or start a new conversation.",
             )
             .into_response();
         }
@@ -2105,6 +2188,7 @@ async fn place_and_pay_order(
     seller_slug: &str,
     buyer_note: &Value,
     key_id: Option<&str>,
+    cap: Option<TurnCap>,
 ) -> Result<(String, i64), OpenAiError> {
     // Strings pass through verbatim, matching the MCP `create_order`
     // convention — a `buyer_input :text` listing's bot reads the note as
@@ -2115,18 +2199,42 @@ async fn place_and_pay_order(
             .map_err(|e| OpenAiError::internal(format!("could not encode buyer_note: {e}")))?,
     };
 
-    // A metered OpenRouter turn whose prompt outgrew the listing's default
-    // authorization: authorize what it needs up front, or the seller's
-    // exposure guard refuses it ("needs an authorization of at least N¢").
+    // A metered OpenRouter turn: authorize what it needs up front (or the
+    // seller's exposure guard refuses it), never more than the buyer's cap,
+    // and refuse here — before any order — a turn the cap can't cover.
     if seller_slug == OPENROUTER_SELLER_SLUG {
-        if let Some(cents) = openrouter_authorization_cents(state, listing_id, buyer_note).await {
-            match place_authorized_order(state, auth, listing_id, &note_str, cents, key_id).await {
-                // Credits don't cover the larger hold: fall through to the
-                // default authorization and let the seller judge the turn,
-                // rather than refusing one that might still fit.
-                Err(OpenAiError::PaymentRequired(_)) => {}
-                other => return other,
+        match openrouter_authorization(state, listing_id, buyer_note, cap).await {
+            Some(TurnAuthorization::OverCap {
+                needed_cents,
+                input_tokens,
+                model,
+            }) => {
+                let cap = cap.expect("OverCap only with a cap");
+                return Err(cap.exceeded(
+                    &format!(
+                        "This message (about {} tokens of context on {model})",
+                        group_thousands(input_tokens)
+                    ),
+                    needed_cents,
+                ));
             }
+            Some(TurnAuthorization::Authorize {
+                cents,
+                above_default,
+            }) => {
+                match place_authorized_order(state, auth, listing_id, &note_str, cents, key_id)
+                    .await
+                {
+                    // Credits don't cover a hold above the default: fall
+                    // through to the default authorization and let the
+                    // seller judge the turn, rather than refusing one that
+                    // might still fit. (A hold at or below the default has
+                    // nothing smaller to fall back to.)
+                    Err(OpenAiError::PaymentRequired(_)) if above_default => {}
+                    other => return other,
+                }
+            }
+            Some(TurnAuthorization::Default) | None => {}
         }
     }
 
@@ -2140,6 +2248,17 @@ async fn place_and_pay_order(
         .and_then(Value::as_str)
         .ok_or_else(|| OpenAiError::internal("create_order response missing id"))?
         .to_string();
+    // A fixed-price purchase (a tool listing) over the cap: refuse before
+    // paying. The created order stays unpaid and lapses on its own.
+    if let Some(cap) = cap {
+        let total = order
+            .pointer("/data/total_usd_cents")
+            .and_then(Value::as_f64)
+            .map(|c| c.ceil() as i64);
+        if let Some(total) = total.filter(|t| *t > cap.cents) {
+            return Err(cap.exceeded("This purchase", total));
+        }
+    }
 
     let redeem = state
         .overpay
@@ -2242,6 +2361,19 @@ fn fmt_usd_cents(cents: i64) -> String {
     format!("${}.{:02}", cents / 100, cents % 100)
 }
 
+/// `140000` → `"140,000"`.
+fn group_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Mirrors the OpenRouter listing's exposure guard: input bytes per token.
 const OPENROUTER_INPUT_BYTES_PER_TOKEN: f64 = 3.0;
 /// Output a sized turn is authorized for when the request sets no lower
@@ -2250,21 +2382,109 @@ const OPENROUTER_INPUT_BYTES_PER_TOKEN: f64 = 3.0;
 /// guard's 256-token floor would truncate every long-context reply. The
 /// charge is the actual cost; the rest of the hold goes back as credits.
 const OPENROUTER_OUTPUT_ALLOWANCE_TOKENS: f64 = 8192.0;
+/// Mirrors the guard's MIN_OUTPUT_TOKENS: the reply it reserves before it
+/// will run a turn at all, so the least a turn can be authorized for.
+const OPENROUTER_MIN_OUTPUT_TOKENS: f64 = 256.0;
 /// How long a fetched listing (its variants' rate cards) is reused.
 const LISTING_RATES_TTL: Duration = Duration::from_secs(300);
 
 static LISTING_RATES: std::sync::Mutex<Option<(String, Instant, Value)>> =
     std::sync::Mutex::new(None);
 
-/// The authorization an OpenRouter turn needs, when it is more than the
-/// listing would authorize by default — `None` otherwise (and whenever the
-/// listing, model or rates are unknown), which keeps the pre-metering
-/// request shape.
-async fn openrouter_authorization_cents(
+/// The most one order may authorize or cost in this request: the buyer's
+/// per-message limit ([`REQUEST_MAX_HEADER`]) or the conversation's
+/// remaining budget ([`SPEND_LIMIT_HEADER`]), whichever is lower.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TurnCap {
+    pub cents: i64,
+    pub source: CapSource,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CapSource {
+    PerMessage,
+    Conversation,
+}
+
+impl TurnCap {
+    /// "your $0.25 per-message limit" / "this conversation's remaining
+    /// $0.10 budget".
+    fn describe(&self) -> String {
+        match self.source {
+            CapSource::PerMessage => {
+                format!("your {} per-message limit", fmt_usd_cents(self.cents))
+            }
+            CapSource::Conversation => format!(
+                "this conversation's remaining {} budget",
+                fmt_usd_cents(self.cents)
+            ),
+        }
+    }
+
+    /// The refusal for an order that would need `needed_cents`.
+    fn exceeded(&self, what: &str, needed_cents: i64) -> OpenAiError {
+        OpenAiError::limit(
+            ErrorCode::RequestLimitExceeded,
+            format!(
+                "{what} needs at least {} — over {}. Nothing was sent or charged. {RAISE_LIMIT_HINT}",
+                fmt_usd_cents(needed_cents),
+                self.describe()
+            ),
+        )
+    }
+}
+
+/// The cap for this request, from its headers (see [`TurnCap`]).
+fn turn_cap(ctx: &Ctx) -> Option<TurnCap> {
+    lower_cap(ctx.request_max_usd, ctx.request_spend_limit_usd)
+}
+
+/// The lower of a per-message limit and a conversation's remaining budget
+/// (USD), as a [`TurnCap`] in whole cents.
+fn lower_cap(per_message_usd: Option<f64>, conversation_usd: Option<f64>) -> Option<TurnCap> {
+    let cents = |usd: f64| (usd * 100.0).floor().max(0.0) as i64;
+    let per = per_message_usd.map(|usd| TurnCap {
+        cents: cents(usd),
+        source: CapSource::PerMessage,
+    });
+    let conv = conversation_usd.map(|usd| TurnCap {
+        cents: cents(usd),
+        source: CapSource::Conversation,
+    });
+    match (per, conv) {
+        (Some(p), Some(c)) => Some(if c.cents < p.cents { c } else { p }),
+        (p, c) => p.or(c),
+    }
+}
+
+/// What an OpenRouter turn should authorize.
+#[derive(Debug, PartialEq)]
+enum TurnAuthorization {
+    /// The listing's default authorization covers the turn (and fits the
+    /// cap): send none — the pre-metering request shape.
+    Default,
+    /// Create and pay with this authorization. `above_default` marks a
+    /// hold larger than the default, which may fall back to the default
+    /// when credits can't cover it.
+    Authorize { cents: i64, above_default: bool },
+    /// Even the least the seller runs this turn for (its input plus a
+    /// minimal reply, or the model's minimum commitment) is over the cap.
+    OverCap {
+        needed_cents: i64,
+        input_tokens: u64,
+        model: String,
+    },
+}
+
+/// The authorization an OpenRouter turn needs, sized from the model's
+/// published rate card and bounded by `cap`. `None` when the listing, the
+/// model or its rates are unknown — the turn is then placed as before.
+async fn openrouter_authorization(
     state: &McpState,
     listing_id: &str,
     buyer_note: &Value,
-) -> Option<i64> {
+    cap: Option<TurnCap>,
+) -> Option<TurnAuthorization> {
     // Keyed by marketplace too: listing ids repeat across environments
     // (and across test mock servers).
     let key = format!("{}#{listing_id}", state.overpay.base_url());
@@ -2283,14 +2503,18 @@ async fn openrouter_authorization_cents(
             v
         }
     };
-    size_openrouter_authorization(&listing, buyer_note)
+    size_openrouter_authorization(&listing, buyer_note, cap.map(|c| c.cents))
 }
 
-/// Pure sizing half of [`openrouter_authorization_cents`]: the guard's
+/// Pure sizing half of [`openrouter_authorization`]: the seller guard's
 /// arithmetic (input at the model's rate card, its long-context tier when
-/// the prompt reaches one, plus an output allowance, times the markup)
-/// against the listing's default authorization and bounds.
-fn size_openrouter_authorization(listing: &Value, buyer_note: &Value) -> Option<i64> {
+/// the prompt reaches one, plus output, times the markup) against the
+/// listing's default authorization, its bounds, and the buyer's cap.
+fn size_openrouter_authorization(
+    listing: &Value,
+    buyer_note: &Value,
+    cap_cents: Option<i64>,
+) -> Option<TurnAuthorization> {
     let data = listing.get("data").unwrap_or(listing);
     if data.get("pricing_mode").and_then(Value::as_str) != Some("metered") {
         return None;
@@ -2331,11 +2555,12 @@ fn size_openrouter_authorization(listing: &Value, buyer_note: &Value) -> Option<
         .map_or(OPENROUTER_OUTPUT_ALLOWANCE_TOKENS, |t| {
             t.min(OPENROUTER_OUTPUT_ALLOWANCE_TOKENS)
         });
-    let markup = num(rates, "markup").unwrap_or(0.2);
-    let cost = input_rate * input_tokens / 1e6
-        + num(rates, "request_cents").unwrap_or(0.0)
-        + output_rate * output_tokens / 1e6;
-    let needed = (cost * (1.0 + markup)).ceil();
+    let markup = 1.0 + num(rates, "markup").unwrap_or(0.2);
+    let input_cost = input_rate * input_tokens / 1e6 + num(rates, "request_cents").unwrap_or(0.0);
+    // What a roomy reply needs, and the least the seller's guard runs the
+    // turn for at all (its MIN_OUTPUT_TOKENS reserve).
+    let wanted = ((input_cost + output_rate * output_tokens / 1e6) * markup).ceil();
+    let least = ((input_cost + output_rate * OPENROUTER_MIN_OUTPUT_TOKENS / 1e6) * markup).ceil();
 
     let min =
         num(variant, "min_authorization_cents").or_else(|| num(data, "min_authorization_cents"));
@@ -2348,11 +2573,50 @@ fn size_openrouter_authorization(listing: &Value, buyer_note: &Value) -> Option<
     if let Some(max) = max {
         default = default.min(max);
     }
-    if needed <= default {
-        return None;
+    let above_default = wanted > default;
+    let want = if above_default {
+        max.map_or(wanted, |max| wanted.min(max.floor()))
+    } else {
+        default
+    };
+
+    let Some(cap) = cap_cents.map(|c| c as f64) else {
+        return Some(if above_default {
+            TurnAuthorization::Authorize {
+                cents: want.max(1.0) as i64,
+                above_default,
+            }
+        } else {
+            TurnAuthorization::Default
+        });
+    };
+    // The floor no authorization may go below: the turn's own minimum, the
+    // model's advertised minimum commitment, and one cent.
+    let floor = least.max(min.unwrap_or(1.0)).max(1.0);
+    if floor > cap {
+        return Some(TurnAuthorization::OverCap {
+            needed_cents: floor as i64,
+            input_tokens: input_tokens as u64,
+            model: model.to_string(),
+        });
     }
-    let sized = max.map_or(needed, |max| needed.min(max.floor()));
-    Some(sized.max(1.0) as i64)
+    Some(if want <= cap {
+        if above_default {
+            TurnAuthorization::Authorize {
+                cents: want as i64,
+                above_default,
+            }
+        } else {
+            TurnAuthorization::Default
+        }
+    } else {
+        // The cap fits the turn, but not the full reply allowance (or the
+        // listing's default): authorize exactly the cap.
+        TurnAuthorization::Authorize {
+            cents: cap as i64,
+            above_default: cap > default,
+        }
+    })
 }
 
 /// Net a metered order's settlement refund back out of the key's daily
@@ -2593,6 +2857,8 @@ struct OpenRouterDelivered {
     text: String,
     model: String,
     error: bool,
+    /// A seller error delivery's `reason_code` (see [`delivered_error`]).
+    reason_code: Option<String>,
     tool_calls: Vec<Value>,
     prompt_tokens: u64,
     completion_tokens: u64,
@@ -2622,6 +2888,10 @@ fn extract_openrouter_delivered(snap: &Value) -> Result<OpenRouterDelivered, Ope
             .unwrap_or("")
             .to_string(),
         error: inner.get("error").and_then(Value::as_bool).unwrap_or(false),
+        reason_code: inner
+            .get("reason_code")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         tool_calls: inner
             .get("tool_calls")
             .and_then(Value::as_array)
@@ -2695,8 +2965,73 @@ fn order_failure_reason(order: &Value) -> Option<String> {
     Some(reason)
 }
 
+/// A seller's refusal (`rejected`, credits released in full) as the error
+/// the buyer should see: over their authorization → a limit error saying
+/// what the turn needs and how to send it; the model unavailable → an
+/// unavailable error; anything else → the seller's reason.
+fn rejection_error(order: &Value) -> Option<OpenAiError> {
+    let rejection = order.get("rejection").filter(|r| r.is_object())?;
+    let code = rejection.get("reason_code").and_then(Value::as_str);
+    let message = rejection
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string);
+    Some(match code {
+        Some("authorization_too_low") => {
+            let message = message.unwrap_or_else(|| {
+                let needed = rejection
+                    .get("required_authorization_cents")
+                    .and_then(Value::as_f64)
+                    .map(|c| fmt_usd_cents(c.ceil() as i64));
+                match needed {
+                    Some(needed) => format!(
+                        "This message needs at least {needed} — more than was authorized. \
+                         Nothing was charged."
+                    ),
+                    None => {
+                        "This message needs more than was authorized. Nothing was charged.".into()
+                    }
+                }
+            });
+            OpenAiError::limit(
+                ErrorCode::AuthorizationTooLow,
+                format!("{message} {RAISE_LIMIT_HINT}"),
+            )
+        }
+        Some("upstream_unavailable") => OpenAiError::Unavailable(message.unwrap_or_else(|| {
+            "The model can't be served right now. Nothing was charged — try again shortly \
+             or pick another model."
+                .into()
+        })),
+        _ => OpenAiError::UpstreamFailure(format!(
+            "the seller refused this order: {}",
+            order_failure_reason(order).unwrap_or_else(|| "no reason given".into())
+        )),
+    })
+}
+
+/// A seller's error *delivery* (sellers before Overpay rejections deliver
+/// `{error: true, description, reason_code}` instead) as the same errors
+/// [`rejection_error`] gives a rejection.
+fn delivered_error(delivered: OpenRouterDelivered) -> OpenAiError {
+    match delivered.reason_code.as_deref() {
+        Some("authorization_too_low") => OpenAiError::limit(
+            ErrorCode::AuthorizationTooLow,
+            format!("{} {RAISE_LIMIT_HINT}", delivered.text),
+        ),
+        Some("upstream_unavailable") => OpenAiError::Unavailable(delivered.text),
+        _ => OpenAiError::UpstreamFailure(delivered.text),
+    }
+}
+
 fn delivered_content_json(snap: &Value) -> Result<Value, OpenAiError> {
     let data = snap.get("data").unwrap_or(snap);
+    if order_status(snap) == Some("rejected") {
+        if let Some(err) = rejection_error(data) {
+            return Err(err);
+        }
+    }
     // `failed` / `cancelled` also end the wait; they carry the seller's
     // reason, not a deliverable — say that instead of "no delivered_content".
     if let Some(status) = order_status(snap).filter(|s| *s != "delivered") {
@@ -2748,6 +3083,7 @@ async fn execute_tool_call(
     let state = &ctx.mcp;
     let (timeout, poll) = (ctx.timeout, ctx.poll);
     let (can_spend, key_id) = (ctx.can_spend, ctx.key_id.as_deref());
+    let cap = turn_cap(ctx);
     let name = call
         .pointer("/function/name")
         .and_then(Value::as_str)
@@ -2779,7 +3115,7 @@ async fn execute_tool_call(
 
     if let Some(tool) = listing_tool {
         return match run_listing_tool(
-            state, auth, &tool, &arguments, timeout, poll, key_id, usage, None,
+            state, auth, &tool, &arguments, timeout, poll, key_id, usage, None, cap,
         )
         .await
         {
@@ -2788,7 +3124,11 @@ async fn execute_tool_call(
         };
     }
 
-    match run_python_tool(state, auth, &arguments, timeout, poll, key_id, usage, None).await {
+    match run_python_tool(
+        state, auth, &arguments, timeout, poll, key_id, usage, None, cap,
+    )
+    .await
+    {
         Ok(result) => result.to_string(),
         Err(e) => json!({"error": e.message()}).to_string(),
     }
@@ -2804,6 +3144,7 @@ pub(crate) async fn run_python_tool(
     key_id: Option<&str>,
     usage: &mut TurnUsage,
     progress: Option<&ProgressSink>,
+    cap: Option<TurnCap>,
 ) -> Result<Value, OpenAiError> {
     let listing_id = resolve_python_listing_id(state).await?;
     let (order_id, redeemed_cents) = place_and_pay_order(
@@ -2813,6 +3154,7 @@ pub(crate) async fn run_python_tool(
         PYTHON_SELLER_SLUG,
         arguments,
         key_id,
+        cap,
     )
     .await?;
     let (snap, terminal) =
@@ -2935,6 +3277,7 @@ async fn run_agentic_loop(
             OPENROUTER_SELLER_SLUG,
             &buyer_note,
             ctx.key_id.as_deref(),
+            turn_cap(ctx),
         )
         .await?;
         let snap =
@@ -2943,7 +3286,7 @@ async fn run_agentic_loop(
         usage.add_order(&snap, redeemed_cents);
         let delivered = extract_openrouter_delivered(&snap)?;
         if delivered.error {
-            return Err(OpenAiError::UpstreamFailure(delivered.text));
+            return Err(delivered_error(delivered));
         }
         usage.add_tokens(&delivered);
         if !delivered.model.is_empty() {
@@ -2994,6 +3337,7 @@ async fn run_agentic_loop(
         OPENROUTER_SELLER_SLUG,
         &buyer_note,
         ctx.key_id.as_deref(),
+        turn_cap(ctx),
     )
     .await?;
     let snap = wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
@@ -3001,7 +3345,7 @@ async fn run_agentic_loop(
     usage.add_order(&snap, redeemed_cents);
     let delivered = extract_openrouter_delivered(&snap)?;
     if delivered.error {
-        return Err(OpenAiError::UpstreamFailure(delivered.text));
+        return Err(delivered_error(delivered));
     }
     usage.add_tokens(&delivered);
     if !delivered.model.is_empty() {
@@ -3058,6 +3402,7 @@ async fn run_passthrough_turn(
         OPENROUTER_SELLER_SLUG,
         &buyer_note,
         ctx.key_id.as_deref(),
+        turn_cap(ctx),
     )
     .await?;
     let snap = wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
@@ -3066,7 +3411,7 @@ async fn run_passthrough_turn(
     usage.add_order(&snap, redeemed_cents);
     let delivered = extract_openrouter_delivered(&snap)?;
     if delivered.error {
-        return Err(OpenAiError::UpstreamFailure(delivered.text));
+        return Err(delivered_error(delivered));
     }
     usage.add_tokens(&delivered);
     Ok(AgentResult {
@@ -3280,7 +3625,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             if let Some(choice) = req.tool_choice.as_ref() {
                 buyer_note["tool_choice"] = choice.clone();
             }
-            let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
+            let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
                 Ok(placed) => placed,
                 Err(e) => {
                     for ev in error_events("error", &requested_model, e) { yield Ok(ev); }
@@ -3328,7 +3673,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 }
             };
             if delivered.error {
-                let err = OpenAiError::UpstreamFailure(delivered.text);
+                let err = delivered_error(delivered);
                 for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
                 return;
             }
@@ -3381,7 +3726,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 "tools": defs.clone(),
                 "tool_choice": "auto",
             }), &ctx);
-            let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
+            let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
                 Ok(placed) => placed,
                 Err(e) => {
                     let id = if response_id.is_empty() { "error" } else { response_id.as_str() };
@@ -3434,7 +3779,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 }
             };
             if delivered.error {
-                let err = OpenAiError::UpstreamFailure(delivered.text);
+                let err = delivered_error(delivered);
                 for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
                 return;
             }
@@ -3504,7 +3849,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 // set off by blank lines.
                 if let Some(tool) = listing_tool {
                     yield Ok(Event::default().comment(format!("owallet: running {}", tool.name)));
-                    let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &tool.listing_id, &tool.seller_slug, &listing_tool_buyer_note(&tool, &arguments), ctx.key_id.as_deref()).await {
+                    let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &tool.listing_id, &tool.seller_slug, &listing_tool_buyer_note(&tool, &arguments), ctx.key_id.as_deref(), turn_cap(&ctx)).await {
                         Ok(placed) => placed,
                         Err(e) => {
                             let result_text = json!({"error": e.message()}).to_string();
@@ -3556,7 +3901,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     continue 'tool_calls;
                 }
 
-                let (python_order_id, py_redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &python_listing_id, PYTHON_SELLER_SLUG, &arguments, ctx.key_id.as_deref()).await {
+                let (python_order_id, py_redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &python_listing_id, PYTHON_SELLER_SLUG, &arguments, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
                     Ok(placed) => placed,
                     Err(e) => {
                         let result_text = json!({"error": e.message()}).to_string();
@@ -3627,7 +3972,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             "tools": defs.clone(),
             "tool_choice": "none",
         }), &ctx);
-        let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref()).await {
+        let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
             Ok(placed) => placed,
             Err(e) => {
                 let id = if response_id.is_empty() { "error" } else { response_id.as_str() };
@@ -3676,7 +4021,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             }
         };
         if delivered.error {
-            let err = OpenAiError::UpstreamFailure(delivered.text);
+            let err = delivered_error(delivered);
             for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
             return;
         }
@@ -4716,6 +5061,7 @@ mod tests {
             None,
             &mut usage,
             Some(&sink),
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("a stall is a pending result, not an error: {}", e.message()));
@@ -4862,6 +5208,7 @@ mod tests {
             Duration::from_millis(10),
             None,
             &mut usage,
+            None,
             None,
         )
         .await
@@ -6807,10 +7154,11 @@ mod tests {
             .await;
         res.assert_status(StatusCode::PAYMENT_REQUIRED);
         let body: Value = res.json();
+        assert_eq!(body["error"]["code"], "budget_exhausted");
         assert!(body["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("spending limit reached"));
+            .contains("budget is used up, so nothing was sent or charged"));
         assert!(overpay.received_requests().await.unwrap().is_empty());
     }
 
@@ -6828,6 +7176,50 @@ mod tests {
             }))
             .await;
         res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_per_message_limit_is_rejected_not_ignored() {
+        let overpay = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+        let s = test_server_with_scopes(seeded_state(&overpay.uri(), &tmp), "chat spend");
+        let res = s
+            .post("/chat/completions")
+            .add_header(REQUEST_MAX_HEADER, "a dollar")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+            }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    /// The lower of the per-message limit and the conversation's remaining
+    /// budget applies, and says which it is.
+    #[test]
+    fn the_turn_cap_is_the_lower_limit() {
+        assert_eq!(lower_cap(None, None), None);
+        assert_eq!(
+            lower_cap(Some(1.0), Some(0.4)),
+            Some(TurnCap {
+                cents: 40,
+                source: CapSource::Conversation
+            })
+        );
+        assert_eq!(
+            lower_cap(Some(0.25), Some(2.0)),
+            Some(TurnCap {
+                cents: 25,
+                source: CapSource::PerMessage
+            })
+        );
+        assert!(TurnCap {
+            cents: 40,
+            source: CapSource::Conversation
+        }
+        .exceeded("This message", 51)
+        .message()
+        .contains("needs at least $0.51 — over this conversation's remaining $0.40 budget"));
     }
 
     #[test]
@@ -7653,50 +8045,98 @@ mod tests {
     /// variant's maximum.
     #[test]
     fn openrouter_turns_are_authorized_for_what_they_need() {
+        use TurnAuthorization::*;
         let listing = metered_listing();
         let model = "anthropic/claude-sonnet-5";
+        let size = |note: &Value| size_openrouter_authorization(&listing, note, None);
+        let above = |cents| {
+            Some(Authorize {
+                cents,
+                above_default: true,
+            })
+        };
 
         // ~1k tokens: 0.3¢ in + 12.3¢ for 8192 out, x1.2 = 16¢ < 25¢.
-        assert_eq!(
-            size_openrouter_authorization(&listing, &note_with_bytes(model, 3_000)),
-            None
-        );
-
+        assert_eq!(size(&note_with_bytes(model, 3_000)), Some(Default));
         // ~40k tokens (base tier): (12¢ + 12.29¢) x 1.2 = 29.15 → 30¢.
-        assert_eq!(
-            size_openrouter_authorization(&listing, &note_with_bytes(model, 120_000)),
-            Some(30)
-        );
-
+        assert_eq!(size(&note_with_bytes(model, 120_000)), above(30));
         // ~100k tokens (long-context tier): (60¢ + 18.43¢) x 1.2 → 95¢.
-        assert_eq!(
-            size_openrouter_authorization(&listing, &note_with_bytes(model, 300_000)),
-            Some(95)
-        );
-
+        assert_eq!(size(&note_with_bytes(model, 300_000)), above(95));
         // A small max_tokens shrinks the output allowance.
         let mut capped = note_with_bytes(model, 120_000);
         capped["max_tokens"] = json!(1000);
-        assert_eq!(size_openrouter_authorization(&listing, &capped), None);
-
+        assert_eq!(size(&capped), Some(Default));
         // Never past the variant's maximum.
-        assert_eq!(
-            size_openrouter_authorization(&listing, &note_with_bytes(model, 3_000_000)),
-            Some(500)
-        );
+        assert_eq!(size(&note_with_bytes(model, 3_000_000)), above(500));
 
         // Unknown model (e.g. "default"), or a fixed-price listing: the
         // listing's own default applies.
-        assert_eq!(
-            size_openrouter_authorization(&listing, &note_with_bytes("default", 3_000_000)),
-            None
-        );
+        assert_eq!(size(&note_with_bytes("default", 3_000_000)), None);
         let mut fixed = metered_listing();
         fixed["data"]["pricing_mode"] = json!("fixed");
         assert_eq!(
-            size_openrouter_authorization(&fixed, &note_with_bytes(model, 3_000_000)),
+            size_openrouter_authorization(&fixed, &note_with_bytes(model, 3_000_000), None),
             None
         );
+    }
+
+    /// The buyer's per-message limit bounds the authorization: a roomy cap
+    /// changes nothing, a tight one authorizes exactly the cap (as long as
+    /// the turn can run at all), and one below the turn's minimum — its
+    /// input plus the guard's 256-token reserve, or the model's advertised
+    /// minimum commitment — refuses the turn before any order.
+    #[test]
+    fn the_per_message_limit_bounds_the_authorization() {
+        use TurnAuthorization::*;
+        let listing = metered_listing();
+        let model = "anthropic/claude-sonnet-5";
+        let size = |bytes, cap| {
+            size_openrouter_authorization(&listing, &note_with_bytes(model, bytes), Some(cap))
+        };
+
+        // ~40k tokens wants 30¢: a $1 cap leaves it as is.
+        assert_eq!(
+            size(120_000, 100),
+            Some(Authorize {
+                cents: 30,
+                above_default: true
+            })
+        );
+        // A 20¢ cap: the turn needs 15¢ at least ((12¢ + 0.38¢) x 1.2), so
+        // it is authorized at the cap — below the 25¢ default.
+        assert_eq!(
+            size(120_000, 20),
+            Some(Authorize {
+                cents: 20,
+                above_default: false
+            })
+        );
+        // A 10¢ cap can't cover that minimum: refused, with what it needs.
+        assert!(
+            matches!(
+                size(120_000, 10),
+                Some(OverCap { needed_cents: 15, input_tokens, .. }) if input_tokens > 40_000
+            ),
+            "{:?}",
+            size(120_000, 10)
+        );
+        // A short prompt under a cap below the 25¢ default: authorized at
+        // the cap instead of the default...
+        assert_eq!(
+            size(3_000, 20),
+            Some(Authorize {
+                cents: 20,
+                above_default: false
+            })
+        );
+        // ...but never below the model's 11¢ minimum commitment.
+        assert!(matches!(
+            size(3_000, 10),
+            Some(OverCap {
+                needed_cents: 11,
+                ..
+            })
+        ));
     }
 
     /// A long-context turn is created and paid in one request with its
@@ -7733,6 +8173,7 @@ mod tests {
             OPENROUTER_ID,
             OPENROUTER_SELLER_SLUG,
             &note,
+            None,
             None,
         )
         .await
@@ -7776,10 +8217,58 @@ mod tests {
             OPENROUTER_SELLER_SLUG,
             &note,
             None,
+            None,
         )
         .await
         .unwrap_or_else(|e| panic!("falls back: {}", e.message()));
         assert_eq!(order_id, "PLAIN-1");
+    }
+
+    /// Over the per-message limit: refused before any order is placed,
+    /// saying what the turn needs and which limit it hit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_over_the_per_message_limit_places_no_order() {
+        let overpay = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/listings/{OPENROUTER_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(metered_listing()))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/orders"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (_npub, auth) = state.resolve_owned_auth().unwrap();
+        let note = note_with_bytes("anthropic/claude-sonnet-5", 120_000);
+        let cap = TurnCap {
+            cents: 10,
+            source: CapSource::PerMessage,
+        };
+        let err = place_and_pay_order(
+            &state,
+            &auth,
+            OPENROUTER_ID,
+            OPENROUTER_SELLER_SLUG,
+            &note,
+            None,
+            Some(cap),
+        )
+        .await
+        .expect_err("refused");
+        assert_eq!(err.code(), Some("request_limit_exceeded"));
+        let message = err.message();
+        assert!(
+            message.contains("about 40,013 tokens of context on anthropic/claude-sonnet-5")
+                && message.contains("needs at least $0.15 — over your $0.10 per-message limit")
+                && message.contains("Nothing was sent or charged")
+                && message.contains("norm: /budget"),
+            "{message}"
+        );
     }
 
     /// A seller's metered-pricing rejection ends the wait (it used to be
@@ -7795,12 +8284,40 @@ mod tests {
                           "seller_internal": "dropped"},
         }});
         let err = delivered_content_json(&snap).unwrap_err();
+        assert_eq!(err.code(), Some("authorization_too_low"));
         assert!(
-            err.message().contains(
-                "rejected: This request needs more. (needs an authorization of at least $0.51)"
-            ),
+            err.message()
+                .starts_with("This request needs more. Raise the limit (norm: /budget)"),
             "{}",
             err.message()
+        );
+        // The model unavailable: its own code and the seller's message.
+        let unavailable = json!({"data": {
+            "fulfillment_status": "rejected",
+            "rejection": {"reason_code": "upstream_unavailable",
+                          "message": "No OpenRouter provider can serve x right now. Nothing was charged."},
+        }});
+        let err = delivered_content_json(&unavailable).unwrap_err();
+        assert_eq!(err.code(), Some("model_unavailable"));
+        assert_eq!(
+            err.message(),
+            "No OpenRouter provider can serve x right now. Nothing was charged."
+        );
+        // An older seller's error *delivery* reads the same way.
+        let legacy = OpenRouterDelivered {
+            text: "This request needs an authorization of at least 51¢.".into(),
+            model: String::new(),
+            error: true,
+            reason_code: Some("authorization_too_low".into()),
+            tool_calls: vec![],
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: None,
+            cache_write_tokens: None,
+        };
+        assert_eq!(
+            delivered_error(legacy).code(),
+            Some("authorization_too_low")
         );
         let out = extract_listing_delivered("R1", &snap);
         assert_eq!(out["fulfillment_status"], "rejected");
