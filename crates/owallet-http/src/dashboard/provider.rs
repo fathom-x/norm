@@ -33,7 +33,7 @@ pub struct CreateProviderKeyForm {
 
 /// Parse a user-typed budget field: blank/whitespace → no limit; otherwise
 /// a positive dollar amount (up to cents precision) → cents.
-pub(crate) fn parse_budget_usd(input: Option<&str>) -> Result<Option<i64>, &'static str> {
+pub fn parse_budget_usd(input: Option<&str>) -> Result<Option<i64>, &'static str> {
     let Some(raw) = input.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };

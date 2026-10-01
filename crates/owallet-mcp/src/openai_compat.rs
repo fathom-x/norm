@@ -113,6 +113,12 @@ const BUY_CREDITS_TOOL: &str = "buy_credits";
 const DEFAULT_SPEND_CAP_USD: f64 = 20.0;
 /// Environment variable overriding [`DEFAULT_SPEND_CAP_USD`].
 const SPEND_CAP_ENV: &str = "OWALLET_V1_SPEND_CAP_USD";
+/// Request header a client (norm's per-conversation `/budget`) sends to
+/// *lower* this request's spending allowance: the wallet spending tools may
+/// move at most this many USD, and a value of 0 or less refuses the request
+/// before any order is placed. It can never raise the cap — the wallet's own
+/// setting and the key's daily budget still apply on top.
+pub const SPEND_LIMIT_HEADER: &str = "x-owallet-spend-limit-usd";
 
 /// A model id that always works, without needing a live catalog fetch to
 /// validate it: `validate_request` accepts it unconditionally and
@@ -185,6 +191,9 @@ struct Ctx {
     /// a wallet-level dashboard setting takes precedence per request via
     /// [`effective_spend_cap`].
     spend_cap_usd: f64,
+    /// This request's client-supplied limit ([`SPEND_LIMIT_HEADER`]), if any.
+    /// Set per request; `None` at construction.
+    request_spend_limit_usd: Option<f64>,
     /// Per-router cache of `provider_tool`-marked listings. On `Ctx`
     /// rather than a process-global so each serve env (and each test
     /// router) resolves its own marketplace's tools.
@@ -221,6 +230,7 @@ fn router_with_config(state: McpState, timeout: Duration, poll: Duration, cap: f
         can_spend: false,
         key_id: None,
         spend_cap_usd: cap,
+        request_spend_limit_usd: None,
         listing_tools: Arc::new(OnceCell::new()),
     };
     Router::new()
@@ -242,7 +252,7 @@ async fn wallet_status(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, OpenAiError> {
-    let (state, _can_spend, key_id) = authenticate_provider_key(&ctx.mcp, &headers)?;
+    let (state, can_spend, key_id) = authenticate_provider_key(&ctx.mcp, &headers)?;
     let out = crate::tools::dispatch(&state, "get_account_info", json!({}), None)
         .await
         .map_err(|e| OpenAiError::internal(format!("get_account_info: {e}")))?;
@@ -259,6 +269,9 @@ async fn wallet_status(
     if let Some(key) = read_key(&state, key_id.as_deref()) {
         map.insert("key_budget".into(), key_budget_json(&key));
     }
+    // Whether the calling key carries the `spend` scope — lets a client
+    // (norm) notice it is still holding a chat-only key and replace it.
+    map.insert("key_can_spend".into(), Value::Bool(can_spend));
     // The marketplace this wallet is pointed at (env-resolved, so norm's
     // sidebar links the right Overpay per staging/prod build without its
     // own copy of the URL table).
@@ -698,6 +711,7 @@ fn listing_tool_def(tool: &ListingTool) -> Value {
 
 /// Execute one listing-tool call: a real, separately-paid order against
 /// the tool's listing, exactly like `run_python`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_listing_tool(
     state: &McpState,
     auth: &OwnedAuth,
@@ -706,6 +720,7 @@ pub(crate) async fn run_listing_tool(
     timeout: Duration,
     poll: Duration,
     key_id: Option<&str>,
+    usage: &mut TurnUsage,
 ) -> Result<Value, OpenAiError> {
     let buyer_note = listing_tool_buyer_note(tool, arguments);
     let (order_id, redeemed_cents) = place_and_pay_order(
@@ -719,6 +734,7 @@ pub(crate) async fn run_listing_tool(
     .await?;
     let snap = wait_for_order_terminal(state, auth, &order_id, timeout, poll).await?;
     net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
+    usage.add_order(&snap, redeemed_cents);
     Ok(extract_listing_delivered(&order_id, &snap))
 }
 
@@ -1073,13 +1089,36 @@ pub(crate) fn read_key(
 /// fallback (`OWALLET_V1_SPEND_CAP_USD` env override or
 /// [`DEFAULT_SPEND_CAP_USD`]).
 fn effective_spend_cap(ctx: &Ctx) -> f64 {
-    ctx.mcp
+    let wallet_cap = ctx
+        .mcp
         .db
         .lock()
         .ok()
         .and_then(|db| db.read_spend_cap_usd_cents().ok().flatten())
         .map(|cents| cents as f64 / 100.0)
-        .unwrap_or(ctx.spend_cap_usd)
+        .unwrap_or(ctx.spend_cap_usd);
+    // A client limit only ever narrows the allowance.
+    match ctx.request_spend_limit_usd {
+        Some(limit) => wallet_cap.min(limit.max(0.0)),
+        None => wallet_cap,
+    }
+}
+
+/// Parse [`SPEND_LIMIT_HEADER`]. Absent → `Ok(None)`; present but not a
+/// finite number → an error rather than silently ignoring a limit the
+/// client meant to impose.
+fn request_spend_limit(headers: &HeaderMap) -> Result<Option<f64>, OpenAiError> {
+    let Some(raw) = headers.get(SPEND_LIMIT_HEADER) else {
+        return Ok(None);
+    };
+    raw.to_str()
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .map(Some)
+        .ok_or_else(|| {
+            OpenAiError::InvalidRequest(format!("{SPEND_LIMIT_HEADER} must be a number of USD"))
+        })
 }
 
 /// `Some(refusal)` when the key's daily budget is spent. Checked at
@@ -1663,12 +1702,30 @@ async fn chat_completions(
         Ok(auth) => auth,
         Err(e) => return e.into_response(),
     };
+    let request_spend_limit_usd = match request_spend_limit(&headers) {
+        Ok(limit) => limit,
+        Err(e) => return e.into_response(),
+    };
     let ctx = Ctx {
         mcp,
         can_spend,
         key_id,
+        request_spend_limit_usd,
         ..ctx
     };
+    // The client says this request may spend nothing (e.g. a conversation
+    // whose budget is used up): refuse before any order — each chat turn is
+    // itself a paid order.
+    if let Some(limit) = ctx.request_spend_limit_usd {
+        if limit <= 0.0 {
+            return OpenAiError::PaymentRequired(
+                "spending limit reached: the client allows this request no further spend \
+                 (raise the conversation budget to continue)"
+                    .into(),
+            )
+            .into_response();
+        }
+    }
     // The daily budget bounds *everything* the key costs — each chat turn
     // is itself a paid order — so an exhausted key refuses cleanly before
     // any order is placed rather than erroring mid-conversation.
@@ -1920,6 +1977,82 @@ async fn wait_for_order_terminal(
     }
 }
 
+/// What one order actually cost the wallet: the seller's metered
+/// `charged_cents` when the delivery states one, else the gross deposit.
+/// The mirror image of the refund [`net_key_budget_from_delivery`] hands
+/// back to the key budget, so the two always agree on what a turn cost.
+fn net_charged_cents(snap: &Value, redeemed_cents: i64) -> i64 {
+    if redeemed_cents <= 0 {
+        return 0;
+    }
+    delivered_content_json(snap)
+        .ok()
+        .and_then(|inner| inner.get("charged_cents").and_then(Value::as_i64))
+        .map(|charged| charged.clamp(0, redeemed_cents))
+        .unwrap_or(redeemed_cents)
+}
+
+/// Everything one chat completion spent and consumed, accumulated across
+/// every order it placed — the OpenRouter turns *and* the tool calls, each
+/// of which is a separately paid marketplace order. A tool call can cost
+/// far more than the inference around it (image generation), so a total
+/// that counted only the model turns would understate real spend badly.
+///
+/// Reported back on the response so a client can show what the turn
+/// actually cost instead of estimating tokens × a list price it has no
+/// way to know (norm's sidebar does exactly this).
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct TurnUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    charged_cents: i64,
+    /// What the wallet spending tools moved during the request (credit
+    /// purchases and redemptions), separate from `charged_cents` — the
+    /// request's own operating cost. Reported so a client tracking a budget
+    /// can count money that left the wallet, not just inference.
+    wallet_spent_cents: i64,
+}
+
+impl TurnUsage {
+    /// Charge one settled order against the turn. Pair every
+    /// `net_key_budget_from_delivery` with this: same snapshot, same
+    /// deposit, so the budget and the reported cost cannot drift.
+    fn add_order(&mut self, snap: &Value, redeemed_cents: i64) {
+        self.charged_cents = self
+            .charged_cents
+            .saturating_add(net_charged_cents(snap, redeemed_cents));
+    }
+
+    /// Token counts from an OpenRouter delivery. Tool-call orders have no
+    /// tokens of their own — only their cost lands on the turn.
+    fn add_tokens(&mut self, delivered: &OpenRouterDelivered) {
+        self.prompt_tokens = self.prompt_tokens.saturating_add(delivered.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(delivered.completion_tokens);
+    }
+
+    /// OpenAI's `usage` shape plus two extensions: `cost` (USD, the
+    /// convention OpenRouter set) and `charged_cents`, the authoritative
+    /// integer — real money should not round-trip through a float.
+    fn to_json(self) -> Value {
+        json!({
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.prompt_tokens.saturating_add(self.completion_tokens),
+            "cost": self.charged_cents as f64 / 100.0,
+            "charged_cents": self.charged_cents,
+            "wallet_spent_cents": self.wallet_spent_cents,
+        })
+    }
+
+    /// Carry the request's wallet-tool spend onto the reported usage.
+    fn with_wallet_spend(mut self, ledger: &SpendLedger) -> Self {
+        self.wallet_spent_cents = (ledger.spent_usd * 100.0).round() as i64;
+        self
+    }
+}
+
 /// What the OpenRouter listing actually delivered, parsed out of the order
 /// snapshot's (JSON-string-encoded) `delivered_content`.
 struct OpenRouterDelivered {
@@ -1927,6 +2060,8 @@ struct OpenRouterDelivered {
     model: String,
     error: bool,
     tool_calls: Vec<Value>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
 }
 
 fn extract_openrouter_delivered(snap: &Value) -> Result<OpenRouterDelivered, OpenAiError> {
@@ -1948,7 +2083,20 @@ fn extract_openrouter_delivered(snap: &Value) -> Result<OpenRouterDelivered, Ope
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default(),
+        // The seller states the upstream model's own counts; a seller that
+        // doesn't meter simply reports none and the turn contributes zero
+        // tokens rather than a guess.
+        prompt_tokens: delivered_usage_tokens(&inner, "prompt_tokens"),
+        completion_tokens: delivered_usage_tokens(&inner, "completion_tokens"),
     })
+}
+
+fn delivered_usage_tokens(inner: &Value, field: &str) -> u64 {
+    inner
+        .pointer("/usage")
+        .and_then(|usage| usage.get(field))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
 }
 
 /// The Python listing's delivered `{stdout, stderr, exit_code, duration_ms,
@@ -2010,6 +2158,7 @@ async fn execute_tool_call(
     auth: &OwnedAuth,
     call: &Value,
     ledger: &mut SpendLedger,
+    usage: &mut TurnUsage,
 ) -> String {
     let state = &ctx.mcp;
     let (timeout, poll) = (ctx.timeout, ctx.poll);
@@ -2044,13 +2193,15 @@ async fn execute_tool_call(
     }
 
     if let Some(tool) = listing_tool {
-        return match run_listing_tool(state, auth, &tool, &arguments, timeout, poll, key_id).await {
+        return match run_listing_tool(state, auth, &tool, &arguments, timeout, poll, key_id, usage)
+            .await
+        {
             Ok(result) => result.to_string(),
             Err(e) => json!({"error": e.message()}).to_string(),
         };
     }
 
-    match run_python_tool(state, auth, &arguments, timeout, poll, key_id).await {
+    match run_python_tool(state, auth, &arguments, timeout, poll, key_id, usage).await {
         Ok(result) => result.to_string(),
         Err(e) => json!({"error": e.message()}).to_string(),
     }
@@ -2063,6 +2214,7 @@ pub(crate) async fn run_python_tool(
     timeout: Duration,
     poll: Duration,
     key_id: Option<&str>,
+    usage: &mut TurnUsage,
 ) -> Result<Value, OpenAiError> {
     let listing_id = resolve_python_listing_id(state).await?;
     let (order_id, redeemed_cents) = place_and_pay_order(
@@ -2076,6 +2228,7 @@ pub(crate) async fn run_python_tool(
     .await?;
     let snap = wait_for_order_terminal(state, auth, &order_id, timeout, poll).await?;
     net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
+    usage.add_order(&snap, redeemed_cents);
     extract_python_delivered(&snap)
 }
 
@@ -2088,6 +2241,8 @@ struct ChatCompletionResponse {
     created: i64,
     model: String,
     choices: Vec<ChatCompletionChoice>,
+    /// What the turn actually consumed and cost. See [`TurnUsage`].
+    usage: Value,
 }
 
 #[derive(Serialize)]
@@ -2116,6 +2271,7 @@ struct AgentResult {
     model: String,
     order_id: String,
     tool_calls: Vec<Value>,
+    usage: TurnUsage,
 }
 
 /// Runs the OpenRouter <-> `run_python` loop to a final answer: place +
@@ -2134,6 +2290,7 @@ async fn run_agentic_loop(
     let defs = tool_defs(ctx, ctx.can_spend).await?;
     let mut ledger = SpendLedger::new(effective_spend_cap(ctx));
     let mut last_model = requested_model.to_string();
+    let mut usage = TurnUsage::default();
 
     for _ in 0..MAX_TOOL_ITERATIONS {
         // Mid-request exhaustion of the daily budget breaks to the landing
@@ -2160,10 +2317,12 @@ async fn run_agentic_loop(
         let snap =
             wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
         net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
+        usage.add_order(&snap, redeemed_cents);
         let delivered = extract_openrouter_delivered(&snap)?;
         if delivered.error {
             return Err(OpenAiError::UpstreamFailure(delivered.text));
         }
+        usage.add_tokens(&delivered);
         if !delivered.model.is_empty() {
             last_model = delivered.model;
         }
@@ -2174,6 +2333,7 @@ async fn run_agentic_loop(
                 model: last_model,
                 order_id,
                 tool_calls: Vec::new(),
+                usage: usage.with_wallet_spend(&ledger),
             });
         }
 
@@ -2183,7 +2343,7 @@ async fn run_agentic_loop(
             "tool_calls": delivered.tool_calls,
         }));
         for call in &delivered.tool_calls {
-            let result_text = execute_tool_call(ctx, auth, call, &mut ledger).await;
+            let result_text = execute_tool_call(ctx, auth, call, &mut ledger, &mut usage).await;
             let tool_call_id = call.get("id").and_then(Value::as_str).unwrap_or_default();
             messages.push(
                 json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }),
@@ -2212,10 +2372,12 @@ async fn run_agentic_loop(
     .await?;
     let snap = wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
     net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
+    usage.add_order(&snap, redeemed_cents);
     let delivered = extract_openrouter_delivered(&snap)?;
     if delivered.error {
         return Err(OpenAiError::UpstreamFailure(delivered.text));
     }
+    usage.add_tokens(&delivered);
     if !delivered.model.is_empty() {
         last_model = delivered.model;
     }
@@ -2231,6 +2393,7 @@ async fn run_agentic_loop(
         model: last_model,
         order_id,
         tool_calls: Vec::new(),
+        usage: usage.with_wallet_spend(&ledger),
     })
 }
 
@@ -2270,10 +2433,13 @@ async fn run_passthrough_turn(
     .await?;
     let snap = wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
     net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
+    let mut usage = TurnUsage::default();
+    usage.add_order(&snap, redeemed_cents);
     let delivered = extract_openrouter_delivered(&snap)?;
     if delivered.error {
         return Err(OpenAiError::UpstreamFailure(delivered.text));
     }
+    usage.add_tokens(&delivered);
     Ok(AgentResult {
         text: delivered.text,
         model: if delivered.model.is_empty() {
@@ -2283,6 +2449,7 @@ async fn run_passthrough_turn(
         },
         order_id,
         tool_calls: delivered.tool_calls,
+        usage,
     })
 }
 
@@ -2326,6 +2493,7 @@ async fn buffered_chat_completion(
             },
             finish_reason: if has_calls { "tool_calls" } else { "stop" },
         }],
+        usage: result.usage.to_json(),
     })
 }
 
@@ -2362,6 +2530,24 @@ fn indexed_tool_calls(calls: &[Value]) -> Vec<Value> {
             call
         })
         .collect()
+}
+
+/// The turn's final `usage` frame: a chunk with **no** choices, which is
+/// how OpenAI reports usage on a stream (`stream_options.include_usage`)
+/// and what an OpenAI-compatible client parses without special-casing.
+/// Emitted just before `[DONE]` on every successful stream, so a client
+/// sees real token counts and the turn's real cost instead of having to
+/// estimate from a price list it cannot know.
+fn usage_event(id: &str, model: &str, usage: TurnUsage) -> Event {
+    let payload = json!({
+        "id": format!("chatcmpl-{id}"),
+        "object": "chat.completion.chunk",
+        "created": unix_now(),
+        "model": model,
+        "choices": [],
+        "usage": usage.to_json(),
+    });
+    Event::default().data(payload.to_string())
 }
 
 /// The suffix of `delivered_text` not yet covered by `streamed` bytes —
@@ -2502,6 +2688,8 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 tokio::time::sleep(ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
+            let mut usage = TurnUsage::default();
+            usage.add_order(&snap, redeemed_cents);
 
             let delivered = match extract_openrouter_delivered(&snap) {
                 Ok(d) => d,
@@ -2515,6 +2703,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
                 return;
             }
+            usage.add_tokens(&delivered);
             let model = if delivered.model.is_empty() { requested_model.clone() } else { delivered.model.clone() };
             if let Some(tail) = catch_up(&delivered.text, streamed) {
                 yield Ok(chunk_event(&order_id, &model, json!({"content": tail}), None));
@@ -2525,6 +2714,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 yield Ok(chunk_event(&order_id, &model, json!({"tool_calls": indexed_tool_calls(&delivered.tool_calls)}), None));
                 yield Ok(chunk_event(&order_id, &model, json!({}), Some("tool_calls")));
             }
+            yield Ok(usage_event(&order_id, &model, usage));
             yield Ok(Event::default().data("[DONE]"));
             return;
         }
@@ -2544,6 +2734,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             }
         };
         let mut ledger = SpendLedger::new(effective_spend_cap(&ctx));
+        let mut usage = TurnUsage::default();
 
         let mut last_model = requested_model.clone();
         // Filled in once the first order places; every chunk after that —
@@ -2604,6 +2795,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 tokio::time::sleep(ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
+            usage.add_order(&snap, redeemed_cents);
 
             let delivered = match extract_openrouter_delivered(&snap) {
                 Ok(d) => d,
@@ -2620,6 +2812,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             if !delivered.model.is_empty() {
                 last_model = delivered.model.clone();
             }
+            usage.add_tokens(&delivered);
 
             if let Some(tail) = catch_up(&delivered.text, streamed) {
                 yield Ok(chunk_event(&response_id, &last_model, json!({"content": tail}), None));
@@ -2627,6 +2820,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
 
             if delivered.tool_calls.is_empty() {
                 yield Ok(chunk_event(&response_id, &last_model, json!({}), Some("stop")));
+                yield Ok(usage_event(&response_id, &last_model, usage.with_wallet_spend(&ledger)));
                 yield Ok(Event::default().data("[DONE]"));
                 return;
             }
@@ -2715,6 +2909,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
 
                         if is_terminal(order_status(&snap)) {
                             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
+                            usage.add_order(&snap, redeemed_cents);
                             break extract_listing_delivered(&order_id, &snap).to_string();
                         }
                         if started.elapsed() >= ctx.timeout {
@@ -2784,6 +2979,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n```\n"}), None));
                 }
                 net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &python_snap, py_redeemed_cents);
+                usage.add_order(&python_snap, py_redeemed_cents);
 
                 let result_text = match extract_python_delivered(&python_snap) {
                     Ok(result) => result.to_string(),
@@ -2842,6 +3038,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             tokio::time::sleep(ctx.poll).await;
         };
         net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
+        usage.add_order(&snap, redeemed_cents);
         let delivered = match extract_openrouter_delivered(&snap) {
             Ok(d) => d,
             Err(e) => {
@@ -2857,6 +3054,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
         if !delivered.model.is_empty() {
             last_model = delivered.model.clone();
         }
+        usage.add_tokens(&delivered);
         if let Some(tail) = catch_up(&delivered.text, streamed) {
             yield Ok(chunk_event(&response_id, &last_model, json!({"content": tail}), None));
         }
@@ -2870,6 +3068,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             return;
         }
         yield Ok(chunk_event(&response_id, &last_model, json!({}), Some("stop")));
+        yield Ok(usage_event(&response_id, &last_model, usage.with_wallet_spend(&ledger)));
         yield Ok(Event::default().data("[DONE]"));
     };
     Sse::new(stream).into_response()
@@ -3124,10 +3323,14 @@ mod tests {
         .unwrap()
     }
 
+    /// A realistic OpenRouter delivery. The `usage` block mirrors what the
+    /// seller actually states (see the metered-settlement test below), so
+    /// the turn-usage accounting is exercised by every test that delivers.
     fn delivered_content(description: &str, model: &str, error: bool) -> String {
         serde_json::to_string(&json!({
             "description": description, "model": model,
-            "error": error, "credits_refunded": false
+            "error": error, "credits_refunded": false,
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7}
         }))
         .unwrap()
     }
@@ -3248,6 +3451,10 @@ mod tests {
         assert_eq!(body["key_budget"]["daily_budget_usd"], 5.0);
         assert_eq!(body["key_budget"]["spent_today_usd"], 0.0);
         assert_eq!(body["key_budget"]["remaining_today_usd"], 5.0);
+        assert_eq!(
+            body["key_can_spend"], false,
+            "a chat-scoped key reports no spend scope"
+        );
         assert!(
             body["balance_error"].is_string(),
             "dead RPC surfaces balance_error"
@@ -3729,19 +3936,39 @@ mod tests {
         );
         assert!(text.trim_end().ends_with("data: [DONE]"), "stream: {text}");
 
+        // The last chunk that carries choices ends the turn; the usage
+        // frame that follows it deliberately has none (OpenAI's
+        // include_usage shape), so it is excluded here and asserted below.
         let finish_reasons: Vec<Value> = text
             .lines()
             .filter_map(|l| l.strip_prefix("data:"))
             .map(str::trim)
             .filter(|l| *l != "[DONE]")
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| !v["choices"].as_array().is_none_or(|c| c.is_empty()))
             .map(|v| v["choices"][0]["finish_reason"].clone())
             .collect();
         assert_eq!(
             finish_reasons.last(),
             Some(&Value::String("stop".to_string())),
-            "final chunk must carry finish_reason=stop: {text}"
+            "final content chunk must carry finish_reason=stop: {text}"
         );
+
+        let usage = last_stream_usage(&text).expect("stream must end with a usage frame");
+        assert_eq!(usage["prompt_tokens"], json!(11), "usage: {text}");
+        assert_eq!(usage["completion_tokens"], json!(7), "usage: {text}");
+        assert_eq!(usage["total_tokens"], json!(18), "usage: {text}");
+    }
+
+    /// The `usage` block off the last usage-bearing frame of an SSE body.
+    fn last_stream_usage(text: &str) -> Option<Value> {
+        text.lines()
+            .filter_map(|l| l.strip_prefix("data:"))
+            .map(str::trim)
+            .filter(|l| *l != "[DONE]")
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| v.get("usage").cloned())
+            .next_back()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4043,6 +4270,57 @@ mod tests {
         // that actually produced the answer -- not the first (tool-calling)
         // turn.
         assert_eq!(body["id"], "chatcmpl-OR-1");
+
+        // Usage covers the whole turn, not just the turn that answered:
+        // three real orders were placed and paid (two OpenRouter turns plus
+        // the run_python order), each redeeming the mock's 2¢. A tool order
+        // carries no tokens of its own, so only the two model turns'
+        // token counts land.
+        assert_eq!(body["usage"]["charged_cents"], json!(6), "body: {body}");
+        assert_eq!(body["usage"]["cost"], json!(0.06), "body: {body}");
+        assert_eq!(body["usage"]["prompt_tokens"], json!(11), "body: {body}");
+        assert_eq!(body["usage"]["completion_tokens"], json!(7), "body: {body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_that_pays_nothing_reports_zero_rather_than_guessing() {
+        // No delivery states `charged_cents` and the mock redeems nothing
+        // meaningful, so the endpoint reports what it knows instead of
+        // inventing a token-price estimate the wallet never paid.
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": serde_json::to_string(&json!({
+                        "description": "Hi.", "model": "openai/gpt-5-mini",
+                        "error": false, "credits_refunded": false,
+                    }))
+                    .unwrap(),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["usage"]["prompt_tokens"], json!(0), "body: {body}");
+        assert_eq!(body["usage"]["completion_tokens"], json!(0), "body: {body}");
+        assert_eq!(body["usage"]["total_tokens"], json!(0), "body: {body}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5312,6 +5590,116 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spend_limit_header_lowers_the_request_cap() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+
+        // $10 fits the built-in $20 cap but not the client's $5 limit —
+        // expect(0) proves the header refused the spend.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/merchant_credits/acme/purchase"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "order_id": "never", "order_url": "never"
+            })))
+            .expect(0)
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content_with_tool_call(
+                        "openai/gpt-5-mini", "call_1", "buy_credits",
+                        r#"{"seller_slug": "acme", "amount_usd": 10.0}"#
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-1", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content(
+                        "That exceeds this conversation's budget.", "openai/gpt-5-mini", false
+                    ),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server_with_scopes(seeded_state(&overpay.uri(), &tmp), "chat spend");
+        let res = s
+            .post("/chat/completions")
+            .add_header(SPEND_LIMIT_HEADER, "5")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "load ten dollars"}],
+            }))
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "That exceeds this conversation's budget."
+        );
+        assert_eq!(body["usage"]["wallet_spent_cents"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn zero_spend_limit_refuses_before_any_order() {
+        // No marketplace mocks: any order attempt would fail differently.
+        let overpay = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+        let s = test_server_with_scopes(seeded_state(&overpay.uri(), &tmp), "chat spend");
+        let res = s
+            .post("/chat/completions")
+            .add_header(SPEND_LIMIT_HEADER, "0")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+            }))
+            .await;
+        res.assert_status(StatusCode::PAYMENT_REQUIRED);
+        let body: Value = res.json();
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("spending limit reached"));
+        assert!(overpay.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_spend_limit_is_rejected_not_ignored() {
+        let overpay = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+        let s = test_server_with_scopes(seeded_state(&overpay.uri(), &tmp), "chat spend");
+        let res = s
+            .post("/chat/completions")
+            .add_header(SPEND_LIMIT_HEADER, "five dollars")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+            }))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn usage_reports_what_the_wallet_tools_spent() {
+        let mut ledger = SpendLedger::new(20.0);
+        ledger.try_spend(1.25).unwrap();
+        ledger.record(0.5);
+        let usage = TurnUsage::default().with_wallet_spend(&ledger).to_json();
+        assert_eq!(usage["wallet_spent_cents"], 175);
+        assert_eq!(usage["charged_cents"], 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dashboard_set_spend_cap_overrides_the_default_per_request() {
         let overpay = MockServer::start().await;
         mount_both_listings(&overpay).await;
@@ -5628,12 +6016,28 @@ mod tests {
             .await;
         res.assert_status_ok();
 
+        // The reported cost is the *settled* charge, not the gross deposit,
+        // and it agrees exactly with what the key budget recorded — the two
+        // read the same delivery, so they can never tell the user different
+        // stories about what a turn cost.
+        let body: Value = res.json();
+        assert_eq!(body["usage"]["charged_cents"], json!(1), "body: {body}");
+        assert_eq!(body["usage"]["cost"], json!(0.01), "body: {body}");
+        assert_eq!(body["usage"]["prompt_tokens"], json!(10), "body: {body}");
+        assert_eq!(body["usage"]["completion_tokens"], json!(5), "body: {body}");
+        assert_eq!(body["usage"]["total_tokens"], json!(15), "body: {body}");
+
         let keys = state
             .db
             .lock()
             .unwrap()
             .list_provider_keys("npub1abandon")
             .unwrap();
+        assert_eq!(
+            body["usage"]["charged_cents"].as_i64(),
+            Some(keys[0].spent_today_usd_cents()),
+            "reported cost must match the budget's own accounting"
+        );
         assert_eq!(
             keys[0].spent_today_usd_cents(),
             1,

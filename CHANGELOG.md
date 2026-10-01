@@ -4,6 +4,48 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Per-request spend limit; wallet spend in `/v1` usage
+
+Groundwork for per-conversation budgets in a client (norm's `/budget`).
+
+- **`x-owallet-spend-limit-usd`** lets a client *lower* one request's
+  allowance for the wallet spending tools. It can never raise it — the
+  wallet's own cap and the key's daily budget still apply. A limit of `0`
+  or less refuses the request with `402` before any order is placed (each
+  chat turn is itself a paid order); a non-numeric value is a `400`, not
+  silently ignored.
+- **`usage.wallet_spent_cents`** reports what the spending tools moved
+  during the request (credit purchases and redemptions), next to
+  `charged_cents`, the request's own operating cost — so a client can count
+  money that left the wallet, not just inference.
+- **`key_can_spend` in `GET /v1/status`** says whether the calling key has
+  the `spend` scope, so a client can notice it holds a chat-only key.
+
+### Brought over from norm's copy of owallet
+
+norm (fathom-x/norm) vendors this workspace under `owallet/` and syncs it
+from here; since the last sync (#416) some owallet work landed only there.
+This brings it back so the two copies match again (norm's README, CLAUDE.md,
+version numbers and vendored test fixture stay norm's):
+
+- **Real usage and cost on `/v1` chat completions** (fathom-x/norm#14).
+  Every completion, buffered and streamed, reports OpenAI's token counts
+  plus `cost` (USD) and `charged_cents` (the authoritative integer).
+  Streams send it as a final choices-less chunk before `[DONE]`, the
+  `stream_options.include_usage` shape. Cost covers the whole turn — every
+  OpenRouter order *and* every tool order — at the **settled** amount, the
+  same figure the key-budget refund uses. One-shot MCP purchases go through
+  the same accounting. Previously `/v1` reported no usage at all.
+- **`owallet provider-key create | list`**: mint and list the wallet-scoped
+  keys for the `/v1` provider from the CLI (`--label`, `--spend`,
+  `--budget-usd`, `--json`), sharing the dashboard's budget parser. norm's
+  bootstrap mints its key this way.
+- **Built-in staging URL for `dev-envs` builds**
+  (`defaults::OVERPAY_RAILS_URL_STAGING`), so `owallet --staging serve`
+  needs no `OVERPAY_RAILS_URL_STAGING` and no longer falls back to the
+  prod URL when it is missing. Only compiled with the `dev-envs` feature;
+  env vars still override.
+
 ### `owallet authorize` works when the browser is on another machine
 
 - `authorize` only completed through its loopback redirect
