@@ -4,6 +4,16 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### `owallet authorize` works when the browser is on another machine
+
+- `authorize` only completed through its loopback redirect
+  (`http://127.0.0.1:<port>/callback`), so over SSH, in a VM or a container
+  — where the browser's redirect lands on *its* machine — login failed.
+  `authorize` now also reads the terminal: paste the address the browser
+  ended up on (or just its `code`) and the login completes. Whichever
+  arrives first wins, so local logins are unchanged. A pasted `state` must
+  match the attempt; a bare code is accepted because PKCE binds it to this
+  process. Bad input explains itself and keeps waiting.
 ### Wallet setup can't leave a broken wallet behind
 
 - `generate` and `import` stored the wallet — and made it the default —
