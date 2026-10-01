@@ -1,5 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Norm } from "@/norm/norm"
+import { NormBudget } from "@opencode-ai/core/norm-budget"
 
 /**
  * norm's built-in plugin: runs the owallet bootstrap (auto-start the server,
@@ -9,9 +10,21 @@ import { Norm } from "@/norm/norm"
  * marketplace's live model list into the provider config. Keys are minted in
  * the owallet dashboard (or `owallet provider-key create`).
  */
-export async function NormOwalletPlugin(_input: PluginInput): Promise<Hooks> {
+export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
   await Norm.bootstrap()
+  const sessions = Norm.sessionAccess(input.client)
   return {
+    // Per-conversation budget (/budget): send the conversation's remaining
+    // allowance so owallet enforces it server-side for the whole request —
+    // one turn can loop through several paid tool calls. At $0 owallet
+    // refuses before placing any order. A conversation set to "no limit"
+    // sends nothing; the key's daily budget still applies either way.
+    "chat.headers": async (hook, output) => {
+      if (Norm.disabled() || hook.model.providerID !== Norm.PROVIDER_ID) return
+      const budget = await NormBudget.status(sessions, hook.sessionID).catch(() => undefined)
+      if (!budget || budget.remaining === null) return
+      output.headers[NormBudget.SPEND_LIMIT_HEADER] = budget.remaining.toFixed(2)
+    },
     config: async (config) => {
       // Offer the marketplace's real model list (GET /v1/models), not just
       // the seeded `default` sentinel. Entries the user configured
