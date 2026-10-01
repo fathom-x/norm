@@ -47,15 +47,21 @@ pub fn run(
     let address = Address::from_private_key(&sk);
     let npub = npub_from_private_key(&sk)?;
 
+    // Collect the per-wallet password before persisting anything — see the
+    // matching comment in `generate`: a failed prompt used to leave an orphan
+    // wallet in the DB, already promoted to default.
+    let wallet_pw = if db.has_wallet_password(&npub)? {
+        None
+    } else {
+        Some(crate::password::read_new_wallet_password()?)
+    };
+
     db.write_wallet(&npub, &stored_seed, Some(&address.to_hex_lower()))?;
+    if let Some(pw) = wallet_pw {
+        db.write_wallet_password(&npub, pw.as_str())?;
+    }
     if db.read_default_npub()?.is_none() {
         db.write_default_npub(&npub)?;
-    }
-    // Set a per-wallet password (used to log into the web admin) unless one
-    // already exists — matches `import` in wallet_mcp/cli.py.
-    if !db.has_wallet_password(&npub)? {
-        let wallet_pw = crate::password::read_new_wallet_password()?;
-        db.write_wallet_password(&npub, wallet_pw.as_str())?;
     }
     // Cache the Orchard receive address (offline).
     let zcash_ua = store_orchard_ua(&db, &npub, &stored_seed);

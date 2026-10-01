@@ -4,6 +4,24 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Wallet setup can't leave a broken wallet behind
+
+- `generate` and `import` stored the wallet — and made it the default —
+  *before* prompting for the per-wallet (dashboard) password. A failed
+  prompt (no terminal, no `OWALLET_WALLET_PASSWORD`, a mistyped
+  confirmation) left an orphan default wallet whose seed phrase was never
+  shown. Both now collect the password first; a failed prompt writes
+  nothing.
+- New `owallet password set [--npub]` sets or replaces a wallet's
+  dashboard password. Before, a wallet stored without one could never log
+  in, and nothing could fix it.
+- No terminal to prompt on now says which variable to set
+  (`OWALLET_PASSWORD` / `OWALLET_WALLET_PASSWORD`) instead of "password
+  prompt failed: No such device or address (os error 6)".
+- `init` creates the database `0600`, and a directory it creates for it
+  `0700` (was the process umask, typically world-readable). A pre-existing
+  parent directory is left alone.
+
 ### Chat-scoped keys can mint Lightning invoices for core credits
 
 - `load_core_credits` sat behind the `spend` scope with the tools that move
