@@ -26,6 +26,11 @@ export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
       // stays warm from the first turn. owallet never forwards it as-is — it
       // sends an HMAC of it, and only once Overpay accepts the field.
       output.headers["x-session-id"] = hook.sessionID
+      // Per-message limit (/budget → "Per-message limit"): the most one
+      // message may authorize. owallet sizes each turn's hold within it and
+      // refuses — before charging anything — a message that can't fit.
+      const requestMax = await NormBudget.getRequestMax().catch(() => NormBudget.DEFAULT_REQUEST_MAX_USD)
+      if (requestMax !== null) output.headers[NormBudget.REQUEST_MAX_HEADER] = requestMax.toFixed(2)
       const budget = await NormBudget.status(sessions, hook.sessionID).catch(() => undefined)
       if (!budget || budget.remaining === null) return
       output.headers[NormBudget.SPEND_LIMIT_HEADER] = budget.remaining.toFixed(2)

@@ -35,6 +35,52 @@ describe("NormBudget storage", () => {
   })
 })
 
+describe("per-message limit", () => {
+  beforeEach(() => fs.rm(NormBudget.requestMaxFile(), { force: true }))
+  afterEach(() => fs.rm(NormBudget.requestMaxFile(), { force: true }))
+
+  test("defaults to $1 and round-trips a limit and 'no limit'", async () => {
+    expect(NormBudget.DEFAULT_REQUEST_MAX_USD).toBe(1)
+    expect(await NormBudget.getRequestMax()).toBe(1)
+    await NormBudget.setRequestMax(0.25)
+    expect(await NormBudget.getRequestMax()).toBe(0.25)
+    await NormBudget.setRequestMax(null)
+    expect(await NormBudget.getRequestMax()).toBeNull()
+  })
+
+  test("overpay requests carry the per-message limit and the conversation's remaining budget", async () => {
+    const { NormOwalletPlugin } = await import("@/plugin/norm")
+    const client = {
+      session: {
+        get: async ({ path: { id } }: any) => ({ data: { id } }),
+        children: async () => ({ data: [] }),
+        messages: async () => ({ data: [{ info: { role: "assistant", cost: 0.5 } }] }),
+      },
+    }
+    // Build the hooks without the owallet bootstrap, then enable norm to call them.
+    process.env.NORM_DISABLE = "1"
+    const hooks = await NormOwalletPlugin({ client } as any)
+    delete process.env.NORM_DISABLE
+    const call = async () => {
+      const output = { headers: {} as Record<string, string> }
+      await hooks["chat.headers"]!({ sessionID: "ses_h", model: { providerID: Norm.PROVIDER_ID } } as any, output)
+      return output.headers
+    }
+    try {
+      await NormBudget.set("ses_h", 2)
+      await NormBudget.setRequestMax(0.25)
+      const headers = await call()
+      expect(headers[NormBudget.REQUEST_MAX_HEADER]).toBe("0.25")
+      expect(headers[NormBudget.SPEND_LIMIT_HEADER]).toBe("1.50")
+      // "off" sends no per-message limit.
+      await NormBudget.setRequestMax(null)
+      expect((await call())[NormBudget.REQUEST_MAX_HEADER]).toBeUndefined()
+    } finally {
+      await fs.rm(NormBudget.file(), { force: true })
+    }
+  })
+})
+
 describe("NormBudget.status", () => {
   beforeEach(() => fs.rm(NormBudget.file(), { force: true }))
   afterEach(() => fs.rm(NormBudget.file(), { force: true }))

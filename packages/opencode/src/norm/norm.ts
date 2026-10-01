@@ -1225,7 +1225,8 @@ async function ensureProviderKey(): Promise<void> {
     process.stderr.write(
       `[norm] replaced norm's chat-only Overpay key: Norm can now buy on the marketplace, ` +
         `capped at $${NormBudget.DEFAULT_DAILY_BUDGET_USD}/day and ` +
-        `$${NormBudget.DEFAULT_CONVERSATION_BUDGET_USD} per conversation (/budget to change).\n`,
+        `$${NormBudget.DEFAULT_CONVERSATION_BUDGET_USD} per conversation, ` +
+        `$${NormBudget.DEFAULT_REQUEST_MAX_USD.toFixed(2)} per message (/budget to change).\n`,
     )
   }
   debug("minted a spend-scoped overpay provider key and stored it in the auth store")

@@ -184,19 +184,47 @@ function sessionAccess(api: TuiPluginApi): NormBudget.SessionAccess {
   }
 }
 
-/** `/budget`: show and change the current conversation's spending limit. */
+/** `/budget`: choose which spending limit to change — this conversation's
+ * budget or the per-message limit — then set it. */
 async function openBudgetDialog(api: TuiPluginApi) {
   const sessionID = currentSessionID(api)
-  if (!sessionID) {
-    api.ui.toast({ variant: "info", message: "Open a conversation first — /budget sets that conversation's limit." })
-    return
-  }
-  const access = sessionAccess(api)
-  const current = await NormBudget.status(access, sessionID).catch(() => undefined)
+  const requestMax = await NormBudget.getRequestMax().catch(() => NormBudget.DEFAULT_REQUEST_MAX_USD)
+  const current = sessionID ? await NormBudget.status(sessionAccess(api), sessionID).catch(() => undefined) : undefined
+  // Outside a conversation only the per-message limit applies.
   if (!current) {
-    api.ui.toast({ variant: "error", message: "Couldn't read this conversation's spending." })
+    openRequestMaxDialog(api, requestMax)
     return
   }
+  const DialogSelect = api.ui.DialogSelect
+  api.ui.dialog.replace(() => (
+    <DialogSelect
+      title="Spending limits"
+      skipFilter
+      options={[
+        {
+          title: "This conversation's budget",
+          value: "conversation",
+          description:
+            current.budget === null
+              ? `no limit · ${usd(current.spent)} spent`
+              : `${usd(current.remaining ?? 0)} left of ${NormBudget.format(current.budget)}`,
+        },
+        {
+          title: "Per-message limit",
+          value: "message",
+          description: `${NormBudget.format(requestMax)} · the most one message may authorize`,
+        },
+      ]}
+      onSelect={(option) =>
+        option.value === "conversation"
+          ? openConversationBudgetDialog(api, current)
+          : openRequestMaxDialog(api, requestMax)
+      }
+    />
+  ))
+}
+
+function openConversationBudgetDialog(api: TuiPluginApi, current: NormBudget.Status) {
   const DialogPrompt = api.ui.DialogPrompt
   api.ui.dialog.replace(() => (
     <DialogPrompt
@@ -227,6 +255,46 @@ async function openBudgetDialog(api: TuiPluginApi) {
             })
           },
           () => api.ui.toast({ variant: "error", message: "Couldn't save the budget." }),
+        )
+      }}
+      onCancel={() => api.ui.dialog.clear()}
+    />
+  ))
+}
+
+/** The per-message limit: the most one message may authorize. */
+function openRequestMaxDialog(api: TuiPluginApi, requestMax: number | null) {
+  const DialogPrompt = api.ui.DialogPrompt
+  api.ui.dialog.replace(() => (
+    <DialogPrompt
+      title="Per-message limit"
+      description={() => (
+        <text>
+          The most one message may authorize: {NormBudget.format(requestMax)}. You're charged what a message actually
+          costs and the rest comes back; a message that would need more is stopped before anything is charged. Enter
+          a limit in USD, or "off" for none. Applies to every conversation.
+        </text>
+      )}
+      placeholder={`e.g. ${NormBudget.DEFAULT_REQUEST_MAX_USD}`}
+      value={requestMax === null ? "off" : String(requestMax)}
+      onConfirm={(value) => {
+        const next = NormBudget.parse(value)
+        if (next === undefined) {
+          api.ui.toast({ variant: "error", message: `Not a limit: "${value}". Try 1, 0.50, or off.` })
+          return
+        }
+        void NormBudget.setRequestMax(next).then(
+          () => {
+            api.ui.dialog.clear()
+            api.ui.toast({
+              variant: "success",
+              message:
+                next === null
+                  ? "No per-message limit (conversation and daily budgets still apply)."
+                  : `Per-message limit: ${NormBudget.format(next)}.`,
+            })
+          },
+          () => api.ui.toast({ variant: "error", message: "Couldn't save the limit." }),
         )
       }}
       onCancel={() => api.ui.dialog.clear()}
@@ -273,7 +341,12 @@ function View(props: { api: TuiPluginApi }) {
   const error = () => stateLine(outcome())
 
   const [chatBudget, setChatBudget] = createSignal<NormBudget.Status>()
+  const [requestMax, setRequestMax] = createSignal<number | null>(NormBudget.DEFAULT_REQUEST_MAX_USD)
   const refreshChatBudget = () => {
+    void NormBudget.getRequestMax().then(
+      (next) => !disposed && setRequestMax(next),
+      () => {},
+    )
     const sessionID = currentSessionID(props.api)
     if (!sessionID) return setChatBudget(undefined)
     void NormBudget.status(sessionAccess(props.api), sessionID).then(
@@ -324,6 +397,13 @@ function View(props: { api: TuiPluginApi }) {
             this chat's {NormBudget.format(chatBudget()!.budget)} budget is used — /budget to raise it
           </text>
         </Show>
+        <text fg={theme().textMuted}>
+          per message{" "}
+          <span style={{ fg: theme().text }}>
+            {requestMax() === null ? "no limit" : `≤ ${NormBudget.format(requestMax())}`}
+          </span>{" "}
+          · /budget
+        </text>
       </Show>
       <Show when={coreCredits()}>
         <text fg={theme().textMuted}>
@@ -401,7 +481,7 @@ const tui: TuiPlugin = async (api) => {
     commands: [
       {
         name: "norm.budget",
-        title: "Set conversation budget",
+        title: "Set spending limits",
         slashName: "budget",
         category: "Session",
         namespace: "palette",
