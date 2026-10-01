@@ -1838,6 +1838,45 @@ fn net_key_budget_from_delivery(
 /// streaming path's own per-turn loop duplicates the polling shape rather
 /// than calling this, since it also has to diff `partial_content` and
 /// yield SSE events along the way.
+/// An order snapshot with a file-delivered result inlined: once the order
+/// is `delivered`, Rails may hand back a `delivered_content_url` (an Active
+/// Storage link) instead of the content itself. Every /v1 parser reads
+/// inline `delivered_content`, so fetch the file and put it there — before,
+/// these replies failed as "order has no delivered_content". Pending,
+/// failed and already-inline snapshots pass through untouched.
+async fn get_order_resolved(
+    state: &McpState,
+    auth: &OwnedAuth,
+    order_id: &str,
+) -> Result<Value, OverpayError> {
+    let mut snap = state
+        .overpay
+        .get_order_value(order_id, auth.as_auth())
+        .await?;
+    let data = if snap.get("data").is_some() {
+        &mut snap["data"]
+    } else {
+        &mut snap
+    };
+    let delivered = data.get("fulfillment_status").and_then(Value::as_str) == Some("delivered");
+    let inline = data
+        .get("delivered_content")
+        .and_then(Value::as_str)
+        .is_some();
+    if delivered && !inline {
+        if let Some(url) = data
+            .get("delivered_content_url")
+            .and_then(Value::as_str)
+            .filter(|u| !u.is_empty())
+            .map(str::to_string)
+        {
+            let content = state.overpay.fetch_delivered_content(&url).await?;
+            data["delivered_content"] = json!(content);
+        }
+    }
+    Ok(snap)
+}
+
 async fn wait_for_order_terminal(
     state: &McpState,
     auth: &OwnedAuth,
@@ -1847,10 +1886,7 @@ async fn wait_for_order_terminal(
 ) -> Result<Value, OpenAiError> {
     let start = Instant::now();
     loop {
-        let snap = state
-            .overpay
-            .get_order_value(order_id, auth.as_auth())
-            .await?;
+        let snap = get_order_resolved(state, auth, order_id).await?;
         if is_terminal(order_status(&snap)) {
             return Ok(snap);
         }
@@ -1905,6 +1941,18 @@ fn extract_python_delivered(snap: &Value) -> Result<Value, OpenAiError> {
 
 fn delivered_content_json(snap: &Value) -> Result<Value, OpenAiError> {
     let data = snap.get("data").unwrap_or(snap);
+    // `failed` / `cancelled` also end the wait; they carry the seller's
+    // reason, not a deliverable — say that instead of "no delivered_content".
+    if let Some(status) = order_status(snap).filter(|s| *s != "delivered") {
+        let reason = data
+            .get("fulfillment_error")
+            .and_then(Value::as_str)
+            .filter(|r| !r.is_empty())
+            .unwrap_or("the seller gave no reason");
+        return Err(OpenAiError::UpstreamFailure(format!(
+            "the marketplace order {status}: {reason}"
+        )));
+    }
     let raw = data
         .get("delivered_content")
         .and_then(Value::as_str)
@@ -2409,7 +2457,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             let mut streamed = 0usize;
             let start = Instant::now();
             let snap = loop {
-                let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                let snap = match get_order_resolved(&ctx.mcp, &auth, &order_id).await {
                     Ok(s) => s,
                     Err(e) => {
                         for ev in error_events(&order_id, &requested_model, OpenAiError::from(e)) { yield Ok(ev); }
@@ -2509,7 +2557,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             let mut streamed = 0usize;
             let start = Instant::now();
             let snap = loop {
-                let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                let snap = match get_order_resolved(&ctx.mcp, &auth, &order_id).await {
                     Ok(s) => s,
                     Err(e) => {
                         for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
@@ -2625,7 +2673,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     let mut lt_streamed = 0usize;
                     let mut lt_emitted = false;
                     let result_text = loop {
-                        let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+                        let snap = match get_order_resolved(&ctx.mcp, &auth, &order_id).await {
                             Ok(s) => s,
                             Err(e) => break json!({"error": OpenAiError::from(e).message()}).to_string(),
                         };
@@ -2678,7 +2726,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 let py_start = Instant::now();
                 let python_snap;
                 loop {
-                    let snap = match ctx.mcp.overpay.get_order_value(&python_order_id, auth.as_auth()).await {
+                    let snap = match get_order_resolved(&ctx.mcp, &auth, &python_order_id).await {
                         Ok(s) => s,
                         Err(e) => {
                             let result_text = json!({"error": OpenAiError::from(e).message()}).to_string();
@@ -2749,7 +2797,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
         let mut streamed = 0usize;
         let start = Instant::now();
         let snap = loop {
-            let snap = match ctx.mcp.overpay.get_order_value(&order_id, auth.as_auth()).await {
+            let snap = match get_order_resolved(&ctx.mcp, &auth, &order_id).await {
                 Ok(s) => s,
                 Err(e) => {
                     for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
@@ -3802,6 +3850,93 @@ mod tests {
         mount_redeem_fully_paid(overpay, "openrouter-bot").await;
         mount_redeem_fully_paid(overpay, "exec").await;
         note
+    }
+
+    /// Rails may deliver an order's result as a file — `delivered_content_url`,
+    /// a signed Active Storage link that redirects to blob storage — rather
+    /// than inline. That used to fail the turn as "order has no
+    /// delivered_content"; the link must be followed instead.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn passthrough_follows_a_file_delivered_result() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        let link = format!(
+            "{}/rails/active_storage/blobs/redirect/signed-abc",
+            overpay.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "OR-0", "fulfillment_status": "delivered", "delivered_content_url": link}
+            })))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rails/active_storage/blobs/redirect/signed-abc"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/blobs/1"))
+            .mount(&overpay)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/blobs/1"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(delivered_content(
+                    "Delivered as a file.",
+                    "openai/gpt-5-mini",
+                    false,
+                )),
+            )
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}],
+            }))
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "Delivered as a file."
+        );
+    }
+
+    /// A failed order ends the wait too; its reason must reach the caller,
+    /// not "order has no delivered_content".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_order_reports_the_sellers_reason() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {"id": "OR-0", "fulfillment_status": "failed",
+                         "fulfillment_error": "upstream provider returned 529 overloaded"}
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}],
+            }))
+            .await;
+        let body: Value = res.json();
+        let message = body["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("529 overloaded"), "{body}");
+        assert!(!message.contains("no delivered_content"), "{body}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

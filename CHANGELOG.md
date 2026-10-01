@@ -4,6 +4,20 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### `/v1` follows file-delivered results and reports failed orders
+
+- Rails can deliver an order's result as a file — a signed Active Storage
+  `delivered_content_url` — instead of inline `delivered_content`. The MCP
+  order tools already surfaced the link, but `/v1/chat/completions` read
+  inline content only, so those turns failed with "order has no
+  delivered_content" (on staging, 5 of 19 recent OpenRouter orders). `/v1`
+  now downloads the file once the order is delivered — without credentials
+  (the link is signed), only from the marketplace's own origin, following
+  its redirect to blob storage, capped at 16 MiB.
+- A `failed` / `cancelled` order now reports the seller's
+  `fulfillment_error` ("the marketplace order failed: …") instead of the
+  same misleading message.
+
 ### `overpay_connected` in `GET /v1/status`
 
 - The status payload now says whether the wallet is linked to an Overpay
