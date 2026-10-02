@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Connecting to Overpay</title>
+    <style>
+      :root { color-scheme: light dark; --bg: #fafafa; --fg: #1d1d1f; }
+      @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #e8e8e8; } }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--fg);
+        font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 0 16px; }
+    </style>
+  </head>
+  <body>
+    <p id="msg">Finishing the Overpay connection…</p>
+    <script>
+      // Overpay's PKCE redirect lands here (an OAUTH_ALLOWED_REDIRECT_ORIGINS
+      // origin). Hand the code back to the norm page that opened this popup —
+      // same origin only — and close. owallet-web exchanges it for the token.
+      const params = new URLSearchParams(location.search)
+      const message = {
+        type: "overpay-oauth",
+        code: params.get("code"),
+        state: params.get("state"),
+        error: params.get("error"),
+      }
+      const msg = document.getElementById("msg")
+      if (window.opener && !window.opener.closed) {
+        window.opener.postMessage(message, location.origin)
+        msg.textContent = "Connected. You can close this window."
+        setTimeout(() => window.close(), 300)
+      } else {
+        msg.textContent = "This window was opened outside norm. Close it and start the connection from norm again."
+      }
+    </script>
+  </body>
+</html>

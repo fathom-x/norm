@@ -1,0 +1,123 @@
+/* The wallet setup screen shown before the TUI (src/setup/setup.ts). Same
+   palette family as the terminal theme; monospace to match. */
+.norm-setup {
+  --setup-bg: #fafafa;
+  --setup-card: #ffffff;
+  --setup-fg: #1d1d1f;
+  --setup-muted: #5f6368;
+  --setup-border: #d9d9de;
+  --setup-accent: #3b5bdb;
+  --setup-accent-fg: #ffffff;
+  --setup-error: #c92a2a;
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: grid;
+  place-content: center;
+  gap: 16px;
+  padding: 24px 16px;
+  background: var(--setup-bg);
+  color: var(--setup-fg);
+  font: 15px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .norm-setup {
+    --setup-bg: #0f1012;
+    --setup-card: #17181b;
+    --setup-fg: #e8e8ea;
+    --setup-muted: #9aa0a6;
+    --setup-border: #2c2e33;
+    --setup-accent: #7c94ff;
+    --setup-accent-fg: #0f1012;
+    --setup-error: #ff8787;
+  }
+}
+:root[data-theme="dark"] .norm-setup {
+  --setup-bg: #0f1012;
+  --setup-card: #17181b;
+  --setup-fg: #e8e8ea;
+  --setup-muted: #9aa0a6;
+  --setup-border: #2c2e33;
+  --setup-accent: #7c94ff;
+  --setup-accent-fg: #0f1012;
+  --setup-error: #ff8787;
+}
+.norm-setup-brand {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.norm-setup-card {
+  width: min(480px, calc(100vw - 32px));
+  box-sizing: border-box;
+  padding: 24px;
+  border: 1px solid var(--setup-border);
+  border-radius: 10px;
+  background: var(--setup-card);
+}
+.norm-setup-card h1 {
+  margin: 0 0 12px;
+  font-size: 17px;
+}
+.norm-setup-card p {
+  margin: 0 0 12px;
+  color: var(--setup-muted);
+}
+.norm-setup-form {
+  display: grid;
+  gap: 6px;
+}
+.norm-setup-form label {
+  margin-top: 8px;
+  font-weight: 600;
+}
+.norm-setup-form input,
+.norm-setup-form textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--setup-bg);
+  border: 1px solid var(--setup-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.norm-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.norm-setup button {
+  font: inherit;
+  padding: 8px 14px;
+  border-radius: 6px;
+  border: 1px solid var(--setup-border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.norm-setup-form button {
+  margin-top: 14px;
+  justify-self: start;
+}
+.norm-setup button.primary {
+  background: var(--setup-accent);
+  border-color: var(--setup-accent);
+  color: var(--setup-accent-fg);
+}
+.norm-setup button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.norm-setup :focus-visible {
+  outline: 2px solid var(--setup-accent);
+  outline-offset: 2px;
+}
+.norm-setup-error {
+  min-height: 1.5em;
+  margin: 12px 0 0 !important;
+  color: var(--setup-error) !important;
+}
+.norm-setup-busy {
+  font-style: italic;
+}
