@@ -139,6 +139,12 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   and `OverCap` (the turn's input + the guard's 256-token reserve, or the
   variant's min authorization, over the cap) is refused *before any
   order*; a fixed-price order over the cap is refused before it is paid.
+  **Plain completions**: `x-owallet-tools: none` (`TOOLS_HEADER`) makes a
+  request without tools of its own a passthrough turn with none
+  (`ChatCompletionRequest::client_tools` returns `Some(&[])`), so a
+  client's housekeeping calls (titles, compaction) skip the server loop
+  and its roster; the buyer note then carries no `tools`/`tool_choice`
+  (`passthrough_buyer_note`).
   `rejected` is terminal (`WAIT_TERMINAL_STATUSES`); `rejection_error`
   turns its `reason_code` into a coded error (`authorization_too_low` →
   `Limit`, `upstream_unavailable` → `Unavailable`), and `delivered_error`

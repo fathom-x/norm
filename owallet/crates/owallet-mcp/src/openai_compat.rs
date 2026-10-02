@@ -136,6 +136,14 @@ pub const SPEND_LIMIT_HEADER: &str = "x-owallet-spend-limit-usd";
 /// with what it would need. Combined with [`SPEND_LIMIT_HEADER`] (the lower
 /// of the two applies).
 pub const REQUEST_MAX_HEADER: &str = "x-owallet-request-max-usd";
+/// Request header asking for a **plain completion**: `x-owallet-tools:
+/// none` runs a request that brings no tools of its own as one passthrough
+/// turn with no tools at all, instead of the server-side loop and its
+/// roster (wallet tools, `run_python`, listing tools). For a client's
+/// housekeeping calls — titles, summaries, compaction — which need neither
+/// the tool definitions' tokens nor a model that might buy something. Any
+/// other value is a 400.
+pub const TOOLS_HEADER: &str = "x-owallet-tools";
 
 /// A model id that always works, without needing a live catalog fetch to
 /// validate it: `validate_request` accepts it unconditionally and
@@ -2004,6 +2012,9 @@ struct ChatCompletionRequest {
     /// what the AI SDK emits when a provider enables cache keys).
     #[serde(default, alias = "promptCacheKey")]
     prompt_cache_key: Option<Value>,
+    /// Set from [`TOOLS_HEADER`]: no server-side roster for this request.
+    #[serde(skip)]
+    plain: bool,
 }
 
 impl ChatCompletionRequest {
@@ -2011,8 +2022,13 @@ impl ChatCompletionRequest {
     /// — the shape every OpenAI-style agent client (opencode/norm included)
     /// produces when it has an executor of its own. A bare `tools: []`
     /// stays in server mode: some SDKs emit the empty array for plain chat.
+    /// A [`TOOLS_HEADER`] plain request without tools of its own is a
+    /// passthrough turn with none (`Some(&[])`), never the server loop.
     fn client_tools(&self) -> Option<&[Value]> {
-        self.tools.as_deref().filter(|t| !t.is_empty())
+        self.tools
+            .as_deref()
+            .filter(|t| !t.is_empty())
+            .or(self.plain.then_some(&[][..]))
     }
 }
 
@@ -2207,7 +2223,7 @@ fn with_session_id(mut buyer_note: Value, ctx: &Ctx) -> Value {
 async fn chat_completions(
     State(ctx): State<Ctx>,
     headers: HeaderMap,
-    Json(req): Json<ChatCompletionRequest>,
+    Json(mut req): Json<ChatCompletionRequest>,
 ) -> Response {
     let (mcp, can_spend, key_id) = match authenticate_provider_key(&ctx.mcp, &headers) {
         Ok(auth) => auth,
@@ -2219,6 +2235,10 @@ async fn chat_completions(
     };
     let request_max_usd = match usd_header(&headers, REQUEST_MAX_HEADER) {
         Ok(max) => max,
+        Err(e) => return e.into_response(),
+    };
+    req.plain = match plain_header(&headers) {
+        Ok(plain) => plain,
         Err(e) => return e.into_response(),
     };
     let mut ctx = Ctx {
@@ -3514,6 +3534,28 @@ async fn run_agentic_loop(
 /// iteration cap: the caller runs the loop, so each request is exactly one
 /// paid turn (still recorded against the key's daily budget like any
 /// other).
+/// A passthrough turn's buyer note: the caller's tools when it has any; a
+/// plain completion ([`TOOLS_HEADER`]) carries no `tools` key at all.
+fn passthrough_buyer_note(model: &str, messages: Vec<Value>, tools: &[Value]) -> Value {
+    let mut note = json!({"model": model, "messages": messages});
+    if !tools.is_empty() {
+        note["tools"] = json!(tools);
+    }
+    note
+}
+
+/// [`TOOLS_HEADER`]: `none` asks for a plain completion; absent is the
+/// default; anything else is a client bug worth surfacing.
+fn plain_header(headers: &HeaderMap) -> Result<bool, OpenAiError> {
+    match headers.get(TOOLS_HEADER).map(|v| v.to_str().map(str::trim)) {
+        None => Ok(false),
+        Some(Ok(value)) if value.eq_ignore_ascii_case("none") => Ok(true),
+        Some(_) => Err(OpenAiError::InvalidRequest(format!(
+            "{TOOLS_HEADER} must be \"none\" (a plain completion, no tools) or absent"
+        ))),
+    }
+}
+
 async fn run_passthrough_turn(
     ctx: &Ctx,
     auth: &OwnedAuth,
@@ -3524,16 +3566,12 @@ async fn run_passthrough_turn(
 ) -> Result<AgentResult, OpenAiError> {
     let listing_id = resolve_openrouter_listing_id(&ctx.mcp).await?;
     let mut buyer_note = with_session_id(
-        json!({
-            "model": requested_model,
-            "messages": messages,
-            "tools": tools,
-        }),
+        passthrough_buyer_note(requested_model, messages, tools),
         ctx,
     );
     // Only forwarded when the caller set one — the listing (and OpenRouter
     // beneath it) default to "auto" on their own.
-    if let Some(choice) = tool_choice {
+    if let Some(choice) = tool_choice.filter(|_| !tools.is_empty()) {
         buyer_note["tool_choice"] = choice.clone();
     }
     let (order_id, redeemed_cents) = place_and_pay_order(
@@ -3758,12 +3796,8 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
         // (and the loop below that runs it) never engages. The polling
         // shape mirrors the loop body's, per this generator's convention.
         if let Some(tools) = req.client_tools() {
-            let mut buyer_note = with_session_id(json!({
-                "model": requested_model,
-                "messages": messages,
-                "tools": tools,
-            }), &ctx);
-            if let Some(choice) = req.tool_choice.as_ref() {
+            let mut buyer_note = with_session_id(passthrough_buyer_note(&requested_model, messages.clone(), tools), &ctx);
+            if let Some(choice) = req.tool_choice.as_ref().filter(|_| !tools.is_empty()) {
                 buyer_note["tool_choice"] = choice.clone();
             }
             let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
@@ -4995,6 +5029,7 @@ mod tests {
             tool_choice: None,
             session_id: None,
             prompt_cache_key: None,
+            plain: false,
         };
         assert!(validate_request(&state, &req).await.is_ok());
     }
@@ -6102,6 +6137,88 @@ mod tests {
         let inner: Value = serde_json::from_str(captured.as_str().unwrap()).unwrap();
         assert_eq!(inner["tools"], client_tools);
         assert_eq!(inner["tool_choice"], "auto");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_plain_completion_sends_no_tools_and_runs_one_turn() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        let note = mount_order_router_capturing_openrouter(&overpay).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": delivered_content("Testing compaction", "openai/gpt-5-mini", false),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+        let res = s
+            .post("/chat/completions")
+            .add_header(TOOLS_HEADER, "none")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "Generate a title for this conversation"}],
+                "tool_choice": "auto",
+            }))
+            .await;
+
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "Testing compaction"
+        );
+        assert_eq!(body["id"], "chatcmpl-OR-0", "one order, no loop");
+        let captured = note.lock().unwrap().clone().expect("buyer_note captured");
+        let inner: Value = serde_json::from_str(captured.as_str().unwrap()).unwrap();
+        assert!(
+            inner.get("tools").is_none(),
+            "no roster, no empty array: {inner}"
+        );
+        assert!(
+            inner.get("tool_choice").is_none(),
+            "no tool_choice without tools: {inner}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_plain_request_with_its_own_tools_keeps_them() {
+        let tools = vec![json!({"type": "function", "function": {"name": "x"}})];
+        let req = ChatCompletionRequest {
+            model: "m".into(),
+            messages: vec![],
+            stream: false,
+            tools: Some(tools.clone()),
+            tool_choice: None,
+            session_id: None,
+            prompt_cache_key: None,
+            plain: true,
+        };
+        assert_eq!(req.client_tools(), Some(&tools[..]));
+        let bare = ChatCompletionRequest {
+            tools: None,
+            plain: false,
+            ..req
+        };
+        assert_eq!(bare.client_tools(), None, "no header: the server loop");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unknown_tools_header_value_is_a_400() {
+        let overpay = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+        let res = s
+            .post("/chat/completions")
+            .add_header(TOOLS_HEADER, "some")
+            .json(&json!({"model": "openai/gpt-5-mini", "messages": [{"role": "user", "content": "hi"}]}))
+            .await;
+        res.assert_status(StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
