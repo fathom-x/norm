@@ -4,6 +4,21 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### What each model costs, in `GET /v1/models`
+
+- Each model entry now carries what its listing variant publishes, as
+  optional OpenAI-compatible extensions: `name`, `context_length`,
+  `active` (false once the seller stops offering it) and `pricing` —
+  USD per million tokens with the seller's markup applied (`input`,
+  `output`, `cache_read`, `request`, `long_context` tiers), the per-turn
+  `min_charge`, the model's `min_authorization` (minimum commitment),
+  `basis: "list"` and the catalog's `as_of`. List prices
+  are the priciest provider the seller admitted at its last catalog
+  fetch: an estimate's upper end, not a quote. `default` stays first and
+  unpriced (the seller picks what it resolves to); a variant without a
+  rate card is listed bare rather than at $0. Clients that read only `id`
+  see no change.
+
 ### A per-message spending limit, and errors that say what to do
 
 - **`x-owallet-request-max-usd`**: the most any single order of the
