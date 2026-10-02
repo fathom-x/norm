@@ -98,7 +98,9 @@ syncs stay cheap:
   (`tui/src/config/index.tsx`), hidden while the new-chat placeholder
   shows. The model picker is the large dialog with a taller list
   (`DialogSelect`'s `tall`), keeps prices in search results, and has no
-  "Connect provider" (ctrl+a) action (`component/dialog-model.tsx`).
+  "Connect provider" (ctrl+a) action (`component/dialog-model.tsx`);
+  in a conversation → toggles its prices between the next message and
+  the list price, hinted beside "esc" (`DialogSelect`'s `hint`).
   Edits: `routes/home.tsx`, `tui/src/component/prompt/index.tsx` (`Meta`),
   `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
   `feature-plugins/sidebar/footer.tsx` — expect conflicts there on syncs.

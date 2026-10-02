@@ -30,6 +30,8 @@ export interface DialogSelectProps<T> {
   flat?: boolean
   // norm: a list 1.5x as tall (still within the screen), for the model picker
   tall?: boolean
+  // norm: shown beside "esc" in the header (e.g. a key hint)
+  hint?: JSX.Element
   ref?: (ref: DialogSelectRef<T>) => void
   onMove?: (option: DialogSelectOption<T>) => void
   onFilter?: (query: string) => void
@@ -567,9 +569,12 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
               {props.title}
             </text>
           )}
-          <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
-            esc
-          </text>
+          <box flexDirection="row" gap={2}>
+            {props.hint}
+            <text fg={theme.textMuted} onMouseUp={() => dialog.clear()}>
+              esc
+            </text>
+          </box>
         </box>
         <Show when={props.renderFilter !== false}>
           <box paddingTop={1}>

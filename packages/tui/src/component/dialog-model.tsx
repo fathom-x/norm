@@ -9,12 +9,14 @@ import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
 import { useSync } from "../context/sync"
 import { useNormModelPrice } from "./norm-model-price"
+import { useTheme } from "../context/theme"
 
 export function DialogModel(props: { providerID?: string }) {
   const local = useLocal()
   const sync = useSync()
   const dialog = useDialog()
   const price = useNormModelPrice()
+  const { theme } = useTheme()
   const [query, setQuery] = createSignal("")
 
   const connected = useConnected()
@@ -191,6 +193,20 @@ export function DialogModel(props: { providerID?: string }) {
           },
         },
       ]}
+      // norm: → switches the prices between the next message and the list
+      // price (in a conversation; outside one they're always list prices).
+      bindings={
+        price.toggleable()
+          ? [{ key: "right", desc: "Toggle pricing", group: "Dialog", cmd: () => price.togglePricing() }]
+          : []
+      }
+      hint={
+        price.toggleable() ? (
+          <text fg={theme.textMuted} onMouseUp={() => price.togglePricing()}>
+            → {price.listPrice() ? "next message price" : "list price"}
+          </text>
+        ) : undefined
+      }
       onFilter={setQuery}
       flat={true}
       tall={true}
