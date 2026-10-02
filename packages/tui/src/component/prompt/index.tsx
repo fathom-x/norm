@@ -1388,9 +1388,17 @@ export function Prompt(props: PromptProps) {
   return (
     <>
       <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
-        {/* norm: a plain "> " in the agent's color instead of upstream's
-            shaded panel (left bar, padding row, half-block bottom edge). */}
-        <box width="100%" flexDirection="row" paddingLeft={1} paddingRight={2}>
+        {/* norm: a plain "> " in the agent's color between two muted rules,
+            instead of upstream's shaded panel (left bar, padding row,
+            half-block bottom edge). */}
+        <box
+          width="100%"
+          flexDirection="row"
+          paddingLeft={1}
+          paddingRight={2}
+          border={["top", "bottom"]}
+          borderColor={theme.border}
+        >
           <text flexShrink={0} fg={borderHighlight()}>
             {"> "}
           </text>
