@@ -1185,7 +1185,8 @@ export function Session() {
               <scrollbox
                 ref={(r) => (scroll = r)}
                 viewportOptions={{
-                  paddingRight: showScrollbar() ? 1 : 0,
+                  // norm: same 3-column margin on the right as messages have on the left
+                  paddingRight: 3,
                 }}
                 verticalScrollbarOptions={{
                   paddingLeft: 1,
@@ -1479,6 +1480,21 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
     return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
   })
 
+  // norm: did the user switch models for this turn? Compared with the
+  // previous turn's response (compaction summaries run on their own model
+  // and don't count).
+  const switched = createMemo(() => {
+    const list = messages()
+    const index = list.findIndex((x) => x.id === props.message.id)
+    for (let i = index - 1; i >= 0; i--) {
+      const item = list[i]
+      if (item.role !== "assistant" || item.summary || item.parentID === props.message.parentID) continue
+      return item.providerID !== props.message.providerID || item.modelID !== props.message.modelID
+    }
+    return false
+  })
+  const aborted = createMemo(() => props.message.error?.name === "MessageAbortedError")
+
   const duration = createMemo(() => {
     if (!final()) return 0
     if (!props.message.time.completed) return 0
@@ -1547,18 +1563,19 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
         </box>
       </Show>
       <Switch>
-        {/* norm: only under the latest response, and just model · time
-            (upstream: "▣ Build · model · time" under every finished one). */}
-        <Match when={props.last}>
+        {/* norm: "model · time" only on the response where the user switched
+            models (it stays there), plus "interrupted" on an aborted one;
+            upstream shows "▣ Build · model · time" under every response. */}
+        <Match when={(props.last || final() || aborted()) && (switched() || aborted())}>
           <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3}>
-            <text marginTop={1}>
-              <span style={{ fg: theme.textMuted }}>{model()}</span>
-              <Show when={duration()}>
-                <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
-              </Show>
-              <Show when={props.message.error?.name === "MessageAbortedError"}>
-                <span style={{ fg: theme.textMuted }}> · interrupted</span>
-              </Show>
+            <text marginTop={1} fg={theme.textMuted}>
+              {[
+                switched() ? model() : undefined,
+                switched() && duration() ? Locale.duration(duration()) : undefined,
+                aborted() ? "interrupted" : undefined,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
             </text>
           </box>
         </Match>
