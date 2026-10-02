@@ -95,7 +95,11 @@ syncs stay cheap:
   session id. The home route is laid out as an empty session (no logo,
   tips or home footer; the sidebar shows "New session"), and the cursor
   defaults to a steady block in the muted text color
-  (`tui/src/config/index.tsx`). Edits: `routes/home.tsx`, `tui/src/component/prompt/index.tsx` (`Meta`),
+  (`tui/src/config/index.tsx`), hidden while the new-chat placeholder
+  shows. The model picker is the large dialog with a taller list
+  (`DialogSelect`'s `tall`), keeps prices in search results, and has no
+  "Connect provider" (ctrl+a) action (`component/dialog-model.tsx`).
+  Edits: `routes/home.tsx`, `tui/src/component/prompt/index.tsx` (`Meta`),
   `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
   `feature-plugins/sidebar/footer.tsx` — expect conflicts there on syncs.
 

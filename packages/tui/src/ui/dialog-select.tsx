@@ -28,6 +28,8 @@ export interface DialogSelectProps<T> {
   emptyView?: JSX.Element
   options: DialogSelectOption<T>[]
   flat?: boolean
+  // norm: a list 1.5x as tall (still within the screen), for the model picker
+  tall?: boolean
   ref?: (ref: DialogSelectRef<T>) => void
   onMove?: (option: DialogSelectOption<T>) => void
   onFilter?: (query: string) => void
@@ -210,7 +212,9 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   })
 
   const dimensions = useTerminalDimensions()
-  const height = createMemo(() => Math.min(rows(), Math.floor(dimensions().height / 2) - 6))
+  const height = createMemo(() =>
+    Math.min(rows(), props.tall ? Math.floor(dimensions().height * 0.75) - 9 : Math.floor(dimensions().height / 2) - 6),
+  )
 
   const selected = createMemo(() => flat()[store.selected])
 
