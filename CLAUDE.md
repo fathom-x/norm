@@ -35,6 +35,18 @@ syncs stay cheap:
   `config` hook merges the marketplace's live model list
   (`Norm.marketplaceModels()`, `GET /v1/models` with the stored key)
   into the overpay provider so the picker offers more than `default`.
+  Where owallet reports them (each `/v1/models` entry's `pricing`,
+  `context_length`, `active`), `Norm.modelConfig` turns them into the
+  model's `cost` and `limit` — without a context limit opencode never
+  auto-compacts — and retired models are left out.
+- **What models cost** (`packages/core/src/norm-pricing.ts`): parsing,
+  list-price estimates (per-turn minimum charge, cache reads,
+  long-context tiers) and owallet's refusal floor for the per-message
+  limit. The TUI's owallet plugin reads `/v1/models` into it; the model
+  picker (`tui/src/component/norm-model-price.ts`, two calls in
+  `dialog-model.tsx`) shows list prices, or in a conversation "next ≈ $X"
+  / "over your $1 limit" per model and a toast on a mid-conversation
+  switch; the sidebar shows the next step's estimate.
 - `src/session/system.ts` appends `Norm.systemPrompt()` to the system
   prompt for overpay-provider models — the inherited opencode prompts
   send capability questions to the opencode docs, but marketplace
