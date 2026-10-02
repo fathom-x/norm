@@ -291,3 +291,36 @@ test("overpay-authorized marker merges with the auto-setup marker", async () => 
   await Norm.recordOverpayAuthorized(true)
   expect(await Norm.readOverpayAuthorized()).toBe(true)
 })
+
+test("isOwalletErrorText recognises owallet's in-stream error marker", () => {
+  // Exactly what the title generator received when the wallet had no credits.
+  expect(Norm.isOwalletErrorText('\n\n[owallet error] HTTP 422: {"error":"No available credits for this seller"}')).toBe(true)
+  expect(Norm.isOwalletErrorText("[owallet error] no Overpay credits")).toBe(true)
+  expect(Norm.isOwalletErrorText("Fixing the owallet error handler")).toBe(false)
+  expect(Norm.isOwalletErrorText("Debug session")).toBe(false)
+})
+
+test("auto-started serves forward the session id where the marketplace accepts it", () => {
+  const saved = { env: process.env.NORM_OWALLET_ENV, flag: process.env.OWALLET_V1_SESSION_ID }
+  try {
+    delete process.env.OWALLET_V1_SESSION_ID
+    process.env.NORM_OWALLET_ENV = "staging"
+    expect(Norm.serveEnv().OWALLET_V1_SESSION_ID).toBe("1")
+    // Prod hasn't shipped fathom-x/overpay#445 yet: an extra buyer-note key
+    // would fail its orders.
+    process.env.NORM_OWALLET_ENV = "prod"
+    expect(Norm.serveEnv().OWALLET_V1_SESSION_ID).toBeUndefined()
+    // An explicit setting always wins.
+    process.env.NORM_OWALLET_ENV = "staging"
+    process.env.OWALLET_V1_SESSION_ID = "0"
+    expect(Norm.serveEnv().OWALLET_V1_SESSION_ID).toBe("0")
+  } finally {
+    for (const [key, value] of [
+      ["NORM_OWALLET_ENV", saved.env],
+      ["OWALLET_V1_SESSION_ID", saved.flag],
+    ] as const) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+})

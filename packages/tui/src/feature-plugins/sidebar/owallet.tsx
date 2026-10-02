@@ -2,6 +2,7 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "../builtins"
 import { createSignal, For, onCleanup, Show } from "solid-js"
 import { Global } from "@opencode-ai/core/global"
+import { NormBudget } from "@opencode-ai/core/norm-budget"
 import path from "node:path"
 import fs from "node:fs/promises"
 import open from "open"
@@ -40,6 +41,15 @@ function sandboxPort(root: string): string {
   let hash = 5381
   for (let i = 0; i < root.length; i++) hash = ((hash * 33) ^ root.charCodeAt(i)) >>> 0
   return String(SANDBOX_PORT_BASE + (hash % SANDBOX_PORT_SPAN))
+}
+
+/** The `owallet` CLI selector matching the environment norm talks to. Plain
+ * `owallet` targets prod, so a bare `owallet credits load` on a staging
+ * install would load credits into a different Overpay environment. */
+function owalletEnvFlag() {
+  const env = process.env.NORM_OWALLET_ENV
+  const resolved = env === "prod" || env === "dev" || env === "staging" ? env : DEFAULT_ENV
+  return resolved === "prod" ? "" : `--${resolved} `
 }
 
 function owalletUrl() {
@@ -146,6 +156,152 @@ function usd(value: number | null | undefined) {
   return `$${value.toFixed(2)}`
 }
 
+/** The session the TUI is showing, if any. */
+function currentSessionID(api: TuiPluginApi): string | undefined {
+  const current = api.route.current
+  return current.name === "session" && "params" in current ? (current.params?.sessionID as string | undefined) : undefined
+}
+
+/** TUI-side SessionAccess over the plugin's (v2) SDK client — same totals
+ * the server plugin enforces, subagent sessions included. */
+function sessionAccess(api: TuiPluginApi): NormBudget.SessionAccess {
+  return {
+    async parentOf(sessionID) {
+      const res: any = await api.client.session.get({ sessionID })
+      return res?.data?.parentID || undefined
+    },
+    async childrenOf(sessionID) {
+      const res: any = await api.client.session.children({ sessionID })
+      return (res?.data ?? []).map((s: any) => s.id).filter((id: unknown) => typeof id === "string")
+    },
+    async costOf(sessionID) {
+      const res: any = await api.client.session.messages({ sessionID })
+      return (res?.data ?? []).reduce(
+        (sum: number, m: any) => sum + (m?.info?.role === "assistant" && Number.isFinite(m.info.cost) ? m.info.cost : 0),
+        0,
+      )
+    },
+  }
+}
+
+/** `/budget`: choose which spending limit to change — this conversation's
+ * budget or the per-message limit — then set it. */
+async function openBudgetDialog(api: TuiPluginApi) {
+  const sessionID = currentSessionID(api)
+  const requestMax = await NormBudget.getRequestMax().catch(() => NormBudget.DEFAULT_REQUEST_MAX_USD)
+  const current = sessionID ? await NormBudget.status(sessionAccess(api), sessionID).catch(() => undefined) : undefined
+  // Outside a conversation only the per-message limit applies.
+  if (!current) {
+    openRequestMaxDialog(api, requestMax)
+    return
+  }
+  const DialogSelect = api.ui.DialogSelect
+  api.ui.dialog.replace(() => (
+    <DialogSelect
+      title="Spending limits"
+      skipFilter
+      options={[
+        {
+          title: "This conversation's budget",
+          value: "conversation",
+          description:
+            current.budget === null
+              ? `no limit · ${usd(current.spent)} spent`
+              : `${usd(current.remaining ?? 0)} left of ${NormBudget.format(current.budget)}`,
+        },
+        {
+          title: "Per-message limit",
+          value: "message",
+          description: `${NormBudget.format(requestMax)} · the most one message may authorize`,
+        },
+      ]}
+      onSelect={(option) =>
+        option.value === "conversation"
+          ? openConversationBudgetDialog(api, current)
+          : openRequestMaxDialog(api, requestMax)
+      }
+    />
+  ))
+}
+
+function openConversationBudgetDialog(api: TuiPluginApi, current: NormBudget.Status) {
+  const DialogPrompt = api.ui.DialogPrompt
+  api.ui.dialog.replace(() => (
+    <DialogPrompt
+      title="Conversation budget"
+      description={() => (
+        <text>
+          Spent {usd(current.spent)} of {NormBudget.format(current.budget)} in this conversation. Enter a new limit
+          in USD, or "off" for none. The ${NormBudget.DEFAULT_DAILY_BUDGET_USD}/day cap on Norm's key still applies.
+        </text>
+      )}
+      placeholder="e.g. 5"
+      value={current.budget === null ? "off" : String(current.budget)}
+      onConfirm={(value) => {
+        const next = NormBudget.parse(value)
+        if (next === undefined) {
+          api.ui.toast({ variant: "error", message: `Not a budget: "${value}". Try 5, 2.50, or off.` })
+          return
+        }
+        void NormBudget.set(current.root, next).then(
+          () => {
+            api.ui.dialog.clear()
+            api.ui.toast({
+              variant: "success",
+              message:
+                next === null
+                  ? "No limit for this conversation (daily cap still applies)."
+                  : `Budget for this conversation: ${NormBudget.format(next)}.`,
+            })
+          },
+          () => api.ui.toast({ variant: "error", message: "Couldn't save the budget." }),
+        )
+      }}
+      onCancel={() => api.ui.dialog.clear()}
+    />
+  ))
+}
+
+/** The per-message limit: the most one message may authorize. */
+function openRequestMaxDialog(api: TuiPluginApi, requestMax: number | null) {
+  const DialogPrompt = api.ui.DialogPrompt
+  api.ui.dialog.replace(() => (
+    <DialogPrompt
+      title="Per-message limit"
+      description={() => (
+        <text>
+          The most one message may authorize: {NormBudget.format(requestMax)}. You're charged what a message actually
+          costs and the rest comes back; a message that would need more is stopped before anything is charged. Enter
+          a limit in USD, or "off" for none. Applies to every conversation.
+        </text>
+      )}
+      placeholder={`e.g. ${NormBudget.DEFAULT_REQUEST_MAX_USD}`}
+      value={requestMax === null ? "off" : String(requestMax)}
+      onConfirm={(value) => {
+        const next = NormBudget.parse(value)
+        if (next === undefined) {
+          api.ui.toast({ variant: "error", message: `Not a limit: "${value}". Try 1, 0.50, or off.` })
+          return
+        }
+        void NormBudget.setRequestMax(next).then(
+          () => {
+            api.ui.dialog.clear()
+            api.ui.toast({
+              variant: "success",
+              message:
+                next === null
+                  ? "No per-message limit (conversation and daily budgets still apply)."
+                  : `Per-message limit: ${NormBudget.format(next)}.`,
+            })
+          },
+          () => api.ui.toast({ variant: "error", message: "Couldn't save the limit." }),
+        )
+      }}
+      onCancel={() => api.ui.dialog.clear()}
+    />
+  ))
+}
+
 function View(props: { api: TuiPluginApi }) {
   const theme = () => props.api.theme.current
   const base = owalletUrl()
@@ -184,7 +340,33 @@ function View(props: { api: TuiPluginApi }) {
   const waiting = () => status() === undefined
   const error = () => stateLine(outcome())
 
+  const [chatBudget, setChatBudget] = createSignal<NormBudget.Status>()
+  const [requestMax, setRequestMax] = createSignal<number | null>(NormBudget.DEFAULT_REQUEST_MAX_USD)
+  const refreshChatBudget = () => {
+    void NormBudget.getRequestMax().then(
+      (next) => !disposed && setRequestMax(next),
+      () => {},
+    )
+    const sessionID = currentSessionID(props.api)
+    if (!sessionID) return setChatBudget(undefined)
+    void NormBudget.status(sessionAccess(props.api), sessionID).then(
+      (next) => !disposed && setChatBudget(next),
+      () => {},
+    )
+  }
+  refreshChatBudget()
+  const chatBudgetTimer = setInterval(refreshChatBudget, 5_000)
+  onCleanup(() => clearInterval(chatBudgetTimer))
+
   const needsLogin = () => status()?.overpay_connected === false
+  // Every model — ":free" ones included — is paid by redeeming Overpay
+  // credits, so a linked wallet with none can't answer a single prompt; the
+  // first attempt fails with a raw 422. The status poll already knows the
+  // balance, so say it up front, with the exact command for this env.
+  const spendableCents = () =>
+    (status()?.merchant_credits ?? []).reduce((sum, row) => sum + Math.max(0, row.balance_cents ?? 0), 0)
+  const needsCredits = () =>
+    !needsLogin() && status()?.merchant_credits !== undefined && spendableCents() === 0
 
   return (
     <box>
@@ -195,6 +377,33 @@ function View(props: { api: TuiPluginApi }) {
           so first, ahead of every balance line. */}
       <Show when={needsLogin()}>
         <text fg={theme().warning}>log in to Overpay to get started — owallet authorize</text>
+      </Show>
+      <Show when={needsCredits()}>
+        <text fg={theme().warning}>no Overpay credits — prompts will fail until you load some:</text>
+        <text fg={theme().warning}>  owallet {owalletEnvFlag()}credits load --amount-cents 500 --wait</text>
+        <text fg={theme().textMuted}>  (Lightning; or top up on the Overpay site below)</text>
+      </Show>
+      <Show when={chatBudget()}>
+        <Show
+          when={chatBudget()!.budget !== null && chatBudget()!.remaining === 0}
+          fallback={
+            <text fg={theme().textMuted}>
+              this chat <span style={{ fg: theme().text }}>{usd(chatBudget()!.spent)}</span> /{" "}
+              {NormBudget.format(chatBudget()!.budget)} · /budget
+            </text>
+          }
+        >
+          <text fg={theme().warning}>
+            this chat's {NormBudget.format(chatBudget()!.budget)} budget is used — /budget to raise it
+          </text>
+        </Show>
+        <text fg={theme().textMuted}>
+          per message{" "}
+          <span style={{ fg: theme().text }}>
+            {requestMax() === null ? "no limit" : `≤ ${NormBudget.format(requestMax())}`}
+          </span>{" "}
+          · /budget
+        </text>
       </Show>
       <Show when={coreCredits()}>
         <text fg={theme().textMuted}>
@@ -224,7 +433,7 @@ function View(props: { api: TuiPluginApi }) {
           </text>
         )}
       </For>
-      <Show when={status()?.merchant_credits !== undefined && credits().length === 0}>
+      <Show when={!needsCredits() && status()?.merchant_credits !== undefined && credits().length === 0}>
         <text fg={theme().textMuted}>no merchant credits</text>
       </Show>
       <Show when={budget()}>
@@ -268,6 +477,20 @@ function View(props: { api: TuiPluginApi }) {
 
 const tui: TuiPlugin = async (api) => {
   if (normDisabled()) return
+  api.keymap.registerLayer({
+    commands: [
+      {
+        name: "norm.budget",
+        title: "Set spending limits",
+        slashName: "budget",
+        category: "Session",
+        namespace: "palette",
+        run() {
+          void openBudgetDialog(api)
+        },
+      },
+    ],
+  })
   api.slots.register({
     order: 250,
     slots: {

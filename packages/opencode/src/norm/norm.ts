@@ -6,6 +6,7 @@ import fs from "fs/promises"
 import { existsSync, mkdirSync } from "fs"
 import { spawn, execFile } from "child_process"
 import { Global } from "@opencode-ai/core/global"
+import { NormBudget } from "@opencode-ai/core/norm-budget"
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 
 // norm is opencode preconfigured for the Overpay owallet-marketplace stack:
@@ -183,6 +184,18 @@ export function defaults(): ConfigV1.Info {
 // os.homedir() at process start.
 function homeDir() {
   return process.env.HOME || os.homedir()
+}
+
+/**
+ * owallet reports a failure that happens mid-stream as ordinary assistant
+ * text starting with this marker (its HTTP status is already committed to
+ * 200 by then). Callers that treat the reply as data — the session title
+ * generator — must not mistake it for content.
+ */
+export const OWALLET_ERROR_MARKER = "[owallet error]"
+
+export function isOwalletErrorText(text: string): boolean {
+  return text.trimStart().startsWith(OWALLET_ERROR_MARKER)
 }
 
 /** Where owallet keeps its encrypted DB (mirrors `owallet_db::default_db_path`). */
@@ -796,6 +809,10 @@ export function systemPrompt(): string {
     "     individually paid marketplace order, bounded by per-key budgets and",
     "     spend caps. Tool descriptions carry the per-call price where known",
     "     — avoid redundant calls in this tier.",
+    "- Spending is capped per conversation (the user sets it with the",
+    "  `/budget` command) and per day on your key. If a purchase or a turn is",
+    "  refused for exceeding a limit, stop, tell the user what was refused and",
+    "  that `/budget` raises this conversation's limit — never retry around it.",
     "- The `owallet` MCP server is also attached client-side for wallet",
     "  operations (balances, orders, marketplace browsing) — its reads are",
     "  tier-1 free; its one-shot marketplace purchase tools are tier 3.",
@@ -1004,6 +1021,20 @@ async function restartIfStale(base: string): Promise<boolean> {
  *
  * Returns whether owallet is reachable afterwards.
  */
+/**
+ * The environment for an auto-started `owallet serve`. norm sends each
+ * session's id as `x-session-id` (plugin/norm.ts) so OpenRouter keeps a
+ * conversation on one provider and its prompt cache warm; owallet forwards
+ * an opaque HMAC of it only with `OWALLET_V1_SESSION_ID=1`, because a
+ * marketplace without fathom-x/overpay#445 fails orders whose buyer note
+ * carries the extra key. Staging and dev run #445, so it is on there; prod
+ * stays off until it ships. An explicit `OWALLET_V1_SESSION_ID` wins.
+ */
+export function serveEnv(): NodeJS.ProcessEnv {
+  if (process.env.OWALLET_V1_SESSION_ID !== undefined || owalletEnv() === "prod") return process.env
+  return { ...process.env, OWALLET_V1_SESSION_ID: "1" }
+}
+
 async function ensureServer(base: string): Promise<boolean> {
   if (await probe(base)) {
     if (!(await restartIfStale(base))) return true
@@ -1031,7 +1062,7 @@ async function ensureServer(base: string): Promise<boolean> {
   const child = spawn(bin, args, {
     detached: true,
     stdio: "ignore",
-    env: process.env,
+    env: serveEnv(),
   })
   child.unref()
   debug(`started \`owallet ${args.join(" ")}\` (pid ${child.pid})`)
@@ -1046,36 +1077,37 @@ async function ensureServer(base: string): Promise<boolean> {
   return false
 }
 
+/** Records which key norm minted, so it only ever replaces its own. */
+function keyMarkerFile() {
+  return path.join(Global.Path.data, "overpay-key.json")
+}
+
+/** Enough of the key to recognise it later; not enough to use it. */
+function keyFingerprint(key: string) {
+  return key.slice(0, 12)
+}
+
 /**
- * Make sure opencode's auth store has an API key for the `overpay` provider,
- * minting one with `owallet provider-key create --json` when possible. The
- * mint opens the encrypted DB directly (it does not need the server), so it
- * only requires the binary, the DB, and OWALLET_PASSWORD.
- *
- * The auth store write mirrors `Auth.set` (same file, shape, and 0600 mode);
- * this runs before the provider registry reads auth.json, so a key minted
- * here is picked up in the same session.
+ * Mint the key norm uses: `spend`-scoped so Norm can buy on the marketplace
+ * (credits, listings), and capped by owallet's persistent daily budget —
+ * which bounds everything the key costs, inference included. Per-conversation
+ * limits sit on top of that (`/budget`, sent per request). The mint opens the
+ * encrypted DB directly (no server needed): binary, DB and OWALLET_PASSWORD.
  */
-async function ensureProviderKey(): Promise<void> {
-  const file = path.join(Global.Path.data, "auth.json")
-  const store: Record<string, unknown> = await fs
-    .readFile(file, "utf8")
-    .then((text) => JSON.parse(text))
-    .catch(() => ({}))
-  if (store[PROVIDER_ID]) return
-
-  const bin = await owalletBinary()
-  if (!bin) return
-  if (!existsSync(owalletDbPath())) return
-  if (!process.env.OWALLET_PASSWORD) {
-    debug("no overpay provider key and OWALLET_PASSWORD unset — paste one via `opencode auth login`")
-    return
-  }
-
+async function mintProviderKey(bin: string): Promise<string | undefined> {
   const stdout = await new Promise<string | undefined>((resolve) => {
     execFile(
       bin,
-      ["provider-key", "create", "--label", "norm", "--json"],
+      [
+        "provider-key",
+        "create",
+        "--label",
+        "norm",
+        "--spend",
+        "--budget-usd",
+        String(NormBudget.DEFAULT_DAILY_BUDGET_USD),
+        "--json",
+      ],
       { env: process.env, timeout: 30_000 },
       (error, stdout, stderr) => {
         if (error) {
@@ -1088,15 +1120,104 @@ async function ensureProviderKey(): Promise<void> {
     )
   })
   if (!stdout) return
-
   const key = JSON.parse(stdout).key
   if (typeof key !== "string" || !key.startsWith("owk_")) {
     debug("provider-key create returned an unexpected payload")
     return
   }
+  return key
+}
+
+/** `key_can_spend` from owallet's status (>= 0.1.11); undefined when unknown. */
+async function keyCanSpend(key: string): Promise<boolean | undefined> {
+  try {
+    const res = await fetch(`${owalletUrl()}/v1/status`, {
+      headers: { authorization: `Bearer ${key}` },
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!res.ok) return undefined
+    const body: any = await res.json()
+    return typeof body?.key_can_spend === "boolean" ? body.key_can_spend : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Make sure opencode's auth store holds norm's overpay key, minting one when
+ * possible. Also replaces the *chat-only* key older norm releases minted:
+ * norm lets the model buy on the marketplace by default, and a chat-scoped
+ * key refuses every spending tool ("this provider key is chat-scoped"). Only
+ * a key norm minted is ever replaced — one a user pasted in via
+ * `norm auth login` is left alone.
+ *
+ * The auth store write mirrors `Auth.set` (same file, shape, and 0600 mode);
+ * this runs before the provider registry reads auth.json, so a key minted
+ * here is picked up in the same session.
+ */
+async function ensureProviderKey(): Promise<void> {
+  const file = path.join(Global.Path.data, "auth.json")
+  const store: Record<string, any> = await fs
+    .readFile(file, "utf8")
+    .then((text) => JSON.parse(text))
+    .catch(() => ({}))
+  const existing: string | undefined =
+    store[PROVIDER_ID]?.type === "api" && typeof store[PROVIDER_ID].key === "string" ? store[PROVIDER_ID].key : undefined
+  const marker: { fingerprint?: string } | undefined = await fs
+    .readFile(keyMarkerFile(), "utf8")
+    .then((text) => JSON.parse(text))
+    .catch(() => undefined)
+
+  if (store[PROVIDER_ID] && !existing) return // some other auth shape — not ours to touch
+  if (existing) {
+    // A marker naming a different key means the user supplied this one.
+    if (marker?.fingerprint && marker.fingerprint !== keyFingerprint(existing)) return
+    if ((await keyCanSpend(existing)) !== false) return
+  }
+
+  const bin = await owalletBinary()
+  if (!bin) return
+  if (!existsSync(owalletDbPath())) return
+  if (!process.env.OWALLET_PASSWORD) {
+    debug("cannot mint an overpay provider key: OWALLET_PASSWORD unset — paste one via `norm auth login`")
+    return
+  }
+
+  const key = await mintProviderKey(bin)
+  if (!key) return
   store[PROVIDER_ID] = { type: "api", key }
   await fs.writeFile(file, JSON.stringify(store, null, 2), { mode: 0o600 })
-  debug("minted an overpay provider key and stored it in the auth store")
+  await fs.writeFile(keyMarkerFile(), JSON.stringify({ fingerprint: keyFingerprint(key) }) + "\n", { mode: 0o600 })
+  if (existing) {
+    process.stderr.write(
+      `[norm] replaced norm's chat-only Overpay key: Norm can now buy on the marketplace, ` +
+        `capped at $${NormBudget.DEFAULT_DAILY_BUDGET_USD}/day and ` +
+        `$${NormBudget.DEFAULT_CONVERSATION_BUDGET_USD} per conversation, ` +
+        `$${NormBudget.DEFAULT_REQUEST_MAX_USD.toFixed(2)} per message (/budget to change).\n`,
+    )
+  }
+  debug("minted a spend-scoped overpay provider key and stored it in the auth store")
+}
+
+/** Server-side SessionAccess over the plugin's (v1) SDK client. */
+export function sessionAccess(client: any): NormBudget.SessionAccess {
+  return {
+    async parentOf(id) {
+      const res = await client.session.get({ path: { id } })
+      return res?.data?.parentID || undefined
+    },
+    async childrenOf(id) {
+      const res = await client.session.children({ path: { id } })
+      return (res?.data ?? []).map((s: any) => s.id).filter((x: unknown) => typeof x === "string")
+    },
+    async costOf(id) {
+      const res = await client.session.messages({ path: { id } })
+      return (res?.data ?? []).reduce(
+        (sum: number, m: any) => sum + (m?.info?.role === "assistant" && Number.isFinite(m.info.cost) ? m.info.cost : 0),
+        0,
+      )
+    },
+  }
 }
 
 /**
