@@ -247,7 +247,7 @@ export function Prompt(props: PromptProps) {
   createEffect(() => {
     if (!input || input.isDestroyed) return
     if (props.disabled) input.cursorColor = theme.background
-    if (!props.disabled) input.cursorColor = theme.text
+    if (!props.disabled) input.cursorColor = theme.textMuted
     if (tuiConfig.cursor) input.cursorStyle = tuiConfig.cursor
   })
 
@@ -1468,13 +1468,13 @@ export function Prompt(props: PromptProps) {
                 setTimeout(() => {
                   // setTimeout is a workaround and needs to be addressed properly
                   if (!input || input.isDestroyed) return
-                  input.cursorColor = theme.text
+                  input.cursorColor = theme.textMuted
                   if (tuiConfig.cursor) input.cursorStyle = tuiConfig.cursor
                 }, 0)
               }}
               onMouseDown={(r: MouseEvent) => r.target?.focus()}
               focusedBackgroundColor={theme.background}
-              cursorColor={props.disabled ? theme.background : theme.text}
+              cursorColor={props.disabled ? theme.background : theme.textMuted}
               cursorStyle={tuiConfig.cursor}
               syntaxStyle={syntax()}
             />

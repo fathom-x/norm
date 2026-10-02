@@ -11,6 +11,8 @@ import { WorkspaceLabel } from "../../component/workspace-label"
 import { abbreviateHome } from "../../runtime"
 import { useTuiPaths } from "../../context/runtime"
 
+// norm: also rendered on the home screen (sessionID ""), which is laid out
+// as an empty session; it then shows "New session" and the directory.
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const pluginRuntime = usePluginRuntime()
   const project = useProject()
@@ -30,12 +32,14 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const directory = createMemo(() => {
     const dir = session()?.directory || sync.path.directory || paths.cwd
     const out = abbreviateHome(dir, paths.home)
-    const branch = session()?.directory === sync.path.directory ? sync.data.vcs?.branch : undefined
+    const branch = dir === sync.path.directory ? sync.data.vcs?.branch : undefined
     return branch ? out + ":" + branch : out
   })
 
+  const title = createMemo(() => session()?.title ?? "New session")
+
   return (
-    <Show when={session()}>
+    <Show when={session() || !props.sessionID}>
       <box
         backgroundColor={theme.backgroundPanel}
         width={42}
@@ -60,15 +64,15 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               name="sidebar_title"
               mode="single_winner"
               session_id={props.sessionID}
-              title={session()!.title}
-              share_url={session()!.share?.url}
+              title={title()}
+              share_url={session()?.share?.url}
             >
               <box paddingRight={1}>
                 <text fg={theme.text}>
-                  <b>{session()!.title}</b>
+                  <b>{title()}</b>
                 </text>
                 <text fg={theme.textMuted}>{directory()}</text>
-                <Show when={session()!.workspaceID}>
+                <Show when={session()?.workspaceID}>
                   <text fg={theme.textMuted}>
                     <Show
                       when={workspace()}
@@ -85,7 +89,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                     </Show>
                   </text>
                 </Show>
-                <Show when={session()!.share?.url}>
+                <Show when={session()?.share?.url}>
                   <text fg={theme.textMuted}>{session()!.share!.url}</text>
                 </Show>
               </box>

@@ -92,7 +92,10 @@ syncs stay cheap:
   provider" moved from its own row in the input panel into the hints row
   below it (replacing the cwd); user messages are one row; and the sidebar shows
   the working directory (with branch) under the title instead of the
-  session id. Edits: `tui/src/component/prompt/index.tsx` (`Meta`),
+  session id. The home route is laid out as an empty session (no logo,
+  tips or home footer; the sidebar shows "New session"), and the cursor
+  defaults to a steady block in the muted text color
+  (`tui/src/config/index.tsx`). Edits: `routes/home.tsx`, `tui/src/component/prompt/index.tsx` (`Meta`),
   `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
   `feature-plugins/sidebar/footer.tsx` — expect conflicts there on syncs.
 
