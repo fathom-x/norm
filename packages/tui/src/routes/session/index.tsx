@@ -1117,6 +1117,14 @@ export function Session() {
     bindings: tuiConfig.keybinds.gather("session", sessionBindingCommands),
   }))
 
+  // norm: → on an empty prompt opens/closes the sidebar (with text in the
+  // prompt it still moves the cursor).
+  useBindings(() => ({
+    enabled: () =>
+      dialog.stack.length === 0 && permissions().length === 0 && questions().length === 0 && !prompt?.current.input,
+    bindings: [{ key: "right", desc: "Toggle sidebar", group: "Session", cmd: "session.sidebar.toggle" }],
+  }))
+
   useBindings(() => ({
     mode: OPENCODE_BASE_MODE,
     enabled: foregroundTasks().length > 0,

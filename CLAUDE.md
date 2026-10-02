@@ -101,6 +101,10 @@ syncs stay cheap:
   "Connect provider" (ctrl+a) action (`component/dialog-model.tsx`);
   in a conversation → toggles its prices between the next message and
   the list price, hinted beside "esc" (`DialogSelect`'s `hint`).
+  "Build · model" starts in the column typed text does; while working a
+  one-character braille spinner sits two columns left of it (upstream: a
+  block sweep that pushed it right). → on an empty prompt toggles the
+  sidebar (session route and home).
   Edits: `routes/home.tsx`, `tui/src/component/prompt/index.tsx` (`Meta`),
   `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
   `feature-plugins/sidebar/footer.tsx` — expect conflicts there on syncs.

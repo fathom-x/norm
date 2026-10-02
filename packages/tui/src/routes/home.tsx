@@ -11,6 +11,8 @@ import { usePluginRuntime } from "../plugin/runtime"
 import { useEditorContext } from "../context/editor"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useKV } from "../context/kv.tsx"
+import { useDialog } from "../ui/dialog"
+import { useBindings } from "../keymap"
 import { Sidebar } from "./session/sidebar"
 import { HomeSessionDestinationProvider } from "./home/session-destination"
 
@@ -30,7 +32,21 @@ export function Home() {
   const local = useLocal()
   const editor = useEditorContext()
   const dimensions = useTerminalDimensions()
-  const [sidebar] = useKV().signal<"auto" | "hide">("sidebar", "auto")
+  const [sidebar, setSidebar] = useKV().signal<"auto" | "hide">("sidebar", "auto")
+  const dialog = useDialog()
+
+  // norm: → on an empty prompt opens/closes the sidebar, as in a session.
+  useBindings(() => ({
+    enabled: () => dialog.stack.length === 0 && !ref()?.current.input,
+    bindings: [
+      {
+        key: "right",
+        desc: "Toggle sidebar",
+        group: "Session",
+        cmd: () => setSidebar((value) => (value === "hide" ? "auto" : "hide")),
+      },
+    ],
+  }))
   let sent = false
 
   onMount(() => {
