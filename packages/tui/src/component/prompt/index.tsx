@@ -1406,6 +1406,10 @@ export function Prompt(props: PromptProps) {
             <textarea
               width="100%"
               placeholder={placeholderText()}
+              // norm: no cursor over the placeholder's first letter; it
+              // appears with the first character typed. Only the new-chat
+              // prompt has a placeholder, so conversations keep theirs.
+              showCursor={!placeholderText() || store.prompt.input !== ""}
               placeholderColor={theme.textMuted}
               textColor={leader() ? theme.textMuted : theme.text}
               focusedTextColor={leader() ? theme.textMuted : theme.text}
