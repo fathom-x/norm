@@ -907,6 +907,29 @@ export function mergeModels<T extends Record<string, any>>(configured: Record<st
   return merged as Record<string, T>
 }
 
+/**
+ * Applies norm's compaction model (`/compaction-model`, "provider/model") as
+ * the compaction agent's model. The user's own `agent.compaction.model`
+ * wins, and a model its provider doesn't list (retired from the
+ * marketplace, or the list couldn't be fetched) is skipped: opencode would
+ * fail the compaction outright, where the conversation's own model works.
+ */
+export function applyCompactionModel(
+  config: { agent?: Record<string, any>; provider?: Record<string, { models?: Record<string, unknown> } | undefined> },
+  model: string | undefined,
+) {
+  if (!model || config.agent?.compaction?.model) return
+  const slash = model.indexOf("/")
+  const providerID = model.slice(0, slash)
+  const listed = config.provider?.[providerID]?.models
+  if (listed && !listed[model.slice(slash + 1)]) {
+    debug(`compaction model ${model} is not offered — compacting with the conversation's model`)
+    return
+  }
+  config.agent ??= {}
+  config.agent.compaction = { ...config.agent.compaction, model }
+}
+
 /** True if anything answers HTTP at `base` — any status counts, only a network error is "down". */
 async function probe(base: string, timeoutMs = 1500): Promise<boolean> {
   try {

@@ -47,6 +47,13 @@ syncs stay cheap:
   `dialog-model.tsx`) shows list prices, or in a conversation "next ≈ $X"
   / "over your $1 limit" per model and a toast on a mid-conversation
   switch; the sidebar shows the next step's estimate.
+- **Compaction model** (`/compaction-model`,
+  `packages/core/src/norm-compaction.ts`): opencode compacts with the
+  conversation's own model by default. The choice is stored in norm's
+  data dir and applied by the norm plugin's `config` hook as
+  `agent.compaction.model` (`Norm.applyCompactionModel`) — the user's own
+  config wins, and a model the marketplace no longer lists is skipped. The
+  TUI reloads instances after a change so the hook re-runs.
 - `src/session/system.ts` appends `Norm.systemPrompt()` to the system
   prompt for overpay-provider models — the inherited opencode prompts
   send capability questions to the opencode docs, but marketplace

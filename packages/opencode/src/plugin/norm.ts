@@ -1,6 +1,7 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Norm } from "@/norm/norm"
 import { NormBudget } from "@opencode-ai/core/norm-budget"
+import { NormCompaction } from "@opencode-ai/core/norm-compaction"
 
 /**
  * norm's built-in plugin: runs the owallet bootstrap (auto-start the server,
@@ -58,10 +59,12 @@ export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
       }
 
       const overpay = config.provider?.[Norm.PROVIDER_ID]
-      if (!overpay) return
-      const models = await Norm.marketplaceModels()
-      if (!models) return
-      overpay.models = Norm.mergeModels(overpay.models ?? {}, models)
+      const models = overpay ? await Norm.marketplaceModels() : undefined
+      if (overpay && models) overpay.models = Norm.mergeModels(overpay.models ?? {}, models)
+
+      // /compaction-model: after the model list, so a choice the
+      // marketplace no longer offers is skipped rather than failing.
+      Norm.applyCompactionModel(config, await NormCompaction.get().catch(() => undefined))
     },
     auth: {
       provider: Norm.PROVIDER_ID,
