@@ -495,7 +495,60 @@ struct ModelObject {
     object: &'static str,
     created: i64,
     owned_by: &'static str,
+    /// The variant's display title (OpenRouter's model name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// Context window in tokens, from the seller's catalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_length: Option<u64>,
+    /// False when the seller has stopped offering the model (it fell out of
+    /// OpenRouter's catalog): ordering it would fail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active: Option<bool>,
+    /// What the model costs to run here; see [`ModelPricing`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pricing: Option<ModelPricing>,
 }
+
+/// A model's list price, read off its variant's `rate_card` and turned into
+/// what the buyer actually pays: USD, per million tokens, with the seller's
+/// markup already applied. These are the rates at the seller's last catalog
+/// fetch (`as_of`) for the priciest provider it admitted then (`basis:
+/// "list"`) — an estimate's upper end, not a quote: the charge is the turn's
+/// real cost plus markup, usually lower.
+#[derive(Serialize, Debug, PartialEq)]
+struct ModelPricing {
+    input: f64,
+    output: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_read: Option<f64>,
+    /// A flat per-request fee, in USD, where the model has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request: Option<f64>,
+    /// Higher rates from `min_input_tokens` of prompt up.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    long_context: Vec<LongContextPricing>,
+    /// The least any one turn is charged, in USD. Not published by the
+    /// listing; it mirrors the seller bot's `MIN_CHARGE_CENTS`.
+    min_charge: f64,
+    /// The variant's minimum commitment, in USD: the least a turn on this
+    /// model may be authorized for (see `size_openrouter_authorization`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_authorization: Option<f64>,
+    basis: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    as_of: Option<String>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct LongContextPricing {
+    min_input_tokens: u64,
+    input: f64,
+    output: f64,
+}
+
+/// See [`ModelPricing::min_charge`].
+const OPENROUTER_MIN_CHARGE_USD: f64 = 0.01;
 
 #[derive(Serialize)]
 struct ModelList {
@@ -508,30 +561,44 @@ async fn list_models(
     headers: HeaderMap,
 ) -> Result<Json<ModelList>, OpenAiError> {
     let (mcp, _can_spend, _spend_key_id) = authenticate_provider_key(&ctx.mcp, &headers)?;
-    let mut models = resolve_models(&mcp).await?;
-    // Always offered, first — see `DEFAULT_MODEL`'s doc comment.
-    models.insert(0, DEFAULT_MODEL.to_string());
+    let listing = openrouter_listing(&mcp).await?;
+    // Always offered, first — see `DEFAULT_MODEL`'s doc comment. The seller
+    // picks what it resolves to, so it has no price of its own.
+    let mut data = vec![model_object(DEFAULT_MODEL.to_string())];
+    data.extend(model_entries(&listing));
     Ok(Json(ModelList {
         object: "list",
-        data: models
-            .into_iter()
-            .map(|id| ModelObject {
-                id,
-                object: "model",
-                created: 0,
-                owned_by: "overpay",
-            })
-            .collect(),
+        data,
     }))
+}
+
+fn model_object(id: String) -> ModelObject {
+    ModelObject {
+        id,
+        object: "model",
+        created: 0,
+        owned_by: "overpay",
+        name: None,
+        context_length: None,
+        active: None,
+        pricing: None,
+    }
 }
 
 /// The curated model list, read live off the listing's own
 /// `buyer_note_schema` rather than duplicated here — see the module doc.
 async fn resolve_models(state: &McpState) -> Result<Vec<String>, OpenAiError> {
+    Ok(model_ids(&openrouter_listing(state).await?))
+}
+
+async fn openrouter_listing(state: &McpState) -> Result<Value, OpenAiError> {
     let listing_id = resolve_openrouter_listing_id(state).await?;
-    let listing = state.overpay.get_listing_value(&listing_id).await?;
-    let inner = listing.get("data").unwrap_or(&listing);
-    let models = inner
+    Ok(state.overpay.get_listing_value(&listing_id).await?)
+}
+
+fn model_ids(listing: &Value) -> Vec<String> {
+    let inner = listing.get("data").unwrap_or(listing);
+    inner
         .pointer("/buyer_note_schema/properties/model/enum")
         .and_then(Value::as_array)
         .map(|arr| {
@@ -539,8 +606,82 @@ async fn resolve_models(state: &McpState) -> Result<Vec<String>, OpenAiError> {
                 .filter_map(|v| v.as_str().map(str::to_string))
                 .collect()
         })
-        .unwrap_or_default();
-    Ok(models)
+        .unwrap_or_default()
+}
+
+/// [`model_ids`], each with what its metered variant publishes (title,
+/// context window, whether it's offered, price). A listing without
+/// variants — or a variant without a rate card — yields bare ids.
+fn model_entries(listing: &Value) -> Vec<ModelObject> {
+    let inner = listing.get("data").unwrap_or(listing);
+    let variants = inner.get("variants").and_then(Value::as_array);
+    model_ids(listing)
+        .into_iter()
+        .map(|id| {
+            let mut model = model_object(id);
+            let Some(variant) = variants
+                .into_iter()
+                .flatten()
+                .find(|v| v.get("key").and_then(Value::as_str) == Some(model.id.as_str()))
+            else {
+                return model;
+            };
+            model.name = variant
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|t| *t != model.id)
+                .map(str::to_string);
+            model.context_length = variant
+                .pointer("/metadata/context_length")
+                .and_then(Value::as_u64);
+            model.active = variant.get("active").and_then(Value::as_bool);
+            model.pricing = variant.get("rate_card").and_then(model_pricing);
+            if let Some(pricing) = model.pricing.as_mut() {
+                pricing.min_authorization = variant
+                    .get("min_authorization_cents")
+                    .and_then(Value::as_f64)
+                    .map(|cents| cents / 100.0);
+            }
+            model
+        })
+        .collect()
+}
+
+/// A variant's `rate_card` (cents per million tokens, before markup) as
+/// [`ModelPricing`]; `None` without input and output rates.
+fn model_pricing(card: &Value) -> Option<ModelPricing> {
+    let num = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64);
+    let factor = (1.0 + num(card, "markup").unwrap_or(0.0)) / 100.0;
+    // Cents → dollars with markup, rounded to a hundredth of a cent so the
+    // multiplication doesn't print float noise.
+    let usd = |cents: f64| (cents * factor * 10_000.0).round() / 10_000.0;
+    let long_context = card
+        .get("long_context")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|tier| {
+            Some(LongContextPricing {
+                min_input_tokens: tier.get("min_input_tokens")?.as_u64()?,
+                input: usd(num(tier, "input_cents_per_mtok")?),
+                output: usd(num(tier, "output_cents_per_mtok")?),
+            })
+        })
+        .collect();
+    Some(ModelPricing {
+        input: usd(num(card, "input_cents_per_mtok")?),
+        output: usd(num(card, "output_cents_per_mtok")?),
+        cache_read: num(card, "cache_read_cents_per_mtok").map(usd),
+        request: num(card, "request_cents").map(usd),
+        long_context,
+        min_charge: OPENROUTER_MIN_CHARGE_USD,
+        min_authorization: None,
+        basis: "list",
+        as_of: card
+            .get("as_of")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 async fn resolve_openrouter_listing_id(state: &McpState) -> Result<String, OpenAiError> {
@@ -4747,6 +4888,93 @@ mod tests {
         );
         assert_eq!(&ids[1..], MODELS);
         assert_eq!(body["data"][0]["object"], "model");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn models_carry_each_variants_price_context_and_availability() {
+        let overpay = MockServer::start().await;
+        mount_seller_listing(
+            &overpay,
+            "openrouter-bot",
+            OPENROUTER_ID,
+            "OpenRouter Inference",
+        )
+        .await;
+        let mut listing = openrouter_listing_body(OPENROUTER_ID);
+        listing["data"]["variants"] = json!([
+            {
+                "key": "openai/gpt-5-mini", "title": "OpenAI: GPT-5 Mini", "active": true,
+                "metadata": {"context_length": 400000}, "min_authorization_cents": 3,
+                "rate_card": {
+                    "input_cents_per_mtok": 25.0, "output_cents_per_mtok": 200.0,
+                    "cache_read_cents_per_mtok": 2.5, "markup": 0.2,
+                    "long_context": [{"min_input_tokens": 50000,
+                                      "input_cents_per_mtok": 50.0, "output_cents_per_mtok": 300.0}],
+                    "as_of": "2026-10-01T00:00:00Z",
+                },
+            },
+            {"key": "anthropic/claude-haiku-4.5", "title": "anthropic/claude-haiku-4.5",
+             "active": false, "rate_card": {}},
+        ]);
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/listings/{OPENROUTER_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(listing))
+            .mount(&overpay)
+            .await;
+        let tmp = TempDir::new().unwrap();
+        let s = test_server(seeded_state(&overpay.uri(), &tmp));
+
+        let body: Value = s.get("/models").await.json();
+        let data = body["data"].as_array().unwrap();
+        assert_eq!(data[0]["id"], DEFAULT_MODEL);
+        assert!(
+            data[0].get("pricing").is_none(),
+            "the seller prices default"
+        );
+
+        let mini = &data[1];
+        assert_eq!(mini["name"], "OpenAI: GPT-5 Mini");
+        assert_eq!(mini["context_length"], 400000);
+        assert_eq!(mini["active"], true);
+        assert_eq!(
+            mini["pricing"],
+            json!({
+                "input": 0.3, "output": 2.4, "cache_read": 0.03,
+                "long_context": [{"min_input_tokens": 50000, "input": 0.6, "output": 3.6}],
+                "min_charge": 0.01, "min_authorization": 0.03,
+                "basis": "list", "as_of": "2026-10-01T00:00:00Z",
+            }),
+            "USD per Mtok with the 20% markup in"
+        );
+
+        let haiku = &data[2];
+        assert_eq!(haiku["active"], false);
+        assert!(
+            haiku.get("name").is_none(),
+            "a title equal to the id adds nothing"
+        );
+        assert!(
+            haiku.get("pricing").is_none(),
+            "an empty rate card is no price, not $0"
+        );
+        assert!(haiku.get("context_length").is_none());
+    }
+
+    #[test]
+    fn model_pricing_reads_the_metered_rate_card() {
+        let listing = metered_listing();
+        let card = &listing["data"]["variants"][0]["rate_card"];
+        let pricing = model_pricing(card).unwrap();
+        assert_eq!((pricing.input, pricing.output), (3.6, 18.0));
+        assert_eq!(
+            pricing.long_context,
+            vec![LongContextPricing {
+                min_input_tokens: 50000,
+                input: 7.2,
+                output: 27.0
+            }]
+        );
+        assert_eq!(model_pricing(&json!({"input_cents_per_mtok": 1.0})), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
