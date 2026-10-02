@@ -40,7 +40,7 @@ describe("norm in the browser", () => {
         return Response.json({ key: "owk_wasm_minted_key_0001", id: 1, npub: "npub1test", label: "norm", scopes: "chat spend" })
       if (route === "/v1/status") return Response.json({ key_can_spend: true })
       return new Response("nope", { status: 404 })
-    }) as typeof fetch
+    }) as unknown as typeof fetch
     savedAuth = await fs.readFile(authFile(), "utf8").catch(() => undefined)
     await fs.rm(authFile(), { force: true })
     await fs.rm(markerFile(), { force: true })
@@ -104,7 +104,7 @@ describe("norm in the browser", () => {
   test("an unreachable owallet-web is a blocker, not a crash", async () => {
     globalThis.fetch = (async () => {
       throw new TypeError("fetch failed")
-    }) as typeof fetch
+    }) as unknown as typeof fetch
     await Norm.bootstrap()
     expect(await Norm.host().mintBlocker()).toContain("not reachable")
     expect(await storedKey()).toBeUndefined()
