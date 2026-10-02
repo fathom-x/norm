@@ -87,9 +87,10 @@ syncs stay cheap:
   that spent real money.
 
 - **Compact session layout** (TUI): the session column has no side or
-  bottom padding, "agent · model · provider" moved from its own row in
-  the input panel into the hints row below it (replacing the cwd), so the
-  textarea starts on the third row from the bottom, and the sidebar shows
+  bottom padding; the input is a plain "> " in the agent's color (no
+  shaded panel, padding row or half-block edge); "agent · model ·
+  provider" moved from its own row in the input panel into the hints row
+  below it (replacing the cwd); user messages are one row; and the sidebar shows
   the working directory (with branch) under the title instead of the
   session id. Edits: `tui/src/component/prompt/index.tsx` (`Meta`),
   `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
@@ -140,7 +141,8 @@ opencode: the binary is `norm` (`packages/opencode/package.json` bin →
 `packages/core/src/global.ts` is `norm`, so all XDG state is norm's
 own (`~/.config/norm`, `~/.local/share/norm` incl. `auth.json`, cache,
 state). The wordmark/TUI logo spell "norm" (`packages/tui/src/logo.ts`,
-`util/presentation.ts`, `cli/ui.ts`).
+`util/presentation.ts`, `cli/ui.ts`); the terminal window title is
+"Norm" / "Norm | <session title>" (`tui/src/app.tsx`).
 
 Deliberately *kept* from upstream for compatibility and cheap merges:
 `OPENCODE_*` env vars, `opencode.json`/`opencode.jsonc` config file

@@ -16,7 +16,6 @@ import { fileURLToPath } from "url"
 import { useLocal } from "../../context/local"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { tint, useTheme } from "../../context/theme"
-import { EmptyBorder, SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { useClipboard } from "../../context/clipboard"
 import { Spinner } from "../spinner"
@@ -247,7 +246,7 @@ export function Prompt(props: PromptProps) {
 
   createEffect(() => {
     if (!input || input.isDestroyed) return
-    if (props.disabled) input.cursorColor = theme.backgroundElement
+    if (props.disabled) input.cursorColor = theme.background
     if (!props.disabled) input.cursorColor = theme.text
     if (tuiConfig.cursor) input.cursorStyle = tuiConfig.cursor
   })
@@ -1389,24 +1388,13 @@ export function Prompt(props: PromptProps) {
   return (
     <>
       <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
-        <box
-          width="100%"
-          border={["left"]}
-          borderColor={borderHighlight()}
-          customBorderChars={{
-            ...SplitBorder.customBorderChars,
-            bottomLeft: "╹",
-          }}
-        >
-          <box
-            paddingLeft={2}
-            paddingRight={2}
-            paddingTop={1}
-            flexShrink={0}
-            backgroundColor={theme.backgroundElement}
-            flexGrow={1}
-            width="100%"
-          >
+        {/* norm: a plain "> " in the agent's color instead of upstream's
+            shaded panel (left bar, padding row, half-block bottom edge). */}
+        <box width="100%" flexDirection="row" paddingLeft={1} paddingRight={2}>
+          <text flexShrink={0} fg={borderHighlight()}>
+            {"> "}
+          </text>
+          <box flexShrink={0} flexGrow={1}>
             <textarea
               width="100%"
               placeholder={placeholderText()}
@@ -1477,38 +1465,12 @@ export function Prompt(props: PromptProps) {
                 }, 0)
               }}
               onMouseDown={(r: MouseEvent) => r.target?.focus()}
-              focusedBackgroundColor={theme.backgroundElement}
-              cursorColor={props.disabled ? theme.backgroundElement : theme.text}
+              focusedBackgroundColor={theme.background}
+              cursorColor={props.disabled ? theme.background : theme.text}
               cursorStyle={tuiConfig.cursor}
               syntaxStyle={syntax()}
             />
           </box>
-        </box>
-        <box
-          height={1}
-          border={["left"]}
-          borderColor={borderHighlight()}
-          customBorderChars={{
-            ...EmptyBorder,
-            vertical: theme.backgroundElement.a !== 0 ? "╹" : " ",
-          }}
-        >
-          <box
-            height={1}
-            border={["bottom"]}
-            borderColor={theme.backgroundElement}
-            customBorderChars={
-              theme.backgroundElement.a !== 0
-                ? {
-                    ...EmptyBorder,
-                    horizontal: "▀",
-                  }
-                : {
-                    ...EmptyBorder,
-                    horizontal: " ",
-                  }
-            }
-          />
         </box>
         <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
           <Switch>
