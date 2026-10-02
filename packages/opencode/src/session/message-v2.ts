@@ -21,6 +21,7 @@ import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessag
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { NotFoundError } from "@/storage/storage"
+import { Norm } from "@/norm/norm"
 import { and } from "drizzle-orm"
 import { desc } from "drizzle-orm"
 import { eq } from "drizzle-orm"
@@ -192,6 +193,10 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
     return { type: "json", value: output as never }
   }
 
+  // norm: an owallet error reply waiting to be told to the model as a
+  // harness note on the next user message (see Norm.harnessNote).
+  let harnessNote: string | undefined
+
   for (const msg of input) {
     if (msg.parts.length === 0) continue
 
@@ -238,7 +243,11 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           })
         }
       }
-      if (userMessage.parts.length > 0) result.push(userMessage)
+      if (userMessage.parts.length > 0) {
+        if (harnessNote) userMessage.parts.unshift({ type: "text", text: harnessNote })
+        harnessNote = undefined
+        result.push(userMessage)
+      }
     }
 
     if (msg.info.role === "assistant") {
@@ -276,7 +285,13 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       })
       for (const part of msg.parts) {
         if (part.type === "text") {
-          const text = part.text === "" && hasSignedReasoning ? " " : part.text
+          // norm: owallet's error text is the harness speaking, not the model.
+          const split = Norm.splitOwalletError(part.text)
+          if (split.error) {
+            harnessNote = Norm.harnessNote(split.error)
+            if (!split.reply) continue
+          }
+          const text = split.reply === "" && hasSignedReasoning ? " " : split.reply
           assistantMessage.parts.push({
             type: "text",
             text,

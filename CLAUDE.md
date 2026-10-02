@@ -47,13 +47,27 @@ syncs stay cheap:
   `dialog-model.tsx`) shows list prices, or in a conversation "next ≈ $X"
   / "over your $1 limit" per model and a toast on a mid-conversation
   switch; the sidebar shows the next step's estimate.
-- **Compaction model** (`/compaction-model`,
-  `packages/core/src/norm-compaction.ts`): opencode compacts with the
-  conversation's own model by default. The choice is stored in norm's
-  data dir and applied by the norm plugin's `config` hook as
-  `agent.compaction.model` (`Norm.applyCompactionModel`) — the user's own
-  config wins, and a model the marketplace no longer lists is skipped. The
-  TUI reloads instances after a change so the hook re-runs.
+- **Housekeeping calls** — titles, compaction, summaries:
+  - Models: `/compaction-model` and `/title-model`
+    (`packages/core/src/norm-agent-models.ts`), stored in norm's data dir
+    and applied by the norm plugin's `config` hook as `agent.<name>.model`
+    (`Norm.applyAgentModels`). Compaction defaults to the conversation's
+    own model; titles to the marketplace's cheapest
+    (`NormPricing.cheapestForTitles`). The user's own config wins, a model
+    the marketplace no longer lists is skipped, and the TUI reloads
+    instances after a change so the hook re-runs. The same hook sets
+    norm's title prompt (`Norm.TITLE_PROMPT`).
+  - `chat.headers` sends `x-owallet-tools: none` for these agents
+    (`Norm.PLAIN_AGENTS`): a plain completion, without owallet's
+    server-side tool roster.
+  - Titles retry on each of the first `Norm.TITLE_ATTEMPTS` messages while
+    the title is the default (`session/prompt.ts`, upstream titles once).
+- **owallet errors in history**: owallet streams refusals/failures as reply
+  text (`[owallet error] …`), which opencode stores as an ordinary
+  assistant reply. `session/message-v2.ts` drops that text from what the
+  model sees and puts `Norm.harnessNote` (a `<system-reminder>`) on the
+  next user message instead — replayed as the model's own words, models
+  disowned it or took it for something the user wrote.
 - `src/session/system.ts` appends `Norm.systemPrompt()` to the system
   prompt for overpay-provider models — the inherited opencode prompts
   send capability questions to the opencode docs, but marketplace

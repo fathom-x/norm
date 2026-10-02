@@ -209,3 +209,23 @@ export function version(): number {
 export function get(id: string): Model | undefined {
   return known.get(id)
 }
+
+export function all(): Model[] {
+  return [...known.values()]
+}
+
+/**
+ * The cheapest model for a session title: a title call is ~2k tokens in
+ * and a few dozen out, ranked by that list price. Skips the `default`
+ * sentinel, `:free` variants (rate-limited, unreliable), retired models
+ * and windows too small for a long first message.
+ */
+export function cheapestForTitles(models: Model[]): Model | undefined {
+  const cost = (p: Pricing) => p.input * 2_000 + p.output * 60
+  return models
+    .filter(
+      (m): m is Model & { pricing: Pricing } =>
+        !!m.pricing && m.id !== "default" && !m.id.endsWith(":free") && m.active !== false && (m.contextLength ?? 0) >= 32_000,
+    )
+    .sort((a, b) => cost(a.pricing) - cost(b.pricing) || a.id.localeCompare(b.id))[0]
+}
