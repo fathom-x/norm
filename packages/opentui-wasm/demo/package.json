@@ -1,0 +1,22 @@
+{
+  "name": "opentui-wasm-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@xterm/xterm": "5.5.0",
+    "buffer": "6.0.3",
+    "entities": "7.0.1",
+    "events": "3.3.0",
+    "path-browserify": "1.0.1",
+    "solid-js": "1.9.12"
+  },
+  "devDependencies": {
+    "vite": "7.1.4",
+    "vite-plugin-solid": "2.11.10"
+  }
+}
