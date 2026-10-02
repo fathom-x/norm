@@ -37,16 +37,26 @@ pub fn run(words: u8) -> Result<()> {
     let address = Address::from_private_key(&sk);
     let npub = npub_from_private_key(&sk)?;
 
+    // Collect the per-wallet password (used to log into the web admin) *before
+    // anything is persisted*. Deriving the keys above touched only memory, so
+    // a failed or abandoned prompt here leaves the database exactly as it was.
+    // Persisting first — as this did until now — left a wallet in the DB, made
+    // it the default, and never displayed its seed phrase: an orphan wallet the
+    // user did not know existed and could not log into, since there is no way
+    // to add a wallet password after the fact.
+    let wallet_pw = if db.has_wallet_password(&npub)? {
+        None
+    } else {
+        Some(crate::password::read_new_wallet_password()?)
+    };
+
     db.write_wallet(&npub, &phrase, Some(&address.to_hex_lower()))?;
+    if let Some(pw) = wallet_pw {
+        db.write_wallet_password(&npub, pw.as_str())?;
+    }
     // First wallet becomes the default automatically.
     if db.read_default_npub()?.is_none() {
         db.write_default_npub(&npub)?;
-    }
-    // Set a per-wallet password (used to log into the web admin) unless one
-    // already exists — matches `generate` in wallet_mcp/cli.py.
-    if !db.has_wallet_password(&npub)? {
-        let wallet_pw = crate::password::read_new_wallet_password()?;
-        db.write_wallet_password(&npub, wallet_pw.as_str())?;
     }
     // Derive + cache the Orchard receive address (offline). The librustzcash
     // wallet DB itself is created lazily on the first `owallet sync`.

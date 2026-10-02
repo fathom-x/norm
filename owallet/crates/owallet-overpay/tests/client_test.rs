@@ -729,3 +729,15 @@ async fn to_public_url_no_rewrite_when_urls_match() {
     let s = "https://overpay.com/some/path";
     assert_eq!(client.to_public_url(s), s);
 }
+
+/// A delivered-file link must be on the marketplace's own origin; anything
+/// else in order data is refused rather than fetched.
+#[tokio::test]
+async fn fetch_delivered_content_refuses_a_foreign_host() {
+    let client = owallet_overpay::OverpayClient::new("https://overpay.example").unwrap();
+    let err = client
+        .fetch_delivered_content("https://attacker.example/rails/active_storage/blobs/redirect/x")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not this marketplace"), "{err}");
+}

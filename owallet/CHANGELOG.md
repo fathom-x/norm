@@ -4,6 +4,139 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### A per-message spending limit, and errors that say what to do
+
+- **`x-owallet-request-max-usd`**: the most any single order of the
+  request may authorize or cost (norm's `/budget` → "Per-message limit",
+  default $1). Each OpenRouter turn's authorization is sized within it — a
+  tight limit authorizes exactly the limit when the turn still fits — and
+  a turn that can't fit (its input plus the seller's minimal reply, or the
+  model's advertised minimum commitment) is refused **before any order is
+  placed**: "This message (about 40,013 tokens of context on X) needs at
+  least $0.15 — over your $0.10 per-message limit. Nothing was sent or
+  charged. Raise the limit (norm: /budget), start a fresh conversation, or
+  pick a cheaper model." A fixed-price tool purchase over the limit is
+  refused before it is paid.
+- The conversation budget (`x-owallet-spend-limit-usd`) now bounds turn
+  authorizations too, not only the wallet tools; the lower of the two
+  limits applies, and the refusal names which.
+- **Error codes.** `error.code` (was always null) is now
+  `request_limit_exceeded`, `authorization_too_low`, `budget_exhausted`,
+  `insufficient_credits` or `model_unavailable`, so clients can react
+  without parsing messages.
+- **Seller rejections read as such.** An `authorization_too_low`
+  rejection (fathom-x/overpay#473) becomes a limit error with the seller's
+  "needs at least $X" message plus how to proceed; `upstream_unavailable`
+  becomes `model_unavailable` with the seller's message ("No OpenRouter
+  provider can serve X within this request's authorization… Nothing was
+  charged"). Older sellers' error deliveries carrying the same
+  `reason_code` map the same way.
+
+### Keeping OpenRouter's prompt cache warm through `/v1`
+
+Synced from fathom-x/overpay#456 (the owallet side of overpay#445's notes).
+
+- **Cache counters in usage.** `usage.prompt_tokens_details` carries
+  OpenRouter's `cached_tokens` / `cache_write_tokens`, summed across a
+  request's orders — and only counts some order actually reported: absent
+  means unknown (the listing's rebuilt-from-generation usage has none), not
+  zero. `cached_tokens` is OpenAI's own field, so OpenAI-compatible clients
+  (the AI SDK, so norm) show cache reads with no change.
+- **Client cache markers survive.** `content` is no longer flattened: text
+  parts pass through with their `cache_control`, and a message-level
+  `cache_control` (how OpenAI-compatible clients mark single-text messages)
+  becomes a marked one-part array. At most 3 client markers are forwarded,
+  keeping the earliest — Anthropic allows 4 and the listing adds one on the
+  newest message. Text parts are no longer glued together with no
+  separator.
+- **`session_id` for sticky routing**, behind `OWALLET_V1_SESSION_ID=1`.
+  The client's conversation key — body `session_id`, then `x-session-id`,
+  then `prompt_cache_key` / `promptCacheKey` — becomes
+  `HMAC-SHA256(per-install secret, key)`, sent on every OpenRouter buyer
+  note of the request; never the raw key or a per-wallet constant. Without
+  a key: a random id for the server-side loop, nothing for passthrough.
+  `run_python` and listing-tool orders never carry it.
+- **Stable tool order.** Listing tools are sorted by name, so the tool
+  block that opens every prompt can't reorder between requests.
+
+Fixes from a live marketplace test session.
+
+### Long chat replies no longer fail after being paid for
+
+- Rails moves any `delivered_content` over 4 KB to object storage and
+  returns `delivered_content_url` in its place. `/v1` read only the inline
+  field, so every turn whose reply passed ~4 KB failed with `[owallet error]
+  order has no delivered_content` — already charged, reply lost. Every
+  `/v1` order poll — including one-shot tool executions — now goes through
+  `get_order_resolved`, which downloads the signed file back inline (no
+  credentials, marketplace origin only). This also restores the metered
+  `charged_cents` settlement for those turns, and a failed order reports
+  the seller's reason instead of the missing deliverable.
+
+### One-shot purchases never lose a paid order
+
+- A one-shot tool (`run_python` / `provider_tool` listings) whose seller
+  stalls now returns the paid order as a pending result — `order_id`,
+  statuses, `charged_cents`, "do not buy again", and a `wait_for_order`
+  hint — instead of an error without the order id.
+- On `/mcp`, in-flight polls emit `notifications/progress`, which resets
+  the MCP client's request timeout (opencode's 60s tripped on a silent
+  120s poll and dropped the result). A client that didn't opt into
+  progress gets the pending result at 50s, before its own timeout.
+- One-shot results render readably: JSON deliverables decoded instead of
+  double-encoded, `run_python` as exit code + stdout/stderr, followed by
+  an `order_id: …` line and what it charged.
+- Image (and other binary) deliveries succeed: a paid `generate_image`
+  failed with `delivered content: file is not UTF-8 text` although the
+  seller had delivered a valid PNG. A file delivery now comes back as
+  `delivered_content_url` + `delivered_content_type` +
+  `delivered_content_bytes` ("Delivered a file (image/png, 1.0 MB)" and
+  the download link); binary media types aren't downloaded at all.
+- A one-shot order that was paid but whose result then couldn't be read
+  returns its `order_id`, the charge, and "do not buy again" rather than
+  a bare error.
+
+### Compatible with Overpay's metered pricing (overpay#458-#466)
+
+- **Long OpenRouter turns are authorized for what they need.** The
+  listing's price is now a per-turn *authorization*, and the seller's
+  exposure guard refuses a turn whose authorization can't cover its input
+  plus output ("needs an authorization of at least N¢") — which a long
+  agent conversation reaches on any model, sooner on premium ones. Every
+  OpenRouter turn now sizes itself from the model variant's published
+  rate card (the guard's own arithmetic: input at its tier, an 8192-token
+  output allowance or the request's smaller `max_tokens`, plus markup)
+  and, when that exceeds the default, creates and pays the order in one
+  request with `authorization_cents`. The unused hold comes back as
+  credits as before. If credits can't cover the larger hold the turn is
+  placed the old way, so a low balance never loses a turn that fits.
+- **`rejected` is a terminal order state.** A seller's refusal of a paid
+  order (credits released in full) used to be polled until the timeout;
+  it now ends the wait, and the error/next step carries the `rejection`
+  reason and, for `authorization_too_low`, the authorization that would
+  have been enough. Order projections keep `rejection` (field by field).
+- **Status filters are Rails's to validate** (overpay#466 answers an
+  unknown value with a 422 naming the allowed ones), so the order tools no
+  longer carry a hardcoded copy of the enums — that copy was already
+  missing `rejected`.
+- **Free orders pay through `pay_order`** again: Rails now settles a $0.00
+  order via the normal redemption, so the client-side "free order"
+  short-circuit is gone.
+- File deliveries take their size from Rails's
+  `delivered_content_byte_size` when the download doesn't state one.
+
+### Prices, amounts, and schemas visible to the model
+
+- `list_marketplace` / `get_listing` showed `Price: —` for every listing:
+  Rails sends `price_usd` as a formatted string, which the renderer
+  ignored. Prices render from `price_usd` or `price_cents` (sub-cent aware).
+- Orders show their amount (and a metered order's settled charge) and
+  product title; projections keep `price_cents` / `total_usd_cents`.
+- `get_listing` renders the buyer_note_schema's fields (type, required,
+  enum, default, description) in the text — it was only in
+  `structuredContent`, which the model never reads.
+- Listings sold through a one-shot tool are marked with its name.
+
 ## 0.1.10
 
 ### `overpay_connected` in `GET /v1/status`

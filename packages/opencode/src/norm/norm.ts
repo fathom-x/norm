@@ -590,7 +590,13 @@ export async function firstRunWalletSetup(
   if (!process.stdin.isTTY || !process.stdout.isTTY) return
   if (!(await needsWalletSetup())) return
   const bin = (await owalletBinary())!
-  if (bin === bundledOwalletPath()) return autoWalletSetup(bin, askSecret)
+  // Inside a NORM_HOME sandbox every wallet is throwaway and the binary is
+  // picked without prompting, so the zero-question path applies even when the
+  // binary came from PATH rather than <NORM_HOME>/bin. Without this, pointing
+  // NORM_HOME at an empty directory silently exercises the *interactive*
+  // first-run instead of the one real users get — a sandbox that quietly
+  // tests the wrong code path is worse than no sandbox.
+  if (bin === bundledOwalletPath() || normHome()) return autoWalletSetup(bin, askSecret)
   process.stderr.write(
     [
       "",
@@ -676,53 +682,58 @@ export async function firstRunWalletSetup(
 }
 
 /**
- * With no default password, a launch without OWALLET_PASSWORD exported
- * cannot start `owallet serve` or mint provider keys — the session would
- * open with the overpay provider dead and only a NORM_DEBUG note saying
- * why. So when the wallet exists but the password isn't in the
- * environment and no serve is already answering, ask for it at the
- * terminal (before the TUI owns it). The answer is validated by a
- * read-only `owallet provider-key list` (unlocks the DB, touches
- * nothing), kept in this process's env only — never persisted — and
- * Enter skips for people who run `owallet serve` themselves.
+ * The launch password gate: with a wallet present, starting norm REQUIRES
+ * the wallet admin password unless OWALLET_PASSWORD is exported. Earlier
+ * versions skipped the prompt whenever a serve was already answering (a
+ * detached serve survives norm exiting) or the legacy default-password
+ * marker restored "norm" silently — both made norm open without ever
+ * asking, which defeats requiring a password at all. Now the prompt fires
+ * on every TTY launch: validated by a read-only `owallet provider-key
+ * list` (unlocks the DB directly, running serve or not, touches nothing),
+ * kept in this process's env only — never persisted. Three failures exit.
+ * Non-TTY launches can't prompt and keep the old behavior via
+ * `applyAutoSetupPassword` in the bootstrap.
  */
 export async function ensureServePassword(askSecret: (prompt: string) => Promise<string>): Promise<void> {
   if (disabled()) return
   applySandboxEnv()
   if (!process.stdin.isTTY || !process.stdout.isTTY) return
-  await applyAutoSetupPassword().catch(() => {})
   if (process.env.OWALLET_PASSWORD) return
   if (!existsSync(owalletDbPath())) return
   const bin = await owalletBinary()
   if (!bin) return
-  // A serve that's already answering needs no password from us.
-  if (await probe(owalletUrl())) return
+  const legacyDefault = await readAutoSetupDefaultPassword().catch(() => false)
   process.stderr.write(
-    "\nnorm starts the owallet server for you, which needs the wallet admin\n" +
-      "password (export OWALLET_PASSWORD in your shell profile to skip this\n" +
-      "prompt).\n",
+    "\nnorm needs the wallet admin password to start (export OWALLET_PASSWORD\n" +
+      "in your shell profile to skip this prompt).\n" +
+      (legacyDefault
+        ? `This wallet was auto-created by an earlier norm under the default\n` +
+          `password ("${DEFAULT_OWALLET_PASSWORD}").\n`
+        : ""),
   )
   let lastError = ""
   for (let attempt = 0; attempt < 3; attempt++) {
-    const password = await askSecret("Wallet admin password (Enter to skip): ")
-    if (!password) {
-      process.stderr.write("Skipping — export OWALLET_PASSWORD or run `owallet serve` yourself.\n")
-      return
+    const password = await askSecret("Wallet admin password: ")
+    if (password) {
+      const result = await runQuiet(bin, ["provider-key", "list"], {
+        ...process.env,
+        OWALLET_PASSWORD: password,
+      })
+      if (result.code === 0) {
+        process.env.OWALLET_PASSWORD = password
+        return
+      }
+      lastError = result.stderr.trim()
     }
-    const result = await runQuiet(bin, ["provider-key", "list"], {
-      ...process.env,
-      OWALLET_PASSWORD: password,
-    })
-    if (result.code === 0) {
-      process.env.OWALLET_PASSWORD = password
-      return
-    }
-    lastError = result.stderr.trim()
-    process.stderr.write("That password didn't unlock the wallet database — try again.\n")
+    process.stderr.write(
+      password ? "That password didn't unlock the wallet database — try again.\n" : "Password cannot be empty.\n",
+    )
   }
   process.stderr.write(
-    `Giving up${lastError ? ` (${lastError})` : ""} — export OWALLET_PASSWORD or run \`owallet serve\` yourself.\n`,
+    `Wrong wallet admin password${lastError ? ` (${lastError})` : ""}.\n` +
+      "Set NORM_DISABLE=1 to run norm without the wallet.\n",
   )
+  process.exit(1)
 }
 
 /**
@@ -1269,4 +1280,32 @@ export async function bootstrap(): Promise<void> {
   await ensureProviderKey().catch((error) => {
     debug("provider key provisioning failed:", error)
   })
+  await noteSetupIncomplete().catch(() => {})
+}
+
+/**
+ * First-run setup (wallet creation, the Overpay connect) is driven from the TUI
+ * command, before it takes the screen — it needs a terminal to prompt on. Every
+ * other entry point (`norm run`, `norm serve`, acp, github) skips it silently
+ * and, with no wallet or no Overpay link, fails later with a bare provider
+ * error that names neither cause nor cure. Say it once here instead. Only a
+ * note: these paths deliberately never prompt.
+ */
+async function noteSetupIncomplete(): Promise<void> {
+  // The interactive launch path prompts for all of this itself, so saying it
+  // there would just be noise ahead of the real prompt.
+  if (process.stdin.isTTY && process.stdout.isTTY) return
+  if (await needsWalletSetup()) {
+    process.stderr.write(
+      "[norm] no owallet wallet yet — run `norm` once (interactively) to set one up,\n" +
+        "       or `owallet init` and `owallet generate` yourself.\n",
+    )
+    return
+  }
+  if ((await readOverpayAuthorized()) === false) {
+    process.stderr.write(
+      "[norm] this wallet is not linked to an Overpay account yet, so the overpay\n" +
+        "       provider will reject requests — run `owallet authorize` (or launch `norm`).\n",
+    )
+  }
 }

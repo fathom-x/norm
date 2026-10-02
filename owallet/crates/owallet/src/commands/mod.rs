@@ -12,6 +12,7 @@ mod install;
 mod list;
 mod login;
 mod overpay;
+mod password;
 mod provider_key;
 mod select;
 mod send;
@@ -113,6 +114,9 @@ pub fn dispatch(args: Cli) -> Result<()> {
             zec_birthday,
         } => import::run(mnemonic, private_key, zec_birthday),
         Command::Select { identifier } => select::run(identifier),
+        Command::Password { what } => match what {
+            crate::cli::PasswordWhat::Set { npub } => password::run(npub),
+        },
         Command::Export { what } => export::run(what),
         Command::Authorize => authorize::run(),
         Command::Login => login::run(),
