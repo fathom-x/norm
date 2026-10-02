@@ -56,7 +56,6 @@ import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
-import { useLocation } from "../../context/location"
 
 registerOpencodeSpinner()
 
@@ -149,7 +148,6 @@ export function Prompt(props: PromptProps) {
   const local = useLocal()
   const args = useArgs()
   const paths = useTuiPaths()
-  const location = useLocation()
   const terminalEnvironment = useTuiTerminalEnvironment()
   const clipboard = useClipboard()
   const sdk = useSDK()
@@ -1345,6 +1343,49 @@ export function Prompt(props: PromptProps) {
   const maxHeight = createMemo(() => tuiConfig.prompt?.max_height ?? Math.max(6, Math.floor(dimensions().height / 3)))
   const moveLabelWidth = createMemo(() => Math.max(12, Math.min(44, dimensions().width - 48)))
 
+  // norm: agent · model · provider lives in the hints row under the input
+  // (upstream gives it a row of its own inside the input panel), so the
+  // textarea sits on the third row from the bottom.
+  const Meta = () => (
+    <box flexDirection="row" gap={1} flexShrink={1} height={1} overflow="hidden">
+      <Show when={local.agent.current()} fallback={<box height={1} />}>
+        {(agent) => (
+          <>
+            <text flexShrink={0} wrapMode="none" fg={fadeColor(highlight(), agentMetaAlpha())}>
+              {store.mode === "shell" ? "Shell" : Locale.titlecase(agent().name)}
+            </text>
+            <Show when={store.mode === "normal" && local.permission.mode === "auto"}>
+              <text fg={fadeColor(theme.textMuted, agentMetaAlpha())}>auto</text>
+            </Show>
+            <Show when={store.mode === "normal"}>
+              <box flexDirection="row" gap={1} flexShrink={1} overflow="hidden">
+                <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
+                <text
+                  flexShrink={0}
+                  wrapMode="none"
+                  fg={fadeColor(leader() ? theme.textMuted : theme.text, modelMetaAlpha())}
+                >
+                  {local.model.parsed().model}
+                </text>
+                <text wrapMode="none" fg={fadeColor(theme.textMuted, modelMetaAlpha())}>
+                  {currentProviderLabel()}
+                </text>
+                <Show when={showVariant()}>
+                  <text fg={fadeColor(theme.textMuted, variantMetaAlpha())}>·</text>
+                  <text>
+                    <span style={{ fg: fadeColor(theme.warning, variantMetaAlpha()), bold: true }}>
+                      {local.model.variant.current()}
+                    </span>
+                  </text>
+                </Show>
+              </box>
+            </Show>
+          </>
+        )}
+      </Show>
+    </box>
+  )
+
   return (
     <>
       <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
@@ -1441,47 +1482,6 @@ export function Prompt(props: PromptProps) {
               cursorStyle={tuiConfig.cursor}
               syntaxStyle={syntax()}
             />
-            <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
-              <box flexDirection="row" gap={1}>
-                <Show when={local.agent.current()} fallback={<box height={1} />}>
-                  {(agent) => (
-                    <>
-                      <text fg={fadeColor(highlight(), agentMetaAlpha())}>
-                        {store.mode === "shell" ? "Shell" : Locale.titlecase(agent().name)}
-                      </text>
-                      <Show when={store.mode === "normal" && local.permission.mode === "auto"}>
-                        <text fg={fadeColor(theme.textMuted, agentMetaAlpha())}>auto</text>
-                      </Show>
-                      <Show when={store.mode === "normal"}>
-                        <box flexDirection="row" gap={1}>
-                          <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
-                          <text
-                            flexShrink={0}
-                            fg={fadeColor(leader() ? theme.textMuted : theme.text, modelMetaAlpha())}
-                          >
-                            {local.model.parsed().model}
-                          </text>
-                          <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>{currentProviderLabel()}</text>
-                          <Show when={showVariant()}>
-                            <text fg={fadeColor(theme.textMuted, variantMetaAlpha())}>·</text>
-                            <text>
-                              <span style={{ fg: fadeColor(theme.warning, variantMetaAlpha()), bold: true }}>
-                                {local.model.variant.current()}
-                              </span>
-                            </text>
-                          </Show>
-                        </box>
-                      </Show>
-                    </>
-                  )}
-                </Show>
-              </box>
-              <Show when={hasRightContent()}>
-                <box flexDirection="row" gap={1} alignItems="center">
-                  {props.right}
-                </box>
-              </Show>
-            </box>
           </box>
         </box>
         <box
@@ -1510,7 +1510,7 @@ export function Prompt(props: PromptProps) {
             }
           />
         </box>
-        <box width="100%" flexDirection="row" justifyContent="space-between">
+        <box width="100%" flexDirection="row" justifyContent="space-between" gap={2}>
           <Switch>
             <Match when={status().type !== "idle"}>
               <box
@@ -1575,7 +1575,7 @@ export function Prompt(props: PromptProps) {
                       }
 
                       return (
-                        <Show when={retry()}>
+                        <Show when={retry()} fallback={<Meta />}>
                           <box onMouseUp={handleMessageClick}>
                             <text fg={theme.error}>{retryText()}</text>
                           </box>
@@ -1644,16 +1644,19 @@ export function Prompt(props: PromptProps) {
             </Match>
             <Match when={true}>
               {props.hint ?? (
-                <Show when={props.sessionID}>
-                  <box marginLeft={1}>
-                    <text fg={theme.textMuted}>{location()?.directory ?? paths.cwd}</text>
-                  </box>
-                </Show>
+                <box marginLeft={1} flexShrink={1}>
+                  <Meta />
+                </box>
               )}
             </Match>
           </Switch>
           <Show when={status().type !== "retry"}>
-            <box gap={2} flexDirection="row">
+            <box gap={2} flexDirection="row" flexShrink={0}>
+              <Show when={hasRightContent()}>
+                <box flexDirection="row" gap={1} alignItems="center">
+                  {props.right}
+                </box>
+              </Show>
               <Show when={editorContextLabelState() !== "none" ? editorFileLabelDisplay() : undefined}>
                 {(file) => (
                   <text fg={editorContextLabelState() === "pending" ? theme.secondary : theme.textMuted}>{file()}</text>

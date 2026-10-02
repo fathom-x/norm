@@ -3,11 +3,13 @@ import { useSync } from "../../context/sync"
 import { createMemo, Show } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useTuiConfig } from "../../config"
-import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { usePluginRuntime } from "../../plugin/runtime"
 
 import { getScrollAcceleration } from "../../util/scroll"
 import { WorkspaceLabel } from "../../component/workspace-label"
+import { abbreviateHome } from "../../runtime"
+import { useTuiPaths } from "../../context/runtime"
 
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const pluginRuntime = usePluginRuntime()
@@ -22,6 +24,15 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
     return project.workspace.get(workspaceID)
   }
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
+  const paths = useTuiPaths()
+  // norm: the working directory (with branch) under the title, where
+  // upstream shows the session id; the prompt's hints row no longer has it.
+  const directory = createMemo(() => {
+    const dir = session()?.directory || sync.path.directory || paths.cwd
+    const out = abbreviateHome(dir, paths.home)
+    const branch = session()?.directory === sync.path.directory ? sync.data.vcs?.branch : undefined
+    return branch ? out + ":" + branch : out
+  })
 
   return (
     <Show when={session()}>
@@ -30,7 +41,6 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
         width={42}
         height="100%"
         paddingTop={1}
-        paddingBottom={1}
         paddingLeft={2}
         paddingRight={2}
         position={props.overlay ? "absolute" : "relative"}
@@ -57,9 +67,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 <text fg={theme.text}>
                   <b>{session()!.title}</b>
                 </text>
-                <Show when={InstallationChannel !== "latest"}>
-                  <text fg={theme.textMuted}>{props.sessionID}</text>
-                </Show>
+                <text fg={theme.textMuted}>{directory()}</text>
                 <Show when={session()!.workspaceID}>
                   <text fg={theme.textMuted}>
                     <Show

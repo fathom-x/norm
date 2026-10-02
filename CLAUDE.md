@@ -86,6 +86,15 @@ syncs stay cheap:
   arithmetic. Without these the sidebar reads `$0.00 spent` for turns
   that spent real money.
 
+- **Compact session layout** (TUI): the session column has no side or
+  bottom padding, "agent · model · provider" moved from its own row in
+  the input panel into the hints row below it (replacing the cwd), so the
+  textarea starts on the third row from the bottom, and the sidebar shows
+  the working directory (with branch) under the title instead of the
+  session id. Edits: `tui/src/component/prompt/index.tsx` (`Meta`),
+  `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
+  `feature-plugins/sidebar/footer.tsx` — expect conflicts there on syncs.
+
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until
