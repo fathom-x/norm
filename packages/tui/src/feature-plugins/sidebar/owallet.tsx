@@ -55,6 +55,9 @@ function owalletEnvFlag() {
 }
 
 function owalletUrl() {
+  // The browser build: owallet is a wasm module behind the page's fetch
+  // router (norm.ts's NormHost.BROWSER_OWALLET_URL), whatever NORM_HOME says.
+  if (process.env.NORM_RUNTIME === "browser") return "http://owallet.internal"
   // A NORM_HOME sandbox is absolute: its own port, ambient NORM_OWALLET_URL
   // ignored (norm.ts prints the notice).
   const root = normHome()

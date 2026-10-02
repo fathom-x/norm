@@ -9,6 +9,7 @@ import { Global } from "@opencode-ai/core/global"
 import { NormBudget } from "@opencode-ai/core/norm-budget"
 import { NormPricing } from "@opencode-ai/core/norm-pricing"
 import { NormAgentModels } from "@opencode-ai/core/norm-agent-models"
+import { NormHost } from "./host"
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 
 // norm is opencode preconfigured for the Overpay owallet-marketplace stack:
@@ -151,6 +152,9 @@ export function applySandboxEnv(): void {
  * ignored override on stderr.
  */
 export function owalletUrl() {
+  // The browser build has no ports: owallet is a wasm module behind the
+  // page's fetch router (NormHost), whatever NORM_HOME says.
+  if (NormHost.isBrowser()) return NormHost.BROWSER_OWALLET_URL
   const root = normHome()
   if (root) return `http://127.0.0.1:${sandboxPort(root)}`
   if (process.env.NORM_OWALLET_URL) return process.env.NORM_OWALLET_URL.replace(/\/+$/, "")
@@ -176,7 +180,14 @@ export function defaults(): ConfigV1.Info {
       },
     },
     mcp: {
-      [MCP_NAME]: { type: "remote", url: `${base}/mcp`, enabled: true },
+      [MCP_NAME]: {
+        type: "remote",
+        url: `${base}/mcp`,
+        enabled: true,
+        // The browser build authenticates /mcp with the provider key only;
+        // MCP OAuth needs a localhost callback listener it cannot open.
+        ...(NormHost.isBrowser() && { oauth: false }),
+      },
     },
   } as ConfigV1.Info
 }
@@ -882,7 +893,9 @@ export function systemPrompt(): string {
     "  tier-1 free; its one-shot marketplace purchase tools are tier 3.",
     "- Wallet addresses (deposit addresses, account numbers, tx hashes) are",
     "  deliberately never shown to you — they appear only on the owallet",
-    `  dashboard (${owalletUrl()}/wallet), which the user opens in their own browser. When the user`,
+    NormHost.isBrowser()
+      ? "  wallet panel of the page norm is running in, which the user opens themselves. When the user"
+      : `  dashboard (${owalletUrl()}/wallet), which the user opens in their own browser. When the user`,
     "  asks where to send funds, say so up front and point them at the",
     "  dashboard; to top up marketplace credits in chat, load_core_credits",
     "  returns a Lightning invoice they can pay from any Lightning wallet.",
@@ -1250,6 +1263,28 @@ async function ensureServer(base: string): Promise<boolean> {
   return false
 }
 
+/** Today's owallet: a local `owallet serve` process plus CLI calls. */
+const processHost: NormHost.OwalletHost = {
+  kind: "process",
+  ensureServer,
+  async mintBlocker() {
+    if (!(await owalletBinary())) return "owallet binary not found"
+    if (!existsSync(owalletDbPath())) return "no owallet wallet database yet"
+    if (!process.env.OWALLET_PASSWORD)
+      return "cannot mint an overpay provider key: OWALLET_PASSWORD unset — paste one via `norm auth login`"
+    return undefined
+  },
+  async mintProviderKey(input) {
+    const bin = await owalletBinary()
+    return bin ? mintProviderKey(bin, input) : undefined
+  },
+}
+
+/** The owallet norm talks to in this runtime (see NormHost). */
+export function host(): NormHost.OwalletHost {
+  return NormHost.isBrowser() ? NormHost.wasmHost(debug) : processHost
+}
+
 /** Records which key norm minted, so it only ever replaces its own. */
 function keyMarkerFile() {
   return path.join(Global.Path.data, "overpay-key.json")
@@ -1267,7 +1302,7 @@ function keyFingerprint(key: string) {
  * limits sit on top of that (`/budget`, sent per request). The mint opens the
  * encrypted DB directly (no server needed): binary, DB and OWALLET_PASSWORD.
  */
-async function mintProviderKey(bin: string): Promise<string | undefined> {
+async function mintProviderKey(bin: string, input: NormHost.MintInput): Promise<string | undefined> {
   const stdout = await new Promise<string | undefined>((resolve) => {
     execFile(
       bin,
@@ -1275,10 +1310,10 @@ async function mintProviderKey(bin: string): Promise<string | undefined> {
         "provider-key",
         "create",
         "--label",
-        "norm",
-        "--spend",
+        input.label,
+        ...(input.spend ? ["--spend"] : []),
         "--budget-usd",
-        String(NormBudget.DEFAULT_DAILY_BUDGET_USD),
+        String(input.budgetUsd),
         "--json",
       ],
       { env: process.env, timeout: 30_000 },
@@ -1348,15 +1383,18 @@ async function ensureProviderKey(): Promise<void> {
     if ((await keyCanSpend(existing)) !== false) return
   }
 
-  const bin = await owalletBinary()
-  if (!bin) return
-  if (!existsSync(owalletDbPath())) return
-  if (!process.env.OWALLET_PASSWORD) {
-    debug("cannot mint an overpay provider key: OWALLET_PASSWORD unset — paste one via `norm auth login`")
+  const owallet = host()
+  const blocker = await owallet.mintBlocker()
+  if (blocker) {
+    debug(blocker)
     return
   }
 
-  const key = await mintProviderKey(bin)
+  const key = await owallet.mintProviderKey({
+    label: "norm",
+    spend: true,
+    budgetUsd: NormBudget.DEFAULT_DAILY_BUDGET_USD,
+  })
   if (!key) return
   store[PROVIDER_ID] = { type: "api", key }
   await fs.writeFile(file, JSON.stringify(store, null, 2), { mode: 0o600 })
@@ -1400,6 +1438,15 @@ export function sessionAccess(client: any): NormBudget.SessionAccess {
  */
 export async function bootstrap(): Promise<void> {
   if (disabled()) return
+  if (NormHost.isBrowser()) {
+    // No processes, sandbox dirs or terminal to prompt on: the page's setup
+    // screen has already created/unlocked the wallet (or will — the key is
+    // minted on the next bootstrap after it does).
+    const owallet = host()
+    await owallet.ensureServer(owalletUrl()).catch((error) => debug("owallet-web check failed:", error))
+    await ensureProviderKey().catch((error) => debug("provider key provisioning failed:", error))
+    return
+  }
   applySandboxEnv()
   const sandbox = normHome()
   if (sandbox) {
@@ -1410,7 +1457,7 @@ export async function bootstrap(): Promise<void> {
     )
   }
   await applyAutoSetupPassword().catch(() => {})
-  await ensureServer(owalletUrl()).catch((error) => {
+  await processHost.ensureServer(owalletUrl()).catch((error) => {
     debug("owallet auto-start failed:", error)
     return false
   })
