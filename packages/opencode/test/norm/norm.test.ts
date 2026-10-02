@@ -184,6 +184,25 @@ test("system prompt addendum rides overpay models only", async () => {
   expect(SystemPrompt.provider(overpay).some((part) => part.includes("Overpay marketplace"))).toBe(false)
 })
 
+// Claims a live session caught the prompt making falsely: that attached tools
+// are the whole marketplace, that every read carries as_of, and silence on
+// where deposit addresses live.
+test("system prompt describes the catalog, addresses and paid-call retries honestly", () => {
+  process.env.NORM_OWALLET_URL = "http://127.0.0.1:9999"
+  try {
+    const prompt = Norm.systemPrompt()
+    expect(prompt).toContain("list_marketplace")
+    expect(prompt).toContain("create_order → pay_order → wait_for_order")
+    expect(prompt).not.toContain("authoritative list of marketplace capabilities")
+    expect(prompt).not.toContain("each carries an as_of")
+    expect(prompt).toContain("http://127.0.0.1:9999/wallet")
+    expect(prompt).toContain("load_core_credits")
+    expect(prompt).toContain("never re-buy")
+  } finally {
+    delete process.env.NORM_OWALLET_URL
+  }
+})
+
 test("NORM_HOME moves the wallet db, the bundled binary and the serve port", async () => {
   const sandbox = path.join(home, "sandbox")
   const outside = Norm.owalletUrl()

@@ -488,6 +488,43 @@ describe("norm defaults", () => {
     },
   )
 
+  it.instance("allows only the overpay provider", () =>
+    withNorm(
+      Effect.gen(function* () {
+        const config = yield* Config.use.get()
+        expect(config.enabled_providers).toEqual(["overpay"])
+      }),
+    ),
+  )
+
+  it.instance(
+    "project config cannot re-enable other providers or disable overpay",
+    withNorm(
+      Effect.gen(function* () {
+        const config = yield* Config.use.get()
+        expect(config.enabled_providers).toEqual(["overpay"])
+        expect(config.disabled_providers).toEqual(["anthropic"])
+      }),
+    ),
+    {
+      config: {
+        enabled_providers: ["opencode", "anthropic", "overpay"],
+        disabled_providers: ["overpay", "anthropic"],
+      },
+    },
+  )
+
+  it.instance("NORM_DISABLE=1 lifts the provider restriction", () =>
+    withProcessEnv(
+      "NORM_DISABLE",
+      "1",
+      Effect.gen(function* () {
+        const config = yield* Config.use.get()
+        expect(config.enabled_providers).toBeUndefined()
+      }),
+    ),
+  )
+
   it.instance("NORM_DISABLE=1 turns the defaults off", () =>
     withProcessEnv(
       "NORM_DISABLE",

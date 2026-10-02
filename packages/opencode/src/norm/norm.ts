@@ -180,6 +180,23 @@ export function defaults(): ConfigV1.Info {
   } as ConfigV1.Info
 }
 
+/**
+ * norm ships with exactly one AI provider: Overpay. Unlike `defaults()`, this
+ * is not a default — it is applied *after* every config source has merged
+ * (global, project, env, managed preferences), so no `opencode.json` can add
+ * another provider back. Without it the picker also lists every provider
+ * opencode knows about — notably OpenCode Zen, which is free and needs no
+ * login, so it shows up for every user and routes around the marketplace
+ * entirely. `NORM_DISABLE=1` turns the whole norm layer off, and this with it.
+ */
+export function enforceProviders(config: ConfigV1.Info): void {
+  config.enabled_providers = [PROVIDER_ID]
+  // A leftover `disabled_providers: ["overpay"]` would leave no provider at all.
+  if (config.disabled_providers) {
+    config.disabled_providers = config.disabled_providers.filter((id) => id !== PROVIDER_ID)
+  }
+}
+
 // $HOME first (matching the install script and owallet itself), os.homedir()
 // as the fallback — the env var also keeps this testable, since bun caches
 // os.homedir() at process start.
@@ -787,20 +804,30 @@ export function systemPrompt(): string {
     "execution, web fetch, image generation, and whatever else is currently",
     "listed).",
     "",
-    "- The authoritative list of marketplace capabilities is the set of tools",
-    "  attached to your request by the wallet — NOT the opencode docs.",
-    "  https://opencode.ai documents only the client (TUI, config, keybinds).",
-    "  When asked what you can do on this provider, answer from your attached",
-    "  tools; do not fetch opencode docs for that.",
+    "- Marketplace capabilities come from the wallet, NOT the opencode docs.",
+    "  https://opencode.ai documents only the client (TUI, config, keybinds);",
+    "  do not fetch it to answer what you can do on this provider. There are",
+    "  two ways to buy from a listing, and the attached tools are only the",
+    "  first:",
+    "  1. One-shot tools (run_python, forecast, web_fetch, …): a listing gets",
+    "     one when its seller marks it as a tool. One call = order + pay +",
+    "     wait + result.",
+    "  2. Every listing, tool or not: find it with list_marketplace (listings",
+    "     with a tool are marked there), read its price and buyer_note fields",
+    "     with get_listing, then create_order → pay_order → wait_for_order.",
+    "  So the full catalog is what list_marketplace returns, not the tool list.",
+    "- A paid call that times out or errors after payment may still complete:",
+    "  never re-buy to retry. Find the order (its id is in the result, or",
+    "  check get_wallet_orders) and follow it with wait_for_order.",
     "- Costs fall into three tiers — treat them differently:",
     "  1. Free reads: wallet, order, and marketplace lookups (account info,",
     "     balances, order status, browsing/fetching listings, purchase",
     "     history). These place no order and bill nothing — never hesitate to",
     "     re-check them, and prefer a fresh read of volatile state: balances,",
-    "     budgets, and order statuses change with every order, and results in",
-    "     earlier turns are stale (each carries an as_of timestamp). When the",
-    "     user asks for current values, call the tool again; never answer",
-    "     from a previous tool result.",
+    "     budgets, and order statuses change with every order, so results in",
+    "     earlier turns are stale (where a result has an as_of timestamp, it",
+    "     says when it was read). When the user asks for current values, call",
+    "     the tool again; never answer from a previous tool result.",
     "  2. Free calls that move real money: creating/paying orders, buying",
     "     credits, and on-chain sends. The call itself is not billed, but it",
     "     spends or transfers the user's funds — be deliberate and confirm",
@@ -817,6 +844,12 @@ export function systemPrompt(): string {
     "- The `owallet` MCP server is also attached client-side for wallet",
     "  operations (balances, orders, marketplace browsing) — its reads are",
     "  tier-1 free; its one-shot marketplace purchase tools are tier 3.",
+    "- Wallet addresses (deposit addresses, account numbers, tx hashes) are",
+    "  deliberately never shown to you — they appear only on the owallet",
+    `  dashboard (${owalletUrl()}/wallet), which the user opens in their own browser. When the user`,
+    "  asks where to send funds, say so up front and point them at the",
+    "  dashboard; to top up marketplace credits in chat, load_core_credits",
+    "  returns a Lightning invoice they can pay from any Lightning wallet.",
   ].join("\n")
 }
 
