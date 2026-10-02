@@ -1,0 +1,10 @@
+# Upstream pin for the opentui wasm patch set (read by scripts/build.sh).
+# The commit is the one tagged v0.4.5 (the release @opentui/core@0.4.5 was
+# published from); norm pins @opentui/* to 0.4.5 in the root catalog.
+OPENTUI_REPO=https://github.com/anomalyco/opentui
+OPENTUI_TAG=v0.4.5
+OPENTUI_COMMIT=0c8c4f7cff2927e3df63a9757a45eff9a343611c
+# packages/core/src/zig/build.zig.zon minimum_zig_version and CI ZIG_VERSION.
+ZIG_VERSION=0.15.2
+# Dependency patched in addition to opentui itself (bundled into the core dist).
+BUN_FFI_STRUCTS_VERSION=0.2.4

@@ -1,0 +1,14 @@
+{
+  "name": "@norm/opentui-wasm",
+  "version": "0.0.0",
+  "private": true,
+  "description": "opentui on a wasm32-wasi core: patch set, build, browser shims, demo and test",
+  "type": "module",
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "demo": "cd demo && npm install --no-audit --no-fund && npx vite build && npx vite preview --port 4173",
+    "demo:dev": "cd demo && npx vite",
+    "test": "cd demo && npm install --no-audit --no-fund && npx vite build && cd .. && node test/demo.test.mjs",
+    "test:bun-wasm": "cd .work/opentui/packages/core && OPENTUI_BACKEND=wasm bun test"
+  }
+}

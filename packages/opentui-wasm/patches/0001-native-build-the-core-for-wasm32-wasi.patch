@@ -1,0 +1,692 @@
+From 3a4c9e5be7f17b5c24c532faf1bad37d9bed55b0 Mon Sep 17 00:00:00 2001
+From: norm wasm <blake@comatri.com>
+Date: Fri, 2 Oct 2026 23:52:47 +0000
+Subject: [PATCH 1/2] native: build the core for wasm32-wasi
+
+zig build -Dtarget=wasm32-wasi produces lib/wasm32-wasi/opentui.wasm, a
+WASI reactor module exporting every FFI symbol plus its function table.
+
+- miniaudio is compiled out on wasm (audio-stub.zig reports no device)
+- single-threaded: BufferedBackend never spawns its render thread
+- yoga builds with -fno-exceptions -fno-rtti
+- fixed-size linear memory (initial == max, -Dwasm-memory-mb, default
+  256): JS keeps long-lived typed-array views over native buffers and
+  memory.grow would detach them; page_allocator is routed through libc
+  malloc, which carves the preallocated heap
+- opentuiWasmAlloc/opentuiWasmFree for staging JS buffers
+- StyledChunk.text_len/link_len and ExternalCapabilities.term_*_len are
+  u64 to match the JS struct definitions on 32-bit targets (unchanged on
+  64-bit hosts)
+- text buffers copy borrowed (owned=false) memory on wasm, since JS
+  buffers only reach linear memory as short-lived staged copies
+- loadFile's u64 file size is cast to usize
+---
+ packages/core/src/zig/audio-stub.zig      | 331 ++++++++++++++++++++++
+ packages/core/src/zig/build.zig           |  66 ++++-
+ packages/core/src/zig/lib.zig             |  38 ++-
+ packages/core/src/zig/renderer-output.zig |   2 +
+ packages/core/src/zig/text-buffer.zig     |  62 +++-
+ 5 files changed, 481 insertions(+), 18 deletions(-)
+ create mode 100644 packages/core/src/zig/audio-stub.zig
+
+diff --git a/packages/core/src/zig/audio-stub.zig b/packages/core/src/zig/audio-stub.zig
+new file mode 100644
+index 00000000..af799d4f
+--- /dev/null
++++ b/packages/core/src/zig/audio-stub.zig
+@@ -0,0 +1,331 @@
++// Audio stub for targets without miniaudio (wasm32). Every entry point
++// reports a device error so JS callers see "no audio" instead of crashing.
++const std = @import("std");
++
++pub const Status = struct {
++    pub const ok: i32 = 0;
++    pub const err_invalid: i32 = -1;
++    pub const err_no_space: i32 = -2;
++    pub const err_decode: i32 = -3;
++    pub const err_not_found: i32 = -4;
++    pub const err_device: i32 = -5;
++};
++
++pub const max_voices: usize = 32;
++pub const default_sample_rate: u32 = 48_000;
++pub const default_playback_channels: u32 = 2;
++const stream_input_capacity: u32 = 256 * 1024;
++// Bounds endless invalid input during decoder setup; StreamOptions can raise it for valid metadata.
++pub const default_stream_probe_bytes: u32 = 1024 * 1024;
++const stream_decoder_chunk_frames: u32 = 2_048;
++// Coalesce tiny transport fragments without waiting for miniaudio's full decoder read request.
++const stream_decoder_read_granularity: usize = 2 * 1024;
++const max_stream_generation: u32 = 0x00ffffff;
++const stream_channels: u32 = 2;
++const stream_bytes_per_frame: u32 = stream_channels * @sizeOf(f32);
++const max_stream_ring_bytes: u32 = 0x7fffffff - (16 - 1);
++pub const max_stream_pcm_capacity_frames: u32 = max_stream_ring_bytes / stream_bytes_per_frame;
++
++pub const CreateOptions = extern struct {
++    sample_rate: u32 = default_sample_rate,
++    playback_channels: u32 = default_playback_channels,
++};
++
++pub const StartOptions = extern struct {
++    period_size_in_frames: u32 = 0,
++    period_size_in_milliseconds: u32 = 0,
++    periods: u32 = 0,
++    performance_profile: u8 = 0,
++    share_mode: u8 = 0,
++    no_pre_silenced_output_buffer: bool = false,
++    no_clip: bool = false,
++    no_disable_denormals: bool = false,
++    no_fixed_sized_callback: bool = false,
++    wasapi_no_auto_convert_src: bool = false,
++    wasapi_no_default_quality_src: bool = false,
++    alsa_no_mmap: bool = false,
++    alsa_no_auto_format: bool = false,
++    alsa_no_auto_channels: bool = false,
++    alsa_no_auto_resample: bool = false,
++};
++
++pub const VoiceOptions = extern struct {
++    volume: f32,
++    pan: f32,
++    loop: bool,
++    group_id: u32,
++};
++
++pub const StreamOptions = extern struct {
++    capacity_ms: u32,
++    startup_ms: u32,
++    resume_ms: u32,
++    volume: f32,
++    pan: f32,
++    group_id: u32,
++    // Append fields so newer bindings preserve the previous native prefix during local rebuilds.
++    max_probe_bytes: u32 = default_stream_probe_bytes,
++    format: u32 = StreamFormat.mp3,
++};
++
++pub const StreamFormat = struct {
++    pub const mp3: u32 = 1;
++    pub const flac: u32 = 2;
++};
++
++pub const StreamState = struct {
++    pub const initializing: u32 = 0;
++    pub const buffering: u32 = 1;
++    pub const playing: u32 = 2;
++    pub const ended: u32 = 3;
++    pub const failed: u32 = 4;
++    pub const cancelled: u32 = 5;
++    pub const reconnecting: u32 = 6;
++};
++
++pub const StreamStats = extern struct {
++    bytes_received: u64,
++    frames_decoded: u64,
++    frames_played: u64,
++    state: u32,
++    sample_rate: u32,
++    channels: u32,
++    buffered_frames: u32,
++    capacity_frames: u32,
++    underruns: u32,
++    error_code: i32,
++    ready_generation: u32,
++};
++
++pub const StreamCloseReason = struct {
++    pub const preserve_native_terminal: u32 = 0;
++    pub const transport_error: u32 = 1;
++    pub const disposed: u32 = 2;
++};
++
++pub const Stats = extern struct {
++    sounds_loaded: u32,
++    voices_active: u32,
++    frames_mixed: u64,
++    lock_misses: u32,
++    last_peak: f32,
++    last_rms: f32,
++};
++
++pub const Engine = struct { unused: u8 = 0 };
++
++pub fn create(allocator: std.mem.Allocator, options_ptr: ?*const CreateOptions) ?*Engine {
++    _ = allocator;
++    _ = options_ptr;
++    return null;
++}
++
++pub fn destroy(engine: *Engine) void {
++    _ = engine;
++    return;
++}
++
++pub fn refreshPlaybackDevices(engine: *Engine) i32 {
++    _ = engine;
++    return Status.err_device;
++}
++
++pub fn getPlaybackDeviceCount(engine: *Engine) u32 {
++    _ = engine;
++    return 0;
++}
++
++pub fn getPlaybackDeviceName(engine: *Engine, index: u32, out_ptr: ?[*]u8, max_len: usize) usize {
++    _ = engine;
++    _ = index;
++    _ = out_ptr;
++    _ = max_len;
++    return 0;
++}
++
++pub fn isPlaybackDeviceDefault(engine: *Engine, index: u32) bool {
++    _ = engine;
++    _ = index;
++    return false;
++}
++
++pub fn selectPlaybackDevice(engine: *Engine, index: u32) i32 {
++    _ = engine;
++    _ = index;
++    return Status.err_device;
++}
++
++pub fn clearPlaybackDeviceSelection(engine: *Engine) void {
++    _ = engine;
++    return;
++}
++
++pub fn start(engine: *Engine, options_ptr: ?*const StartOptions) i32 {
++    _ = engine;
++    _ = options_ptr;
++    return Status.err_device;
++}
++
++pub fn startMixer(engine: *Engine) i32 {
++    _ = engine;
++    return Status.err_device;
++}
++
++pub fn stop(engine: *Engine) i32 {
++    _ = engine;
++    return Status.err_device;
++}
++
++pub fn createStream(engine: *Engine, options_ptr: ?*const StreamOptions, out_stream_id: ?*u32) i32 {
++    _ = engine;
++    _ = options_ptr;
++    _ = out_stream_id;
++    return Status.err_device;
++}
++
++pub fn writeStream(
++    engine: *Engine,
++    stream_id: u32,
++    data_ptr: ?[*]const u8,
++    data_len: u32,
++) i32 {
++    _ = engine;
++    _ = stream_id;
++    _ = data_ptr;
++    _ = data_len;
++    return Status.err_device;
++}
++
++pub fn endStream(engine: *Engine, stream_id: u32) i32 {
++    _ = engine;
++    _ = stream_id;
++    return Status.err_device;
++}
++
++pub fn restartStream(engine: *Engine, stream_id: u32) i32 {
++    _ = engine;
++    _ = stream_id;
++    return Status.err_device;
++}
++
++pub fn setStreamVolume(engine: *Engine, stream_id: u32, volume: f32) i32 {
++    _ = engine;
++    _ = stream_id;
++    _ = volume;
++    return Status.err_device;
++}
++
++pub fn setStreamPan(engine: *Engine, stream_id: u32, pan: f32) i32 {
++    _ = engine;
++    _ = stream_id;
++    _ = pan;
++    return Status.err_device;
++}
++
++pub fn setStreamGroup(engine: *Engine, stream_id: u32, group_id: u32) i32 {
++    _ = engine;
++    _ = stream_id;
++    _ = group_id;
++    return Status.err_device;
++}
++
++pub fn getStreamStats(engine: *Engine, stream_id: u32, out_stats: ?*StreamStats) i32 {
++    _ = engine;
++    _ = stream_id;
++    _ = out_stats;
++    return Status.err_device;
++}
++
++pub fn closeStream(engine: *Engine, stream_id: u32, reason: u32, out_final_stats: ?*StreamStats) i32 {
++    _ = engine;
++    _ = stream_id;
++    _ = reason;
++    _ = out_final_stats;
++    return Status.err_device;
++}
++
++pub fn load(engine: *Engine, data_ptr: ?[*]const u8, data_len: usize, out_sound_id: ?*u32) i32 {
++    _ = engine;
++    _ = data_ptr;
++    _ = data_len;
++    _ = out_sound_id;
++    return Status.err_device;
++}
++
++pub fn unload(engine: *Engine, sound_id: u32) i32 {
++    _ = engine;
++    _ = sound_id;
++    return Status.err_device;
++}
++
++pub fn createGroup(engine: *Engine, name_ptr: ?[*]const u8, name_len: usize, out_group_id: ?*u32) i32 {
++    _ = engine;
++    _ = name_ptr;
++    _ = name_len;
++    _ = out_group_id;
++    return Status.err_device;
++}
++
++pub fn play(engine: *Engine, sound_id: u32, options_ptr: ?*const VoiceOptions, out_voice_id: ?*u32) i32 {
++    _ = engine;
++    _ = sound_id;
++    _ = options_ptr;
++    _ = out_voice_id;
++    return Status.err_device;
++}
++
++pub fn stopVoice(engine: *Engine, voice_id: u32) i32 {
++    _ = engine;
++    _ = voice_id;
++    return Status.err_device;
++}
++
++pub fn setVoiceGroup(engine: *Engine, voice_id: u32, group_id: u32) i32 {
++    _ = engine;
++    _ = voice_id;
++    _ = group_id;
++    return Status.err_device;
++}
++
++pub fn setGroupVolume(engine: *Engine, group_id: u32, volume: f32) i32 {
++    _ = engine;
++    _ = group_id;
++    _ = volume;
++    return Status.err_device;
++}
++
++pub fn setMasterVolume(engine: *Engine, volume: f32) i32 {
++    _ = engine;
++    _ = volume;
++    return Status.err_device;
++}
++
++pub fn enableTap(engine: *Engine, enabled: bool, capacity_frames: u32) i32 {
++    _ = engine;
++    _ = enabled;
++    _ = capacity_frames;
++    return Status.err_device;
++}
++
++pub fn readTap(engine: *Engine, out_ptr: ?[*]f32, frame_count: u32, channels: u8, out_frames_read: ?*u32) i32 {
++    _ = engine;
++    _ = out_ptr;
++    _ = frame_count;
++    _ = channels;
++    _ = out_frames_read;
++    return Status.err_device;
++}
++
++pub fn mixToBuffer(engine: *Engine, out_ptr: ?[*]f32, frame_count: u32, channels: u8) i32 {
++    _ = engine;
++    _ = out_ptr;
++    _ = frame_count;
++    _ = channels;
++    return Status.err_device;
++}
++
++pub fn getStats(engine: *Engine, out_stats: ?*Stats) i32 {
++    _ = engine;
++    _ = out_stats;
++    return Status.err_device;
++}
+diff --git a/packages/core/src/zig/build.zig b/packages/core/src/zig/build.zig
+index 0c82ba3d..3afe4f88 100644
+--- a/packages/core/src/zig/build.zig
++++ b/packages/core/src/zig/build.zig
+@@ -40,6 +40,19 @@ const YOGA_CXX_FLAGS = [_][]const u8{
+     "-frtti",
+ };
+ 
++// wasm32-wasi has no C++ exception runtime; yoga only throws from its fatal
++// assert path, which aborts instead when exceptions are off.
++const YOGA_CXX_FLAGS_WASM = [_][]const u8{
++    "-std=c++20",
++    "-fno-exceptions",
++    "-fno-rtti",
++};
++
++// Linear memory for the wasm build. Initial == max so memory.grow never runs:
++// JS keeps long-lived typed-array views over native buffers, and growing the
++// memory would detach every one of them.
++const WASM_DEFAULT_MEMORY_MB: u64 = 256;
++
+ const YOGA_CXX_SOURCES = [_][]const u8{
+     "yoga/YGConfig.cpp",
+     "yoga/YGEnums.cpp",
+@@ -199,14 +212,57 @@ fn addNativeAudioDependencies(
+ 
+ fn addYogaDependencies(b: *std.Build, artifact: *std.Build.Step.Compile) void {
+     const yoga_dep = b.dependency("yoga", .{});
++    const is_wasm = artifact.rootModuleTarget().cpu.arch.isWasm();
+ 
+     artifact.linkLibCpp();
+     artifact.addIncludePath(yoga_dep.path(""));
+     artifact.addCSourceFiles(.{
+         .root = yoga_dep.path(""),
+         .files = &YOGA_CXX_SOURCES,
+-        .flags = &YOGA_CXX_FLAGS,
++        .flags = if (is_wasm) &YOGA_CXX_FLAGS_WASM else &YOGA_CXX_FLAGS,
++    });
++}
++
++/// Build the core as a wasm32-wasi reactor module: no audio (miniaudio needs
++/// threads and OS audio APIs), single-threaded, every `export fn` kept, the
++/// function table exported so JS callbacks can be installed into it, and a
++/// fixed-size memory.
++fn buildWasmTarget(
++    b: *std.Build,
++    optimize: std.builtin.OptimizeMode,
++    build_options: *std.Build.Step.Options,
++) !void {
++    const memory_mb = b.option(u64, "wasm-memory-mb", "Fixed linear memory size for the wasm build (MiB)") orelse WASM_DEFAULT_MEMORY_MB;
++    const target = b.resolveTargetQuery(try std.Target.Query.parse(.{ .arch_os_abi = "wasm32-wasi" }));
++
++    const module = b.createModule(.{
++        .root_source_file = b.path(ROOT_SOURCE_FILE),
++        .target = target,
++        .optimize = optimize,
++        .single_threaded = true,
++    });
++    applyDependencies(b, module, optimize, target, build_options);
++
++    const exe = b.addExecutable(.{
++        .name = LIB_NAME,
++        .root_module = module,
+     });
++    exe.entry = .disabled;
++    exe.rdynamic = true;
++    exe.wasi_exec_model = .reactor;
++    exe.export_table = true;
++    exe.initial_memory = memory_mb * 1024 * 1024;
++    exe.max_memory = memory_mb * 1024 * 1024;
++    exe.stack_size = 1024 * 1024;
++
++    addYogaDependencies(b, exe);
++
++    const install = b.addInstallArtifact(exe, .{
++        .dest_dir = .{ .override = .{ .custom = "../lib/wasm32-wasi" } },
++    });
++    const step = b.step("build-wasm32-wasi", "Build the wasm32-wasi core");
++    step.dependOn(&install.step);
++    b.getInstallStep().dependOn(&install.step);
+ }
+ 
+ /// Apply dependencies to a module
+@@ -280,7 +336,13 @@ pub fn build(b: *std.Build) void {
+     const build_options = b.addOptions();
+     build_options.addOption(bool, "gpa_safe_stats", gpa_safe_stats);
+ 
+-    if (target_option) |target_str| {
++    if (target_option != null and std.mem.startsWith(u8, target_option.?, "wasm32")) {
++        buildWasmTarget(b, optimize, build_options) catch |err| {
++            std.debug.print("Error building wasm target: {}\n", .{err});
++            std.process.exit(1);
++        };
++        return;
++    } else if (target_option) |target_str| {
+         // Build single target
+         buildSingleTarget(b, target_str, optimize, build_options, macos_sdk_path) catch |err| {
+             std.debug.print("Error building target '{s}': {}\n", .{ target_str, err });
+diff --git a/packages/core/src/zig/lib.zig b/packages/core/src/zig/lib.zig
+index b3a2861c..a279250a 100644
+--- a/packages/core/src/zig/lib.zig
++++ b/packages/core/src/zig/lib.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const builtin = @import("builtin");
+ const build_options = @import("build_options");
+ const Allocator = std.mem.Allocator;
+ 
+@@ -18,7 +19,38 @@ const utf8 = @import("utf8.zig");
+ const logger = @import("logger.zig");
+ const event_bus = @import("event-bus.zig");
+ const native_span_feed = @import("native-span-feed.zig");
+-const native_audio = @import("audio.zig");
++const is_wasm = builtin.target.cpu.arch.isWasm();
++// miniaudio needs OS audio backends and threads; wasm builds get a stub that
++// reports no device.
++const native_audio = if (is_wasm) @import("audio-stub.zig") else @import("audio.zig");
++
++// std.heap.page_allocator on wasm grows linear memory page by page. The wasm
++// build runs with a fixed-size memory (initial == max) so JS-held typed-array
++// views over native buffers are never detached; route page allocations
++// through libc malloc, which carves the preallocated heap instead.
++pub const os = if (is_wasm) struct {
++    pub const heap = struct {
++        pub const page_allocator = std.heap.c_allocator;
++    };
++} else struct {};
++
++// Scratch allocation for the JS wasm FFI backend: buffers JS passes by
++// pointer are staged in linear memory through these.
++fn wasmAlloc(len: u32) callconv(.c) ?[*]u8 {
++    const p = std.c.malloc(@max(len, 1)) orelse return null;
++    return @ptrCast(p);
++}
++
++fn wasmFree(p: ?[*]u8) callconv(.c) void {
++    std.c.free(p);
++}
++
++comptime {
++    if (is_wasm) {
++        @export(&wasmAlloc, .{ .name = "opentuiWasmAlloc" });
++        @export(&wasmFree, .{ .name = "opentuiWasmFree" });
++    }
++}
+ const native_renderable = @import("native-renderable.zig");
+ const buffer_effects = @import("buffer-methods.zig");
+ const handles = @import("handles.zig");
+@@ -895,9 +927,9 @@ pub const ExternalCapabilities = extern struct {
+     remote: bool,
+     multiplexer: u8,
+     term_name_ptr: [*]const u8,
+-    term_name_len: usize,
++    term_name_len: u64, // u64 to match the JS struct on 32-bit targets
+     term_version_ptr: [*]const u8,
+-    term_version_len: usize,
++    term_version_len: u64,
+     term_from_xtversion: bool,
+     osc52_support: u8,
+ };
+diff --git a/packages/core/src/zig/renderer-output.zig b/packages/core/src/zig/renderer-output.zig
+index 7d773f74..584b23ca 100644
+--- a/packages/core/src/zig/renderer-output.zig
++++ b/packages/core/src/zig/renderer-output.zig
+@@ -391,6 +391,8 @@ pub const BufferedBackend = struct {
+     }
+ 
+     pub fn setUseThread(self: *BufferedBackend, use_thread: bool) void {
++        // Single-threaded builds (wasm32) render on the caller's thread only.
++        if (builtin.single_threaded) return;
+         if (use_thread and !self.supportsThreading()) return;
+         if (self.useThread == use_thread) return;
+ 
+diff --git a/packages/core/src/zig/text-buffer.zig b/packages/core/src/zig/text-buffer.zig
+index cef075d5..1e91f50e 100644
+--- a/packages/core/src/zig/text-buffer.zig
++++ b/packages/core/src/zig/text-buffer.zig
+@@ -1,4 +1,6 @@
+ const std = @import("std");
++const builtin = @import("builtin");
++const wasm_copies_borrowed_memory = builtin.target.cpu.arch.isWasm();
+ const Allocator = std.mem.Allocator;
+ const seg_mod = @import("text-buffer-segment.zig");
+ const iter_mod = @import("text-buffer-iterators.zig");
+@@ -41,14 +43,24 @@ pub const TextBuffer = UnifiedTextBuffer;
+ /// format defined by ansi.zig. Use utils.ptrToRGBA to read them.
+ pub const StyledChunk = extern struct {
+     text_ptr: [*]const u8,
+-    text_len: usize,
++    // u64 rather than usize: JS packs these as u64 on every target, and the
++    // two only coincide on 64-bit hosts (wasm32 has a 32-bit usize).
++    text_len: u64,
+     /// Optional foreground color as 4 packed u16 values (see ansi.RGBA).
+     fg_ptr: ?[*]const u16,
+     /// Optional background color as 4 packed u16 values (see ansi.RGBA).
+     bg_ptr: ?[*]const u16,
+     attributes: u32,
+     link_ptr: ?[*]const u8 = null,
+-    link_len: usize = 0,
++    link_len: u64 = 0,
++
++    pub fn textLen(self: StyledChunk) usize {
++        return @intCast(self.text_len);
++    }
++
++    pub fn linkLen(self: StyledChunk) usize {
++        return @intCast(self.link_len);
++    }
+ };
+ 
+ pub const UnifiedTextBuffer = struct {
+@@ -445,12 +457,26 @@ pub const UnifiedTextBuffer = struct {
+         }
+     }
+ 
++    /// Register caller memory without taking ownership. Natively the buffer
++    /// borrows it (zero copy; JS keeps the bytes alive). On wasm, JS buffers
++    /// only reach linear memory as short-lived staged copies, so the core
++    /// keeps its own copy instead.
++    fn registerBorrowed(self: *Self, data: []const u8) TextBufferError!u8 {
++        if (!wasm_copies_borrowed_memory) return self.mem_registry.register(data, false);
++        const copy = self.mem_registry.allocator.dupe(u8, data) catch return TextBufferError.OutOfMemory;
++        return self.mem_registry.register(copy, true) catch |err| {
++            self.mem_registry.allocator.free(copy);
++            return err;
++        };
++    }
++
+     /// Set the text content using SIMD-optimized line break detection
+     pub fn setText(self: *Self, text: []const u8) TextBufferError!void {
+         self.clearInternalHighlights();
+         self.clear();
+-        const mem_id = try self.mem_registry.register(text, false);
+-        try self.setTextInternal(mem_id, text);
++        const mem_id = try self.registerBorrowed(text);
++        const owned_text = self.mem_registry.get(mem_id).?;
++        try self.setTextInternal(mem_id, owned_text);
+     }
+ 
+     /// Set text from a pre-registered memory ID
+@@ -467,8 +493,8 @@ pub const UnifiedTextBuffer = struct {
+             return;
+         }
+ 
+-        const mem_id = try self.mem_registry.register(text, false);
+-        try self.appendInternal(mem_id, text);
++        const mem_id = try self.registerBorrowed(text);
++        try self.appendInternal(mem_id, self.mem_registry.get(mem_id).?);
+     }
+ 
+     /// Append text from a pre-registered memory ID
+@@ -599,10 +625,19 @@ pub const UnifiedTextBuffer = struct {
+ 
+     /// Register a memory buffer
+     pub fn registerMemBuffer(self: *Self, data: []const u8, owned: bool) TextBufferError!u8 {
++        if (!owned) return self.registerBorrowed(data);
+         return self.mem_registry.register(data, owned);
+     }
+ 
+     pub fn replaceMemBuffer(self: *Self, mem_id: u8, data: []const u8, owned: bool) TextBufferError!void {
++        if (!owned and wasm_copies_borrowed_memory) {
++            const copy = self.mem_registry.allocator.dupe(u8, data) catch return TextBufferError.OutOfMemory;
++            self.mem_registry.replace(mem_id, copy, true) catch |err| {
++                self.mem_registry.allocator.free(copy);
++                return err;
++            };
++            return;
++        }
+         try self.mem_registry.replace(mem_id, data, owned);
+     }
+ 
+@@ -1090,7 +1125,7 @@ pub const UnifiedTextBuffer = struct {
+         // Calculate total text length
+         var total_len: usize = 0;
+         for (chunks) |chunk| {
+-            total_len += chunk.text_len;
++            total_len += chunk.textLen();
+         }
+ 
+         if (total_len == 0) {
+@@ -1120,9 +1155,9 @@ pub const UnifiedTextBuffer = struct {
+         var offset: usize = 0;
+         for (chunks) |chunk| {
+             if (chunk.text_len > 0) {
+-                const chunk_text = chunk.text_ptr[0..chunk.text_len];
+-                @memcpy(full_text[offset .. offset + chunk.text_len], chunk_text);
+-                offset += chunk.text_len;
++                const chunk_text = chunk.text_ptr[0..chunk.textLen()];
++                @memcpy(full_text[offset .. offset + chunk.textLen()], chunk_text);
++                offset += chunk.textLen();
+             }
+         }
+ 
+@@ -1144,7 +1179,7 @@ pub const UnifiedTextBuffer = struct {
+ 
+             var char_pos: u32 = 0;
+             for (chunks, 0..) |chunk, i| {
+-                const chunk_text = chunk.text_ptr[0..chunk.text_len];
++                const chunk_text = chunk.text_ptr[0..chunk.textLen()];
+                 const chunk_len = self.measureText(chunk_text);
+ 
+                 if (chunk_len > 0) {
+@@ -1155,7 +1190,7 @@ pub const UnifiedTextBuffer = struct {
+                     if (chunk.link_ptr) |link_ptr| {
+                         if (chunk.link_len > 0) {
+                             const tracker = self.getLinkTracker();
+-                            const url = link_ptr[0..chunk.link_len];
++                            const url = link_ptr[0..chunk.linkLen()];
+                             const link_id = tracker.pool.alloc(url) catch 0;
+                             if (link_id != 0) {
+                                 const maybe_seen = seen_link_ids.getOrPut(self.global_allocator, link_id) catch null;
+@@ -1200,7 +1235,8 @@ pub const UnifiedTextBuffer = struct {
+ 
+         self.clear();
+ 
+-        const content = self.allocator.alloc(u8, file_size) catch return TextBufferError.OutOfMemory;
++        const content_len = std.math.cast(usize, file_size) orelse return TextBufferError.OutOfMemory;
++        const content = self.allocator.alloc(u8, content_len) catch return TextBufferError.OutOfMemory;
+         const bytes_read = file.readAll(content) catch return TextBufferError.OutOfMemory;
+         const text = content[0..bytes_read];
+         const mem_id = try self.mem_registry.register(text, false);
+-- 
+2.43.0
+

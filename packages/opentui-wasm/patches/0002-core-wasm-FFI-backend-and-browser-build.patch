@@ -1,0 +1,1261 @@
+From 7a4f0926b6837d05db6bcce4806ec7888b5847db Mon Sep 17 00:00:00 2001
+From: norm wasm <blake@comatri.com>
+Date: Fri, 2 Oct 2026 23:52:47 +0000
+Subject: [PATCH 2/2] core: wasm FFI backend and browser build
+
+platform/ffi-wasm.ts adapts an instance of the wasm32-wasi core to the
+FfiBackend surface (dlopen/ptr/toArrayBuffer), with a minimal WASI shim
+(fd 1/2 to host callbacks, clocks, random, environ; no filesystem).
+
+- selected when globalThis.__OPENTUI_WASM__ is set (browsers instantiate
+  first, then import @opentui/core) or OPENTUI_BACKEND=wasm (Bun/Node,
+  module from OPENTUI_WASM_PATH, next to the bundle, or the zig output)
+- ptr(jsBuffer) stages a copy in linear memory; regions passed directly
+  as arguments are copied back after each call (out-parameters) and
+  released once the synchronous turn ends
+- toArrayBuffer copies; toNativeView (new, all backends) aliases native
+  memory and is used for OptimizedBuffer planes and NativeSpanFeed
+- callbacks are re-exported from tiny generated modules and installed in
+  the core's function table (made growable at load time)
+- u32/ptr/bool/u64 returns normalized to Bun's conventions
+- bun-ffi-structs is pointed at the backend (4-byte pointers) through
+  globalThis.__BUN_FFI_STRUCTS_BACKEND__ (needs the matching
+  bun-ffi-structs patch)
+- #opentui/runtime-assets gains a browser variant; the lib build adds
+  index.browser.js (exports "." browser condition), wasm.js
+  (@opentui/core/wasm) and ships opentui.wasm
+---
+ packages/core/package.json                    |   5 +
+ packages/core/scripts/build.ts                |  39 +
+ packages/core/src/NativeSpanFeed.ts           |  16 +-
+ packages/core/src/buffer.ts                   |  10 +-
+ packages/core/src/platform/ffi-wasm.ts        | 799 ++++++++++++++++++
+ packages/core/src/platform/ffi.ts             | 101 ++-
+ .../src/platform/runtime-assets.browser.ts    |  19 +
+ packages/core/src/zig-structs.ts              |   4 +-
+ packages/core/src/zig.ts                      |   7 +-
+ 9 files changed, 981 insertions(+), 19 deletions(-)
+ create mode 100644 packages/core/src/platform/ffi-wasm.ts
+ create mode 100644 packages/core/src/platform/runtime-assets.browser.ts
+
+diff --git a/packages/core/package.json b/packages/core/package.json
+index 1a560d7b..f7f6a5f8 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -13,6 +13,7 @@
+   "type": "module",
+   "imports": {
+     "#opentui/runtime-assets": {
++      "browser": "./src/platform/runtime-assets.browser.ts",
+       "bun": "./src/platform/runtime-assets.bun.ts",
+       "node": "./src/platform/runtime-assets.node.ts",
+       "default": "./src/platform/runtime-assets.node.ts"
+@@ -75,6 +76,10 @@
+       "node": "./src/index.ts",
+       "import": "./src/index.ts"
+     },
++    "./wasm": {
++      "types": "./src/platform/ffi-wasm.ts",
++      "import": "./src/platform/ffi-wasm.ts"
++    },
+     "./testing": {
+       "types": "./src/testing.ts",
+       "bun": "./src/testing.ts",
+diff --git a/packages/core/scripts/build.ts b/packages/core/scripts/build.ts
+index 089013b9..4ad6223c 100644
+--- a/packages/core/scripts/build.ts
++++ b/packages/core/scripts/build.ts
+@@ -41,6 +41,7 @@ interface BunBuildOptions {
+   outputFile?: string
+   splitting?: boolean
+   target: "bun" | "node"
++  conditions?: string[]
+ }
+ 
+ const __filename = fileURLToPath(import.meta.url)
+@@ -130,6 +131,7 @@ const runBunBuild = ({
+   outputFile,
+   splitting = false,
+   target,
++  conditions = [],
+ }: BunBuildOptions): void => {
+   if (outputFile && splitting) {
+     throw new Error("Bun builds with an output file cannot use splitting")
+@@ -143,6 +145,7 @@ const runBunBuild = ({
+     ...(entryNaming ? [`--entry-naming=${entryNaming}`] : []),
+     ...(chunkNaming ? [`--chunk-naming=${chunkNaming}`] : []),
+     ...(splitting ? ["--splitting"] : []),
++    ...conditions.flatMap((condition) => ["--conditions", condition]),
+     ...externalPatterns.flatMap((pattern) => ["--external", pattern]),
+     ...entryPoints,
+   ]
+@@ -357,6 +360,35 @@ if (buildLib) {
+     target: "node",
+   })
+ 
++  // Browser build for the wasm core (src/zig: zig build -Dtarget=wasm32-wasi).
++  // Built for the node target so Node built-ins stay external (Bun's browser
++  // target substitutes its own partial polyfills): the consuming bundler maps
++  // them to browser shims, and a host instantiates the core and installs a
++  // `process` global before importing this entry (see
++  // src/platform/ffi-wasm.ts). The "browser" condition selects the browser
++  // runtime-assets module.
++  runBunBuild({
++    chunkNaming: "chunk-browser-[hash].[ext]",
++    entryNaming: "[name].browser.[ext]",
++    entryPoints: [packageJson.module],
++    externalPatterns,
++    splitting: true,
++    target: "node",
++    conditions: ["browser"],
++  })
++  // The wasm loader and FFI backend on their own: no Node imports, so one
++  // build serves browsers, Bun and Node.
++  runBunBuild({
++    entryPoints: ["src/platform/ffi-wasm.ts"],
++    entryNaming: "wasm.[ext]",
++    target: "node",
++  })
++  const wasmCore = join(rootDir, "src", "zig", "lib", "wasm32-wasi", "opentui.wasm")
++  if (existsSync(wasmCore)) {
++    copyFileSync(wasmCore, join(distDir, "opentui.wasm"))
++    console.log("  Copied the wasm core to dist/opentui.wasm")
++  }
++
+   for (const { entryPoint, outputFile } of bunOnlyEntryPoints) {
+     transpileEntryPoint(entryPoint, join(distDir, outputFile))
+   }
+@@ -392,6 +424,7 @@ if (buildLib) {
+     "dist/index.bun.js",
+     "dist/testing.bun.js",
+     "dist/yoga.bun.js",
++    "dist/index.browser.js",
+   ]
+   for (const filePath of bundledFiles) {
+     const fullPath = join(rootDir, filePath)
+@@ -492,6 +525,7 @@ if (buildLib) {
+   const exports = {
+     ".": {
+       types: "./index.d.ts",
++      browser: "./index.browser.js",
+       bun: "./index.bun.js",
+       node: "./index.node.js",
+       import: "./index.node.js",
+@@ -544,6 +578,11 @@ if (buildLib) {
+       types: "./node-assets.d.ts",
+       import: "./node-assets.js",
+     },
++    "./wasm": {
++      types: "./platform/ffi-wasm.d.ts",
++      import: "./wasm.js",
++    },
++    "./opentui.wasm": "./opentui.wasm",
+   }
+ 
+   const optionalDeps: Record<string, string> = Object.fromEntries(
+diff --git a/packages/core/src/NativeSpanFeed.ts b/packages/core/src/NativeSpanFeed.ts
+index 3bd5fe60..9561fc9a 100644
+--- a/packages/core/src/NativeSpanFeed.ts
++++ b/packages/core/src/NativeSpanFeed.ts
+@@ -1,4 +1,4 @@
+-import { toArrayBuffer, type Pointer } from "./platform/ffi.js"
++import { toNativeView, type Pointer } from "./platform/ffi.js"
+ import { resolveRenderLib } from "./zig.js"
+ import { SpanInfoStruct } from "./zig-structs.js"
+ import type { NativeSpanFeedOptions } from "./zig-structs.js"
+@@ -67,7 +67,7 @@ export class NativeSpanFeed {
+   readonly streamPtr: Pointer
+   private readonly lib = resolveRenderLib()
+   private readonly eventHandler: StreamEventHandler
+-  private chunkMap = new Map<Pointer, ArrayBuffer>()
++  private chunkMap = new Map<Pointer, Uint8Array>()
+   private chunkSizes = new Map<Pointer, number>()
+   private dataHandlers = new Set<DataHandler>()
+   private errorHandlers = new Set<(code: number) => void>()
+@@ -211,9 +211,8 @@ export class NativeSpanFeed {
+         case EventId.StateBuffer: {
+           const len = toNumber(arg1)
+           if (len > 0 && arg0) {
+-            // toArrayBuffer must alias Zig memory so refcount writes are visible.
+-            const buffer = toArrayBuffer(arg0, 0, len)
+-            this.stateBuffer = new Uint8Array(buffer)
++            // Must alias Zig memory so refcount writes are visible.
++            this.stateBuffer = toNativeView(Uint8Array, arg0, len)
+           }
+           break
+         }
+@@ -230,8 +229,7 @@ export class NativeSpanFeed {
+           const chunkLen = toNumber(arg1)
+           if (chunkLen > 0 && arg0) {
+             if (!this.chunkMap.has(arg0)) {
+-              const buffer = toArrayBuffer(arg0, 0, chunkLen)
+-              this.chunkMap.set(arg0, buffer)
++              this.chunkMap.set(arg0, toNativeView(Uint8Array, arg0, chunkLen))
+             }
+             this.chunkSizes.set(arg0, chunkLen)
+           }
+@@ -305,13 +303,13 @@ export class NativeSpanFeed {
+         if (!buffer) {
+           const size = this.chunkSizes.get(span.chunkPtr)
+           if (!size) continue
+-          buffer = toArrayBuffer(span.chunkPtr, 0, size)
++          buffer = toNativeView(Uint8Array, span.chunkPtr, size)
+           this.chunkMap.set(span.chunkPtr, buffer)
+         }
+ 
+         if (span.offset + span.len > buffer.byteLength) continue
+ 
+-        const slice = new Uint8Array(buffer, span.offset, span.len)
++        const slice = buffer.subarray(span.offset, span.offset + span.len)
+         let asyncResults: Promise<void>[] | null = null
+ 
+         for (const handler of this.dataHandlers) {
+diff --git a/packages/core/src/buffer.ts b/packages/core/src/buffer.ts
+index f8e7669a..2a773077 100644
+--- a/packages/core/src/buffer.ts
++++ b/packages/core/src/buffer.ts
+@@ -1,6 +1,6 @@
+ import { RGBA } from "./lib/index.js"
+ import { resolveRenderLib, type OptimizedBufferHandle, type RenderLib } from "./zig.js"
+-import { type Pointer, type PointerInput, toArrayBuffer, toPointer, ptr } from "./platform/ffi.js"
++import { type Pointer, type PointerInput, toNativeView, toPointer, ptr } from "./platform/ffi.js"
+ import { type BorderStyle, type BorderSides, BorderCharArrays, parseBorderStyle } from "./lib/index.js"
+ import { TargetChannel, type WidthMethod, type CapturedSpan, type CapturedLine } from "./types.js"
+ import type { TextBufferView } from "./text-buffer-view.js"
+@@ -83,10 +83,10 @@ export class OptimizedBuffer {
+     const attributesPtr = this.lib.bufferGetAttributesPtr(this.bufferPtr)
+ 
+     this._rawBuffers = {
+-      char: new Uint32Array(toArrayBuffer(charPtr, 0, size * 4)),
+-      fg: new Uint16Array(toArrayBuffer(fgPtr, 0, size * 4 * 2)),
+-      bg: new Uint16Array(toArrayBuffer(bgPtr, 0, size * 4 * 2)),
+-      attributes: new Uint32Array(toArrayBuffer(attributesPtr, 0, size * 4)),
++      char: toNativeView(Uint32Array, charPtr, size * 4),
++      fg: toNativeView(Uint16Array, fgPtr, size * 4 * 2),
++      bg: toNativeView(Uint16Array, bgPtr, size * 4 * 2),
++      attributes: toNativeView(Uint32Array, attributesPtr, size * 4),
+     }
+   }
+ 
+diff --git a/packages/core/src/platform/ffi-wasm.ts b/packages/core/src/platform/ffi-wasm.ts
+new file mode 100644
+index 00000000..ec3b21e6
+--- /dev/null
++++ b/packages/core/src/platform/ffi-wasm.ts
+@@ -0,0 +1,799 @@
++// WebAssembly FFI backend.
++//
++// The native core can be built for wasm32-wasi (`zig build -Dtarget=wasm32-wasi`,
++// see build.zig). This module turns an instance of that build into the same
++// `dlopen`/`ptr`/`toArrayBuffer` surface the Bun and Node backends expose, so
++// every call site in zig.ts keeps working unchanged. It has no Node or Bun
++// imports: browsers load it as-is, and Bun uses it when OPENTUI_BACKEND=wasm.
++//
++// Semantics that differ from Bun's zero-copy FFI:
++//
++// - `ptr(jsBuffer)` copies the bytes into linear memory and returns that
++//   address. After every native call, regions passed directly as arguments are
++//   copied back into their JS buffers, so out-parameters work. Regions stay
++//   valid until the current synchronous turn ends (they are released on a
++//   microtask once no native call is on the stack), so a pointer taken before
++//   one call and used in the next still works.
++// - `ptr(view)` of a view over the wasm memory itself returns its address
++//   without copying.
++// - `toArrayBuffer` returns a copy. Call sites that need a live alias of native
++//   memory use `toNativeView` (see ffi.ts), which aliases on every backend.
++// - The memory is fixed-size (initial == max), so `memory.buffer` never
++//   changes and aliasing views are never detached.
++// - Callbacks become entries in the module's exported function table.
++
++export interface WasmFfiFunction {
++  readonly args?: readonly string[]
++  readonly returns?: string
++}
++
++export interface WasmCallbackInstance {
++  readonly ptr: number | null
++  readonly threadsafe: boolean
++  close(): void
++}
++
++export interface WasmLibrary {
++  symbols: Record<string, (...args: any[]) => any>
++  createCallback(callback: (...args: any[]) => any, definition: WasmFfiFunction): WasmCallbackInstance
++  close(): void
++}
++
++export interface WasmFfiBackend {
++  readonly kind: "wasm"
++  readonly pointerSize: 4
++  readonly memory: WebAssembly.Memory
++  readonly instance: WebAssembly.Instance
++  dlopen(path: unknown, symbols: Record<string, WasmFfiFunction>): WasmLibrary
++  ptr(value: ArrayBufferLike | ArrayBufferView): number
++  suffix: string
++  toArrayBuffer(pointer: number | bigint, offset: number | undefined, length: number): ArrayBuffer
++  toNativeView<T extends ArrayBufferView>(
++    ctor: { new (buffer: ArrayBufferLike, byteOffset: number, length: number): T; BYTES_PER_ELEMENT: number },
++    pointer: number | bigint,
++    byteLength: number,
++  ): T
++}
++
++export interface OpenTUIWasmHost {
++  /** Bytes the core writes to fd 1 (rendered frames, terminal control). */
++  stdout?: (bytes: Uint8Array) => void
++  /** Bytes the core writes to fd 2. Defaults to console.error. */
++  stderr?: (bytes: Uint8Array) => void
++  /** Environment visible to the core through WASI environ_get. */
++  env?: Record<string, string | undefined>
++}
++
++export interface OpenTUIWasmInstance {
++  readonly instance: WebAssembly.Instance
++  readonly memory: WebAssembly.Memory
++  /** Replace where fd 1 / fd 2 output goes (e.g. once xterm.js is ready). */
++  setHost(host: OpenTUIWasmHost): void
++}
++
++const WASI_ESUCCESS = 0
++const WASI_EBADF = 8
++const WASI_EINVAL = 28
++const WASI_ENOSYS = 52
++const WASI_ENOTCAPABLE = 76
++const WASI_ESPIPE = 70
++
++const textEncoder = new TextEncoder()
++const textDecoder = new TextDecoder()
++
++/**
++ * The handful of WASI preview1 calls the core imports. There is no filesystem:
++ * stdout/stderr go to the host callbacks, stdin reads as empty, and everything
++ * path-based fails with ENOTCAPABLE (no preopened directories).
++ */
++function createWasi(getMemory: () => WebAssembly.Memory, hostRef: { current: OpenTUIWasmHost }) {
++  const view = () => new DataView(getMemory().buffer)
++  const bytes = () => new Uint8Array(getMemory().buffer)
++  const envEntries = () =>
++    Object.entries(hostRef.current.env ?? {})
++      .filter(([, value]) => value !== undefined)
++      .map(([key, value]) => textEncoder.encode(`${key}=${value}\0`))
++
++  const writeStd = (fd: number, chunk: Uint8Array) => {
++    const host = hostRef.current
++    if (fd === 1) {
++      if (host.stdout) host.stdout(chunk)
++    } else if (host.stderr) {
++      host.stderr(chunk)
++    } else {
++      console.error(textDecoder.decode(chunk))
++    }
++  }
++
++  return {
++    fd_write(fd: number, iovs: number, iovsLen: number, nwrittenPtr: number): number {
++      if (fd !== 1 && fd !== 2) return WASI_EBADF
++      const dv = view()
++      const mem = bytes()
++      let total = 0
++      const parts: Uint8Array[] = []
++      for (let i = 0; i < iovsLen; i++) {
++        const base = dv.getUint32(iovs + i * 8, true)
++        const len = dv.getUint32(iovs + i * 8 + 4, true)
++        if (len === 0) continue
++        // Copy: the host may hold on to the chunk (xterm.js queues writes).
++        parts.push(mem.slice(base, base + len))
++        total += len
++      }
++      if (parts.length === 1) {
++        writeStd(fd, parts[0]!)
++      } else if (parts.length > 1) {
++        const joined = new Uint8Array(total)
++        let off = 0
++        for (const part of parts) {
++          joined.set(part, off)
++          off += part.length
++        }
++        writeStd(fd, joined)
++      }
++      dv.setUint32(nwrittenPtr, total, true)
++      return WASI_ESUCCESS
++    },
++    fd_pwrite(): number {
++      return WASI_ESPIPE
++    },
++    fd_read(fd: number, _iovs: number, _iovsLen: number, nreadPtr: number): number {
++      if (fd !== 0) return WASI_EBADF
++      view().setUint32(nreadPtr, 0, true)
++      return WASI_ESUCCESS
++    },
++    fd_seek(): number {
++      return WASI_ESPIPE
++    },
++    fd_close(): number {
++      return WASI_ESUCCESS
++    },
++    fd_fdstat_get(fd: number, statPtr: number): number {
++      if (fd > 2) return WASI_EBADF
++      const dv = view()
++      // filetype: character device; flags 0; rights: all.
++      dv.setUint8(statPtr, 2)
++      dv.setUint16(statPtr + 2, 0, true)
++      dv.setBigUint64(statPtr + 8, 0xffffffffffffffffn, true)
++      dv.setBigUint64(statPtr + 16, 0xffffffffffffffffn, true)
++      return WASI_ESUCCESS
++    },
++    fd_filestat_get(fd: number, statPtr: number): number {
++      if (fd > 2) return WASI_EBADF
++      const mem = bytes()
++      mem.fill(0, statPtr, statPtr + 64)
++      new DataView(mem.buffer).setUint8(statPtr + 16, 2)
++      return WASI_ESUCCESS
++    },
++    fd_prestat_get(): number {
++      return WASI_EBADF
++    },
++    fd_prestat_dir_name(): number {
++      return WASI_EBADF
++    },
++    path_open(): number {
++      return WASI_ENOTCAPABLE
++    },
++    path_create_directory(): number {
++      return WASI_ENOTCAPABLE
++    },
++    environ_sizes_get(countPtr: number, sizePtr: number): number {
++      const entries = envEntries()
++      const dv = view()
++      dv.setUint32(countPtr, entries.length, true)
++      dv.setUint32(
++        sizePtr,
++        entries.reduce((sum, entry) => sum + entry.length, 0),
++        true,
++      )
++      return WASI_ESUCCESS
++    },
++    environ_get(environPtr: number, bufPtr: number): number {
++      const dv = view()
++      const mem = bytes()
++      let offset = bufPtr
++      envEntries().forEach((entry, i) => {
++        dv.setUint32(environPtr + i * 4, offset, true)
++        mem.set(entry, offset)
++        offset += entry.length
++      })
++      return WASI_ESUCCESS
++    },
++    args_sizes_get(countPtr: number, sizePtr: number): number {
++      const dv = view()
++      dv.setUint32(countPtr, 0, true)
++      dv.setUint32(sizePtr, 0, true)
++      return WASI_ESUCCESS
++    },
++    args_get(): number {
++      return WASI_ESUCCESS
++    },
++    clock_time_get(clockId: number, _precision: bigint, outPtr: number): number {
++      let ns: bigint
++      if (clockId === 0) {
++        ns = BigInt(Date.now()) * 1_000_000n
++      } else {
++        const now = typeof performance !== "undefined" ? performance.now() : Date.now()
++        ns = BigInt(Math.round(now * 1_000_000))
++      }
++      view().setBigUint64(outPtr, ns, true)
++      return WASI_ESUCCESS
++    },
++    clock_res_get(_clockId: number, outPtr: number): number {
++      view().setBigUint64(outPtr, 1000n, true)
++      return WASI_ESUCCESS
++    },
++    random_get(bufPtr: number, len: number): number {
++      const target = bytes().subarray(bufPtr, bufPtr + len)
++      if (typeof crypto !== "undefined" && crypto.getRandomValues) {
++        for (let off = 0; off < target.length; off += 65536) {
++          crypto.getRandomValues(target.subarray(off, Math.min(off + 65536, target.length)))
++        }
++      } else {
++        for (let i = 0; i < target.length; i++) target[i] = (Math.random() * 256) | 0
++      }
++      return WASI_ESUCCESS
++    },
++    // Only reached by std.Thread.sleep (a cosmetic delay at renderer
++    // shutdown). The main thread cannot block, so report every subscription
++    // as fired immediately.
++    poll_oneoff(inPtr: number, outPtr: number, nsubscriptions: number, neventsPtr: number): number {
++      const dv = view()
++      for (let i = 0; i < nsubscriptions; i++) {
++        const sub = inPtr + i * 48
++        const evt = outPtr + i * 32
++        dv.setBigUint64(evt, dv.getBigUint64(sub, true), true)
++        dv.setUint16(evt + 8, 0, true)
++        dv.setUint8(evt + 10, dv.getUint8(sub + 8))
++      }
++      dv.setUint32(neventsPtr, nsubscriptions, true)
++      return WASI_ESUCCESS
++    },
++    sched_yield(): number {
++      return WASI_ESUCCESS
++    },
++    proc_exit(code: number): never {
++      throw new Error(`opentui wasm core called proc_exit(${code})`)
++    },
++    proc_raise(): number {
++      return WASI_ENOSYS
++    },
++  }
++}
++
++function wasiImportsFor(module: WebAssembly.Module, wasi: Record<string, (...args: any[]) => any>) {
++  const imports: Record<string, Record<string, (...args: any[]) => any>> = {}
++  for (const entry of WebAssembly.Module.imports(module)) {
++    if (entry.kind !== "function") continue
++    const namespace = (imports[entry.module] ??= {})
++    namespace[entry.name] =
++      entry.module === "wasi_snapshot_preview1" && wasi[entry.name]
++        ? wasi[entry.name]!
++        : () => {
++            console.warn(`opentui wasm: unimplemented import ${entry.module}.${entry.name}`)
++            return WASI_ENOSYS
++          }
++  }
++  return imports
++}
++
++function finishInstance(instance: WebAssembly.Instance, hostRef: { current: OpenTUIWasmHost }): OpenTUIWasmInstance {
++  const exports = instance.exports as Record<string, unknown>
++  const memory = exports.memory as WebAssembly.Memory
++  if (typeof exports._initialize === "function") {
++    ;(exports._initialize as () => void)()
++  }
++  return {
++    instance,
++    memory,
++    setHost(host) {
++      hostRef.current = host
++    },
++  }
++}
++
++/** Synchronously instantiate the core (fine in Bun/Node and in workers). */
++export function instantiateOpenTUIWasmSync(
++  source: BufferSource | WebAssembly.Module,
++  host: OpenTUIWasmHost = {},
++): OpenTUIWasmInstance {
++  const module =
++    source instanceof WebAssembly.Module ? source : new WebAssembly.Module(makeFunctionTableGrowable(source))
++  const hostRef = { current: host }
++  let memory: WebAssembly.Memory | null = null
++  const wasi = createWasi(() => memory!, hostRef)
++  const instance = new WebAssembly.Instance(module, wasiImportsFor(module, wasi))
++  memory = instance.exports.memory as WebAssembly.Memory
++  return finishInstance(instance, hostRef)
++}
++
++/** Asynchronously instantiate the core (browsers' main thread). */
++export async function instantiateOpenTUIWasm(
++  source: BufferSource | WebAssembly.Module | Response | Promise<Response>,
++  host: OpenTUIWasmHost = {},
++): Promise<OpenTUIWasmInstance> {
++  let module: WebAssembly.Module
++  if (source instanceof WebAssembly.Module) {
++    module = source
++  } else if (typeof Response !== "undefined" && (source instanceof Response || source instanceof Promise)) {
++    const response = await source
++    module = await WebAssembly.compile(makeFunctionTableGrowable(await response.arrayBuffer()))
++  } else {
++    module = await WebAssembly.compile(makeFunctionTableGrowable(source as BufferSource))
++  }
++  const hostRef = { current: host }
++  let memory: WebAssembly.Memory | null = null
++  const wasi = createWasi(() => memory!, hostRef)
++  const instance = await WebAssembly.instantiate(module, wasiImportsFor(module, wasi))
++  memory = instance.exports.memory as WebAssembly.Memory
++  return finishInstance(instance, hostRef)
++}
++
++// ---------------------------------------------------------------------------
++// Callback trampolines
++
++const WASM_TYPE: Record<string, number> = {
++  i32: 0x7f,
++  i64: 0x7e,
++  f32: 0x7d,
++  f64: 0x7c,
++}
++
++function wasmValueType(type: string): "i32" | "i64" | "f32" | "f64" {
++  switch (type) {
++    case "u64":
++    case "i64":
++    case "uint64_t":
++    case "int64_t":
++      return "i64"
++    case "f32":
++    case "float":
++      return "f32"
++    case "f64":
++    case "double":
++      return "f64"
++    default:
++      return "i32"
++  }
++}
++
++function uleb(value: number): number[] {
++  const out: number[] = []
++  do {
++    let byte = value & 0x7f
++    value >>>= 7
++    if (value !== 0) byte |= 0x80
++    out.push(byte)
++  } while (value !== 0)
++  return out
++}
++
++function section(id: number, body: number[]): number[] {
++  return [id, ...uleb(body.length), ...body]
++}
++
++const trampolineModules = new Map<string, WebAssembly.Module>()
++
++/**
++ * A module that imports one JS function with the given signature and
++ * re-exports it. Exported functions are real wasm functions, so they can be
++ * stored in the core's function table, which a plain JS function cannot
++ * (WebAssembly.Function is not shipped by browsers yet).
++ */
++function trampolineModule(params: string[], results: string[]): WebAssembly.Module {
++  const key = `${params.join(",")}->${results.join(",")}`
++  let module = trampolineModules.get(key)
++  if (module) return module
++  const type = [
++    0x60,
++    ...uleb(params.length),
++    ...params.map((p) => WASM_TYPE[p]!),
++    ...uleb(results.length),
++    ...results.map((r) => WASM_TYPE[r]!),
++  ]
++  const name = [0x66] // "f"
++  const bytes = [
++    0x00,
++    0x61,
++    0x73,
++    0x6d,
++    0x01,
++    0x00,
++    0x00,
++    0x00,
++    ...section(1, [1, ...type]),
++    ...section(2, [1, 1, 0x65 /* "e" */, ...uleb(name.length), ...name, 0x00, 0]),
++    ...section(7, [1, ...uleb(name.length), ...name, 0x00, 0]),
++  ]
++  module = new WebAssembly.Module(new Uint8Array(bytes))
++  trampolineModules.set(key, module)
++  return module
++}
++
++
++function readUleb(bytes: Uint8Array, offset: number): [value: number, next: number] {
++  let result = 0
++  let shift = 0
++  let byte: number
++  do {
++    byte = bytes[offset++]!
++    result += (byte & 0x7f) * 2 ** shift
++    shift += 7
++  } while (byte & 0x80)
++  return [result, offset]
++}
++
++/**
++ * Drop the maximum from the module's function table so callbacks can be
++ * added with table.grow(). Zig's wasm linker emits a fixed-size table and has
++ * no --growable-table switch; rewriting the table section is cheaper than
++ * reserving placeholder slots in native code.
++ */
++export function makeFunctionTableGrowable(source: BufferSource): Uint8Array<ArrayBuffer> {
++  const bytes = ArrayBuffer.isView(source)
++    ? new Uint8Array(source.buffer as ArrayBuffer, source.byteOffset, source.byteLength)
++    : new Uint8Array(source as ArrayBuffer)
++  let offset = 8
++  while (offset < bytes.length) {
++    const id = bytes[offset]!
++    const [size, bodyStart] = readUleb(bytes, offset + 1)
++    const bodyEnd = bodyStart + size
++    if (id === 4) {
++      let p = bodyStart
++      const [count, afterCount] = readUleb(bytes, p)
++      p = afterCount
++      const body: number[] = [...uleb(count)]
++      let changed = false
++      for (let i = 0; i < count; i++) {
++        const refType = bytes[p++]!
++        const flags = bytes[p++]!
++        const [min, afterMin] = readUleb(bytes, p)
++        p = afterMin
++        if (flags & 1) {
++          const [, afterMax] = readUleb(bytes, p)
++          p = afterMax
++          changed = true
++        }
++        body.push(refType, flags & ~1, ...uleb(min))
++      }
++      if (!changed) return bytes
++      const header = [4, ...uleb(body.length)]
++      const out = new Uint8Array(offset + header.length + body.length + (bytes.length - bodyEnd))
++      out.set(bytes.subarray(0, offset), 0)
++      out.set(header, offset)
++      out.set(body, offset + header.length)
++      out.set(bytes.subarray(bodyEnd), offset + header.length + body.length)
++      return out
++    }
++    offset = bodyEnd
++  }
++  return bytes
++}
++
++// ---------------------------------------------------------------------------
++// Argument / return conversion
++
++type Conv = ((value: any) => any) | null
++
++function isPointerType(type: string): boolean {
++  return type === "ptr" || type === "pointer" || type === "function" || type === "callback" || type === "buffer"
++}
++
++function returnConverter(type: string | undefined): Conv {
++  switch (type) {
++    case undefined:
++    case "void":
++      return () => undefined
++    case "bool":
++      return (v: number) => v !== 0
++    case "u32":
++    case "uint32_t":
++    case "usize":
++      return (v: number) => v >>> 0
++    case "ptr":
++    case "pointer":
++      // Bun returns null for NULL pointers.
++      return (v: number) => (v === 0 ? null : v >>> 0)
++    case "u64":
++    case "uint64_t":
++      return (v: bigint) => BigInt.asUintN(64, v)
++    default:
++      return null
++  }
++}
++
++function callbackArgConverter(type: string): Conv {
++  switch (type) {
++    case "bool":
++      return (v: number) => v !== 0
++    case "u32":
++    case "uint32_t":
++    case "usize":
++    case "ptr":
++    case "pointer":
++      return (v: number) => v >>> 0
++    case "u64":
++    case "uint64_t":
++      return (v: bigint) => BigInt.asUintN(64, v)
++    default:
++      return null
++  }
++}
++
++function callbackReturnConverter(type: string | undefined): Conv {
++  switch (type) {
++    case undefined:
++    case "void":
++      return () => undefined
++    case "u64":
++    case "i64":
++    case "uint64_t":
++    case "int64_t":
++      return (v: number | bigint | undefined) => BigInt(v ?? 0)
++    case "bool":
++      return (v: unknown) => (v ? 1 : 0)
++    default:
++      return (v: unknown) => (v == null ? 0 : v)
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Scratch regions for JS buffers passed by pointer
++
++interface Region {
++  addr: number
++  len: number
++  source: Uint8Array
++  key: ArrayBufferLike
++  offset: number
++  /** malloc'd separately (too big for, or overflowing, the arena). */
++  heap: boolean
++}
++
++const ARENA_BYTES = 1 << 20
++const ARENA_ALIGN = 8
++const POINTER_SIZE = 4
++
++export function createWasmBackend(wasm: OpenTUIWasmInstance): WasmFfiBackend {
++  const exports = wasm.instance.exports as Record<string, any>
++  const memory = wasm.memory
++  const table = exports.__indirect_function_table as WebAssembly.Table | undefined
++  const alloc = exports.opentuiWasmAlloc as (len: number) => number
++  const free = exports.opentuiWasmFree as (ptr: number) => void
++  if (typeof alloc !== "function" || typeof free !== "function") {
++    throw new Error("opentui wasm core is missing opentuiWasmAlloc/opentuiWasmFree exports")
++  }
++
++  const memoryBuffer = memory.buffer
++  const heap = () => {
++    if (memory.buffer !== memoryBuffer) {
++      // initial == max memory in the build; growth would detach every view.
++      throw new Error("opentui wasm memory grew; native buffer views are detached")
++    }
++    return new Uint8Array(memoryBuffer)
++  }
++
++  const arenaBase = alloc(ARENA_BYTES)
++  let arenaTop = arenaBase
++  const regions = new Map<number, Region>()
++  // Last region per source buffer, to reuse instead of allocating again when
++  // the same JS buffer (e.g. an RGBA) is passed many times in one turn.
++  const regionBySource = new WeakMap<ArrayBufferLike, Region[]>()
++  let depth = 0
++  let flushScheduled = false
++
++  const releaseAll = () => {
++    for (const region of regions.values()) {
++      if (region.heap) free(region.addr)
++    }
++    regions.clear()
++    arenaTop = arenaBase
++  }
++
++  const scheduleFlush = () => {
++    if (flushScheduled) return
++    flushScheduled = true
++    queueMicrotask(() => {
++      flushScheduled = false
++      if (depth === 0) {
++        releaseAll()
++      } else {
++        scheduleFlush()
++      }
++    })
++  }
++
++  const reserve = (len: number): { addr: number; heap: boolean } => {
++    const size = Math.max(len, 1)
++    const start = (arenaTop + ARENA_ALIGN - 1) & ~(ARENA_ALIGN - 1)
++    if (start + size <= arenaBase + ARENA_BYTES) {
++      arenaTop = start + size
++      return { addr: start, heap: false }
++    }
++    const addr = alloc(size)
++    if (!addr) throw new Error(`opentui wasm: out of memory staging a ${len}-byte buffer`)
++    return { addr, heap: true }
++  }
++
++  const toBytes = (value: ArrayBufferLike | ArrayBufferView): Uint8Array => {
++    if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
++    return new Uint8Array(value as ArrayBufferLike)
++  }
++
++  const ptr = (value: ArrayBufferLike | ArrayBufferView): number => {
++    const source = toBytes(value)
++    if (source.buffer === memoryBuffer) return source.byteOffset
++    const key = source.buffer
++    const known = regionBySource.get(key)
++    if (known) {
++      for (const region of known) {
++        if (region.offset === source.byteOffset && region.len === source.byteLength && regions.get(region.addr) === region) {
++          heap().set(source, region.addr)
++          return region.addr
++        }
++      }
++    }
++    const { addr, heap: isHeap } = reserve(source.byteLength)
++    heap().set(source, addr)
++    const region: Region = { addr, len: source.byteLength, source, key, offset: source.byteOffset, heap: isHeap }
++    regions.set(addr, region)
++    if (known) known.push(region)
++    else regionBySource.set(key, [region])
++    scheduleFlush()
++    return addr
++  }
++
++  const toAddress = (value: unknown): number => {
++    if (value == null) return 0
++    if (typeof value === "number") return value
++    if (typeof value === "bigint") return Number(value)
++    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
++      return (value as ArrayBufferView).byteLength === 0 ? 0 : ptr(value as ArrayBufferView)
++    }
++    if (typeof value === "object" && value !== null && "ptr" in value) {
++      return toAddress((value as { ptr: unknown }).ptr)
++    }
++    throw new TypeError(`opentui wasm: cannot pass ${typeof value} as a pointer`)
++  }
++
++  const argConverter = (type: string): Conv => {
++    if (isPointerType(type)) return toAddress
++    switch (type) {
++      case "u64":
++      case "i64":
++      case "uint64_t":
++      case "int64_t":
++        return (v: number | bigint) => (typeof v === "bigint" ? BigInt.asIntN(64, v) : BigInt(Math.trunc(v ?? 0)))
++      case "bool":
++        return (v: unknown) => (v ? 1 : 0)
++      default:
++        return null
++    }
++  }
++
++  const copyBack = (addrs: number[]) => {
++    if (addrs.length === 0) return
++    const mem = heap()
++    for (const addr of addrs) {
++      const region = regions.get(addr)
++      if (region) region.source.set(mem.subarray(addr, addr + region.len))
++    }
++  }
++
++  const wrap = (name: string, fn: (...args: any[]) => any, definition: WasmFfiFunction) => {
++    const argTypes = definition.args ?? []
++    const convs = argTypes.map(argConverter)
++    const pointerIndexes = argTypes.flatMap((type, index) => (isPointerType(type) ? [index] : []))
++    const ret = returnConverter(definition.returns)
++    const nargs = argTypes.length
++    const call = (...args: any[]) => {
++      const converted = new Array(nargs)
++      for (let i = 0; i < nargs; i++) {
++        const conv = convs[i]
++        converted[i] = conv ? conv(args[i]) : args[i]
++      }
++      depth++
++      let result: any
++      try {
++        result = fn(...converted)
++      } finally {
++        depth--
++        if (regions.size > 0) {
++          const used: number[] = []
++          for (const index of pointerIndexes) {
++            const addr = converted[index]
++            if (addr && regions.has(addr)) used.push(addr)
++          }
++          copyBack(used)
++        }
++      }
++      return ret ? ret(result) : result
++    }
++    Object.defineProperty(call, "name", { value: name })
++    return call
++  }
++
++  const freeSlots: number[] = []
++
++  const backend: WasmFfiBackend = {
++    kind: "wasm",
++    pointerSize: POINTER_SIZE,
++    memory,
++    instance: wasm.instance,
++    dlopen(_path, definitions) {
++      const symbols: Record<string, (...args: any[]) => any> = {}
++      for (const [name, definition] of Object.entries(definitions)) {
++        const fn = exports[name]
++        if (typeof fn !== "function") {
++          throw new Error(`opentui wasm core does not export ${name}`)
++        }
++        symbols[name] = wrap(name, fn, definition)
++      }
++      const callbacks = new Set<WasmCallbackInstance>()
++      let closed = false
++      return {
++        symbols,
++        createCallback(callback, definition) {
++          if (closed) throw new Error("Cannot create FFI callback after library.close() has been called")
++          if (!table) throw new Error("opentui wasm core does not export its function table")
++          const argTypes = definition.args ?? []
++          const params = argTypes.map(wasmValueType)
++          const results = definition.returns && definition.returns !== "void" ? [wasmValueType(definition.returns)] : []
++          const argConvs = argTypes.map(callbackArgConverter)
++          const retConv = callbackReturnConverter(definition.returns)
++          const nargs = argTypes.length
++          const handler = (...raw: any[]) => {
++            const args = new Array(nargs)
++            for (let i = 0; i < nargs; i++) {
++              const conv = argConvs[i]
++              args[i] = conv ? conv(raw[i]) : raw[i]
++            }
++            return retConv ? retConv(callback(...args)) : callback(...args)
++          }
++          const trampoline = new WebAssembly.Instance(trampolineModule(params, results), { e: { f: handler } })
++          let slot = freeSlots.pop()
++          if (slot === undefined) slot = table.grow(1)
++          table.set(slot, trampoline.exports.f as any)
++          let ptrValue: number | null = slot
++          const instance: WasmCallbackInstance = {
++            get ptr() {
++              return ptrValue
++            },
++            threadsafe: false,
++            close() {
++              if (ptrValue === null) return
++              table.set(ptrValue, null)
++              freeSlots.push(ptrValue)
++              ptrValue = null
++              callbacks.delete(instance)
++            },
++          }
++          callbacks.add(instance)
++          return instance
++        },
++        close() {
++          if (closed) return
++          closed = true
++          for (const callback of [...callbacks]) callback.close()
++        },
++      }
++    },
++    ptr,
++    suffix: "wasm",
++    toArrayBuffer(pointer, offset, length) {
++      const start = Number(pointer) + (offset ?? 0)
++      return memoryBuffer.slice(start, start + length)
++    },
++    toNativeView(ctor, pointer, byteLength) {
++      heap()
++      return new ctor(memoryBuffer, Number(pointer), byteLength / ctor.BYTES_PER_ELEMENT)
++    },
++  }
++  return backend
++}
++
++declare global {
++  // Set by a host before @opentui/core is imported to run on the wasm core.
++  // eslint-disable-next-line no-var
++  var __OPENTUI_WASM__: OpenTUIWasmInstance | undefined
++}
+diff --git a/packages/core/src/platform/ffi.ts b/packages/core/src/platform/ffi.ts
+index 7636509b..ecc8a011 100644
+--- a/packages/core/src/platform/ffi.ts
++++ b/packages/core/src/platform/ffi.ts
+@@ -1,5 +1,6 @@
+ import { createRequire } from "node:module"
+ import { fileURLToPath } from "node:url"
++import { createWasmBackend, instantiateOpenTUIWasmSync, type WasmFfiBackend } from "./ffi-wasm.js"
+ 
+ declare const pointerBrand: unique symbol
+ 
+@@ -101,8 +102,19 @@ interface FfiBackend {
+   ptr(value: PointerSource): Pointer
+   suffix: string
+   toArrayBuffer(pointer: Pointer, offset: number | undefined, length: number): ArrayBuffer
++  // A typed view that aliases native memory. Bun's toArrayBuffer already
++  // aliases; the wasm backend's toArrayBuffer copies, so call sites that rely
++  // on aliasing (shared buffer planes, refcounts) go through this instead.
++  toNativeView?<T extends ArrayBufferView>(ctor: TypedArrayConstructor<T>, pointer: Pointer, byteLength: number): T
+ }
+ 
++export interface TypedArrayConstructor<T extends ArrayBufferView> {
++  new (buffer: ArrayBufferLike, byteOffset?: number, length?: number): T
++  readonly BYTES_PER_ELEMENT: number
++}
++
++export type FfiBackendKind = "bun" | "node" | "wasm" | "unsupported"
++
+ interface BunFFIFunction {
+   readonly args?: readonly FFITypeOrString[]
+   readonly returns?: FFITypeOrString
+@@ -201,18 +213,74 @@ const isBun =
+   typeof process.versions.bun === "string"
+ 
+ const requireModule = createRequire(import.meta.url)
++let backendKind: FfiBackendKind = "unsupported"
+ const backend = loadBackend()
+ 
++function wasmBackendRequested(): boolean {
++  if (globalThis.__OPENTUI_WASM__) return true
++  return typeof process !== "undefined" && process.env?.OPENTUI_BACKEND === "wasm"
++}
++
++// The wasm core (zig build -Dtarget=wasm32-wasi). A host that has already
++// instantiated it (browsers: see ffi-wasm.ts instantiateOpenTUIWasm) sets
++// globalThis.__OPENTUI_WASM__ before importing @opentui/core. Under Bun/Node,
++// OPENTUI_BACKEND=wasm loads the module from OPENTUI_WASM_PATH (default: the
++// in-tree build output) and wires fd 1/2 to process.stdout/stderr.
++function loadWasmBackend(): FfiBackend {
++  let wasm = globalThis.__OPENTUI_WASM__
++  if (!wasm) {
++    const fs = requireModule("node:fs") as typeof import("node:fs")
++    // Packaged builds ship the core next to the bundle; the source tree has
++    // it in the zig build output.
++    const candidates = [
++      process.env.OPENTUI_WASM_PATH,
++      fileURLToPath(new URL("./opentui.wasm", import.meta.url)),
++      fileURLToPath(new URL("../zig/lib/wasm32-wasi/opentui.wasm", import.meta.url)),
++    ].filter((candidate): candidate is string => Boolean(candidate))
++    const wasmPath = candidates.find((candidate) => fs.existsSync(candidate))
++    if (!wasmPath) {
++      throw new Error(
++        `OPENTUI_BACKEND=wasm but no opentui.wasm was found (tried ${candidates.join(", ")}); build it with \`zig build -Dtarget=wasm32-wasi\` or set OPENTUI_WASM_PATH`,
++      )
++    }
++    wasm = instantiateOpenTUIWasmSync(fs.readFileSync(wasmPath), {
++      stdout: (bytes) => process.stdout.write(bytes),
++      stderr: (bytes) => process.stderr.write(bytes),
++      env: { ...process.env },
++    })
++    globalThis.__OPENTUI_WASM__ = wasm
++  }
++  const wasmBackend: WasmFfiBackend = createWasmBackend(wasm)
++  // bun-ffi-structs packs pointer fields with its own ptr() and a pointer
++  // size taken from process.arch; point it at the wasm backend instead
++  // (requires the bun-ffi-structs backend-override patch). zig-structs.ts
++  // imports this module before bun-ffi-structs so this runs first.
++  globalThis.__BUN_FFI_STRUCTS_BACKEND__ = {
++    ptr: wasmBackend.ptr,
++    toArrayBuffer: wasmBackend.toArrayBuffer,
++    pointerSize: wasmBackend.pointerSize,
++  }
++  return wasmBackend as unknown as FfiBackend
++}
++
+ function loadBackend(): FfiBackend {
++  if (wasmBackendRequested()) {
++    backendKind = "wasm"
++    return loadWasmBackend()
++  }
++
+   // Keep the Bun module import behind the runtime check so Node does not
+   // resolve bun:ffi during import.
+   if (isBun) {
++    backendKind = "bun"
+     return createBunBackend(requireModule("bun:ffi") as BunFfiBackend)
+   }
+ 
+   try {
+     const nodeFfi = requireModule("node:ffi") as NodeFfiBackend & { default?: NodeFfiBackend }
+-    return createNodeBackend(nodeFfi.default ?? nodeFfi)
++    const nodeBackend = createNodeBackend(nodeFfi.default ?? nodeFfi)
++    backendKind = "node"
++    return nodeBackend
+   } catch (error) {
+     return createUnsupportedBackend(error)
+   }
+@@ -221,11 +289,12 @@ function loadBackend(): FfiBackend {
+ // Normalize foreign pointer-like values into the current runtime's pointer
+ // representation before passing them to native code.
+ export function toPointer(value: PointerInput): Pointer {
+-  if (isBun && typeof value === "bigint") {
++  const numberPointers = isBun || backendKind === "wasm"
++  if (numberPointers && typeof value === "bigint") {
+     return toSafeNumberPointer(value) as Pointer
+   }
+ 
+-  if (!isBun && typeof value === "number") {
++  if (!numberPointers && typeof value === "number") {
+     return toSafeBigIntPointer(value) as Pointer
+   }
+ 
+@@ -662,3 +731,29 @@ export const dlopen = backend.dlopen
+ export const ptr = backend.ptr
+ export const suffix = backend.suffix
+ export const toArrayBuffer = backend.toArrayBuffer
++export const ffiBackendKind: FfiBackendKind = backendKind
++
++// A typed array over native memory that stays in sync with it (writes from
++// either side are visible to the other).
++export function toNativeView<T extends ArrayBufferView>(
++  ctor: TypedArrayConstructor<T>,
++  pointer: Pointer,
++  byteLength: number,
++): T {
++  if (backend.toNativeView) {
++    return backend.toNativeView(ctor, pointer, byteLength)
++  }
++  return new ctor(backend.toArrayBuffer(pointer, 0, byteLength))
++}
++
++declare global {
++  // Override hook read by bun-ffi-structs (see loadWasmBackend).
++  // eslint-disable-next-line no-var
++  var __BUN_FFI_STRUCTS_BACKEND__:
++    | {
++        ptr(value: PointerSource): unknown
++        toArrayBuffer(pointer: unknown, offset: number | undefined, length: number): ArrayBuffer
++        pointerSize: number
++      }
++    | undefined
++}
+diff --git a/packages/core/src/platform/runtime-assets.browser.ts b/packages/core/src/platform/runtime-assets.browser.ts
+new file mode 100644
+index 00000000..950cb65b
+--- /dev/null
++++ b/packages/core/src/platform/runtime-assets.browser.ts
+@@ -0,0 +1,19 @@
++// Browser replacement for @opentui/core's "#opentui/runtime-assets". The
++// native library is the wasm core the host instantiated before importing
++// @opentui/core, so there is no library path; tree-sitter assets are not
++// bundled in this build (syntax highlighting is off).
++export function resolveDefaultParserAsset(relativePath: string, fallbackPath: URL): Promise<string> {
++  return Promise.resolve(new URL(relativePath, fallbackPath).href)
++}
++
++export function resolveDefaultTreeSitterWorkerPath(fallbackPath: URL): string {
++  return fallbackPath.href
++}
++
++export function resolveTreeSitterWasm(): Promise<string> {
++  return Promise.reject(new Error("tree-sitter is not bundled in the browser build"))
++}
++
++export async function resolveNativeLibraryPath(): Promise<string> {
++  return "opentui.wasm"
++}
+diff --git a/packages/core/src/zig-structs.ts b/packages/core/src/zig-structs.ts
+index 06d4081d..7ef3c998 100644
+--- a/packages/core/src/zig-structs.ts
++++ b/packages/core/src/zig-structs.ts
+@@ -1,5 +1,7 @@
+-import { defineStruct, defineEnum } from "bun-ffi-structs"
++// ffi.js first: selecting the wasm backend configures bun-ffi-structs, which
++// must happen before bun-ffi-structs evaluates.
+ import { toArrayBuffer, type Pointer } from "./platform/ffi.js"
++import { defineStruct, defineEnum } from "bun-ffi-structs"
+ import { RGBA, normalizeColorValue } from "./lib/RGBA.js"
+ 
+ // Returns the owning Uint16Array so bun-ffi-structs serializes the address and
+diff --git a/packages/core/src/zig.ts b/packages/core/src/zig.ts
+index 0a7e6f06..57b8e087 100644
+--- a/packages/core/src/zig.ts
++++ b/packages/core/src/zig.ts
+@@ -1,5 +1,6 @@
+ import {
+   dlopen,
++  ffiBackendKind,
+   ffiBool,
+   toArrayBuffer,
+   ptr,
+@@ -109,7 +110,11 @@ export type NativeRenderableHandle = NativeHandle<"native_renderable">
+ let targetLibPath: string | undefined
+ let targetLibError: Error | undefined
+ 
+-try {
++if (ffiBackendKind === "wasm") {
++  // The wasm backend's dlopen ignores the path: the module is already
++  // instantiated (see platform/ffi.ts).
++  targetLibPath = "opentui.wasm"
++} else try {
+   targetLibPath = await resolveNativeLibraryPath()
+   if (isBunfsPath(targetLibPath)) {
+     targetLibPath = targetLibPath.replace("../", "")
+-- 
+2.43.0
+

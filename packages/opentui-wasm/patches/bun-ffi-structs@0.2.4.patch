@@ -1,0 +1,21 @@
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -17,6 +17,9 @@
+   };
+ }
+ async function loadBackend() {
++  if (globalThis.__BUN_FFI_STRUCTS_BACKEND__) {
++    return globalThis.__BUN_FFI_STRUCTS_BACKEND__;
++  }
+   if (typeof process !== "undefined" && "bun" in process.versions) {
+     return createBunBackend(await importModule("bun:ffi"));
+   }
+@@ -68,7 +71,7 @@
+   console.error("FATAL ERROR:", message);
+   throw new Error(message);
+ }
+-var pointerSize = process.arch === "x64" || process.arch === "arm64" ? 8 : 4;
++var pointerSize = backend.pointerSize ?? (process.arch === "x64" || process.arch === "arm64" ? 8 : 4);
+ var isBun = typeof process !== "undefined" && "bun" in process.versions;
+ var typeSizes = {
+   u8: 1,
