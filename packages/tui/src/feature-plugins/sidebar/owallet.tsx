@@ -4,6 +4,7 @@ import { createMemo, createSignal, For, onCleanup, Show } from "solid-js"
 import { Global } from "@opencode-ai/core/global"
 import { NormBudget } from "@opencode-ai/core/norm-budget"
 import { NormPricing } from "@opencode-ai/core/norm-pricing"
+import { NormAgentModels } from "@opencode-ai/core/norm-agent-models"
 import path from "node:path"
 import fs from "node:fs/promises"
 import open from "open"
@@ -203,6 +204,80 @@ function sessionAccess(api: TuiPluginApi): NormBudget.SessionAccess {
       )
     },
   }
+}
+
+/** `/compaction-model` and `/title-model`: which model norm's housekeeping
+ * calls run on. Saved in norm's data and applied server-side by the norm
+ * plugin's config hook, which re-runs when instances reload. */
+async function openAgentModelDialog(api: TuiPluginApi, agent: NormAgentModels.Agent) {
+  const current = (await NormAgentModels.get(agent).catch(() => undefined)) ?? ""
+  const overpay = api.state.provider.find((provider) => provider.id === "overpay")
+  const models = Object.values(overpay?.models ?? {})
+    .filter((model) => model.id !== "default")
+    .sort((a, b) => (a.name ?? a.id).localeCompare(b.name ?? b.id))
+  const automatic = NormPricing.cheapestForTitles(NormPricing.all())
+  const defaults =
+    agent === "title"
+      ? [
+          {
+            title: "Automatic — the cheapest model",
+            value: "",
+            description: automatic ? `default · now ${automatic.name ?? automatic.id}` : "default",
+          },
+          { title: "Same as the conversation", value: NormAgentModels.CONVERSATION },
+        ]
+      : [{ title: "Same as the conversation", value: "", description: "default" }]
+  const DialogSelect = api.ui.DialogSelect
+  api.ui.dialog.replace(() => (
+    <DialogSelect
+      title={agent === "title" ? "Title model" : "Compaction model"}
+      current={current}
+      options={[
+        ...defaults,
+        ...models.map((model) => {
+          const pricing = NormPricing.get(model.id)?.pricing
+          const context = model.limit?.context
+          return {
+            title: model.name ?? model.id,
+            value: `overpay/${model.id}`,
+            // Compaction reads the conversation at nearly the chat model's
+            // full window, so a smaller window there can't summarize it.
+            description: context ? `${Math.round(context / 1000)}k context` : undefined,
+            footer: pricing ? NormPricing.perMillion(pricing) : undefined,
+          }
+        }),
+      ]}
+      onSelect={(option) => {
+        const model = option.value || undefined
+        void NormAgentModels.set(agent, model).then(
+          async () => {
+            // Reload so the norm plugin re-applies the choice — unless this
+            // conversation is mid-reply, which a reload would cut off.
+            const sessionID = currentSessionID(api)
+            const busy = sessionID ? api.state.session.status(sessionID)?.type === "busy" : false
+            if (!busy) await api.client.global.dispose().catch(() => {})
+            const which = agent === "title" ? "Titling" : "Compacting"
+            const chosen =
+              model === undefined && agent === "title"
+                ? `${which} with the cheapest model`
+                : model === undefined || model === NormAgentModels.CONVERSATION
+                  ? `${which} with each conversation's own model`
+                  : `${which} with ${option.title}`
+            api.ui.toast({
+              variant: "info",
+              message: `${chosen}${busy ? " — takes effect once this reply finishes and norm restarts." : "."}${
+                agent === "compaction"
+                  ? " A smaller context window than your chat model's can't summarize a long conversation."
+                  : ""
+              }`,
+            })
+          },
+          () => api.ui.toast({ variant: "error", message: `Couldn't save the ${agent} model.` }),
+        )
+        api.ui.dialog.clear()
+      }}
+    />
+  ))
 }
 
 /** `/budget`: choose which spending limit to change — this conversation's
@@ -537,6 +612,26 @@ const tui: TuiPlugin = async (api) => {
         namespace: "palette",
         run() {
           void openBudgetDialog(api)
+        },
+      },
+      {
+        name: "norm.compaction-model",
+        title: "Set compaction model",
+        slashName: "compaction-model",
+        category: "Session",
+        namespace: "palette",
+        run() {
+          void openAgentModelDialog(api, "compaction")
+        },
+      },
+      {
+        name: "norm.title-model",
+        title: "Set title model",
+        slashName: "title-model",
+        category: "Session",
+        namespace: "palette",
+        run() {
+          void openAgentModelDialog(api, "title")
         },
       },
     ],

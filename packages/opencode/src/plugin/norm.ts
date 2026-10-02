@@ -1,6 +1,7 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Norm } from "@/norm/norm"
 import { NormBudget } from "@opencode-ai/core/norm-budget"
+import { NormAgentModels } from "@opencode-ai/core/norm-agent-models"
 
 /**
  * norm's built-in plugin: runs the owallet bootstrap (auto-start the server,
@@ -26,6 +27,11 @@ export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
       // stays warm from the first turn. owallet never forwards it as-is — it
       // sends an HMAC of it, and only once Overpay accepts the field.
       output.headers["x-session-id"] = hook.sessionID
+      // Titles, summaries and compaction send no tools, which owallet would
+      // otherwise answer with its own server-side loop and whole tool
+      // roster: a bigger prompt, and a model that could buy something
+      // mid-title. Ask for a plain completion instead.
+      if (Norm.PLAIN_AGENTS.has(hook.agent)) output.headers[Norm.TOOLS_HEADER] = "none"
       // Per-message limit (/budget → "Per-message limit"): the most one
       // message may authorize. owallet sizes each turn's hold within it and
       // refuses — before charging anything — a message that can't fit.
@@ -58,10 +64,16 @@ export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
       }
 
       const overpay = config.provider?.[Norm.PROVIDER_ID]
-      if (!overpay) return
-      const models = await Norm.marketplaceModels()
-      if (!models) return
-      overpay.models = Norm.mergeModels(overpay.models ?? {}, models)
+      const models = overpay ? await Norm.marketplaceModels() : undefined
+      if (overpay && models) overpay.models = Norm.mergeModels(overpay.models ?? {}, models)
+
+      // /compaction-model, /title-model and the title prompt: after the
+      // model list, so a choice the marketplace no longer offers is skipped
+      // rather than failing, and the automatic title model can be priced.
+      const [compaction, title] = await Promise.all(
+        (["compaction", "title"] as const).map((agent) => NormAgentModels.get(agent).catch(() => undefined)),
+      )
+      Norm.applyAgentModels(config, { compaction, title }, models)
     },
     auth: {
       provider: Norm.PROVIDER_ID,

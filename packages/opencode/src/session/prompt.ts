@@ -204,7 +204,11 @@ const layer = Layer.effect(
         m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)
       const idx = input.history.findIndex(real)
       if (idx === -1) return
-      if (input.history.filter(real).length !== 1) return
+      // norm: upstream titles only on the first message, so one refused or
+      // failed title call (e.g. over the per-message limit) left the session
+      // "New session" forever. Keep trying, from the first message, while
+      // the title is still the default — for the first few messages only.
+      if (input.history.filter(real).length > Norm.TITLE_ATTEMPTS) return
 
       const context = input.history.slice(0, idx + 1)
       const firstUser = context[idx]

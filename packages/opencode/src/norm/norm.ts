@@ -8,6 +8,7 @@ import { spawn, execFile } from "child_process"
 import { Global } from "@opencode-ai/core/global"
 import { NormBudget } from "@opencode-ai/core/norm-budget"
 import { NormPricing } from "@opencode-ai/core/norm-pricing"
+import { NormAgentModels } from "@opencode-ai/core/norm-agent-models"
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 
 // norm is opencode preconfigured for the Overpay owallet-marketplace stack:
@@ -214,6 +215,41 @@ export const OWALLET_ERROR_MARKER = "[owallet error]"
 
 export function isOwalletErrorText(text: string): boolean {
   return text.trimStart().startsWith(OWALLET_ERROR_MARKER)
+}
+
+/**
+ * An owallet refusal or failure as later turns should present it to the
+ * model. owallet streams these as reply text, so opencode stores them as
+ * an ordinary assistant reply — and replaying that put words in the model's
+ * mouth it never said: models disowned the turn or took the error for
+ * something the user wrote. MessageV2 drops that text and puts this note
+ * on the next user message instead, opencode's usual harness-note shape.
+ */
+/** owallet's plain-completion header (`x-owallet-tools: none`, after owallet
+ * 0.1.10); older serves ignore it and keep attaching their tool roster. */
+export const TOOLS_HEADER = "x-owallet-tools"
+/** opencode's housekeeping agents: they send no tools and need none. */
+export const PLAIN_AGENTS = new Set(["title", "compaction", "summary"])
+
+/** How many of a session's first user messages may each try to title it. */
+export const TITLE_ATTEMPTS = 3
+
+/** A reply text split at owallet's error marker: what the model actually
+ * said (possibly empty), and the error owallet appended, if any. */
+export function splitOwalletError(text: string): { reply: string; error?: string } {
+  const at = text.indexOf(OWALLET_ERROR_MARKER)
+  if (at === -1) return { reply: text }
+  return { reply: text.slice(0, at).trimEnd(), error: text.slice(at) }
+}
+
+export function harnessNote(errorText: string): string {
+  const reason = errorText.trim().slice(OWALLET_ERROR_MARKER.length).trim()
+  return [
+    "<system-reminder>",
+    "The previous request in this conversation never got a reply from you: norm's wallet (owallet) refused or failed it before or while it reached a model. The user saw this message from the harness — neither you nor the user wrote it:",
+    reason,
+    "</system-reminder>",
+  ].join("\n")
 }
 
 /** Where owallet keeps its encrypted DB (mirrors `owallet_db::default_db_path`). */
@@ -938,6 +974,74 @@ export function mergeModels<T extends Record<string, any>>(configured: Record<st
     merged[model.id] = { ...modelConfig(model), ...configured[model.id] }
   }
   return merged as Record<string, T>
+}
+
+/**
+ * norm's title prompt, replacing opencode's coding-session one: norm chats
+ * are as often about the marketplace and the wallet as about code, and the
+ * title model is a cheap one (see `cheapestTitleModel`), so it is short and
+ * spells out the traps — answering the message, or titling a harness error.
+ */export const TITLE_PROMPT = `You name conversations. Reply with ONLY a title for the conversation below — nothing else.
+
+Rules:
+- 2 to 6 words, at most 50 characters, one line, no quotes, no trailing period.
+- Same language as the user's message.
+- Name what the user wants or is asking about; do not answer it, and never refuse.
+- Keep exact technical terms, numbers, file names, model names and product names.
+- Ignore harness notices (anything marked <system-reminder> or "[owallet error]") — title the user's own request.
+- For greetings or tests ("hi", "testing 1 2 3"), name the intent: "Greeting", "Connection test".
+
+Examples:
+"why does my rust build fail on linking" → Rust build linking failure
+"buy me an image of a red fox" → Red fox image purchase
+"what's my wallet balance" → Wallet balance check
+"refactor @src/auth.ts to use refresh tokens" → Auth refresh token refactor`
+
+type AgentModelConfig = {
+  agent?: Record<string, any>
+  provider?: Record<string, { models?: Record<string, unknown> } | undefined>
+}
+
+/** The automatic title model, as "provider/model" (NormPricing.cheapestForTitles). */
+export function cheapestTitleModel(models: NormPricing.Model[] | undefined): string | undefined {
+  const best = NormPricing.cheapestForTitles(models ?? [])
+  return best ? `${PROVIDER_ID}/${best.id}` : undefined
+}
+
+/**
+ * Applies norm's housekeeping models (`/compaction-model`, `/title-model`)
+ * and title prompt to the config, as `agent.<name>.model` / `.prompt`. The
+ * user's own settings win. A model its provider doesn't list (retired from
+ * the marketplace, or the list couldn't be fetched) is skipped: opencode
+ * would fail the call outright, where the conversation's own model works.
+ * The title model, unset, is the marketplace's cheapest
+ * (`cheapestTitleModel`); `NormAgentModels.CONVERSATION` opts back into
+ * the conversation's own.
+ */
+export function applyAgentModels(
+  config: AgentModelConfig,
+  chosen: { compaction?: string; title?: string },
+  marketplace?: NormPricing.Model[],
+) {
+  applyAgentModel(config, "compaction", chosen.compaction)
+  if (chosen.title !== NormAgentModels.CONVERSATION)
+    applyAgentModel(config, "title", chosen.title ?? cheapestTitleModel(marketplace))
+  if (!config.agent?.title?.prompt) {
+    config.agent ??= {}
+    config.agent.title = { ...config.agent.title, prompt: TITLE_PROMPT }
+  }
+}
+
+function applyAgentModel(config: AgentModelConfig, agent: NormAgentModels.Agent, model: string | undefined) {
+  if (!model || config.agent?.[agent]?.model) return
+  const slash = model.indexOf("/")
+  const listed = config.provider?.[model.slice(0, slash)]?.models
+  if (listed && !listed[model.slice(slash + 1)]) {
+    debug(`${agent} model ${model} is not offered — using the conversation's model`)
+    return
+  }
+  config.agent ??= {}
+  config.agent[agent] = { ...config.agent[agent], model }
 }
 
 /** True if anything answers HTTP at `base` — any status counts, only a network error is "down". */
