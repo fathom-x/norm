@@ -1421,6 +1421,49 @@ export async function bootstrap(): Promise<void> {
 }
 
 /**
+ * `norm debug norm`: what the norm layer resolved and whether each piece the
+ * overpay provider needs is in place — env, sandbox, binary, wallet DB, serve,
+ * provider key, Overpay link, models. Read-only: it never starts a serve or
+ * mints a key (the command's `--bootstrap` runs `bootstrap()` first for that).
+ * The key itself is never printed, only the fingerprint norm already records.
+ */
+export async function diagnose() {
+  applySandboxEnv()
+  const base = owalletUrl()
+  const key = await readProviderKey()
+  const reachable = await probe(base)
+  const status: any =
+    key && reachable
+      ? await fetch(`${base}/v1/status`, {
+          headers: { authorization: `Bearer ${key}` },
+          signal: AbortSignal.timeout(5000),
+        })
+          .then(async (res) => (res.ok ? await res.json() : { http_status: res.status }))
+          .catch((error) => ({ error: String(error) }))
+      : undefined
+  const models = key && reachable ? await marketplaceModels() : undefined
+  return {
+    disabled: disabled(),
+    env: owalletEnv(),
+    norm_home: normHome() ?? null,
+    data_dir: Global.Path.data,
+    owallet: {
+      url: base,
+      binary: (await owalletBinary()) ?? null,
+      db_path: owalletDbPath(),
+      db_exists: existsSync(owalletDbPath()),
+      password_set: Boolean(process.env.OWALLET_PASSWORD) || (await readAutoSetupDefaultPassword()),
+      serve_reachable: reachable,
+      serve_version: reachable ? ((await serveVersion(base)) ?? null) : null,
+      overpay_authorized: (await readOverpayAuthorized()) ?? null,
+    },
+    provider_key: key ? { fingerprint: keyFingerprint(key) } : null,
+    status: status ?? null,
+    models: models?.filter((m) => m.active !== false).map((m) => m.id) ?? null,
+  }
+}
+
+/**
  * First-run setup (wallet creation, the Overpay connect) is driven from the TUI
  * command, before it takes the screen — it needs a terminal to prompt on. Every
  * other entry point (`norm run`, `norm serve`, acp, github) skips it silently
