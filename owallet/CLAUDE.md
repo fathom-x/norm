@@ -236,7 +236,12 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   live off their listing's own schema via `get_listing_value` rather than
   duplicated in Rust — changing either listing's Ruby side
   (`MODEL_OPTIONS`, `buyer_note_schema`) needs no Rust change to match,
-  and any general router should preserve that property.
+  and any general router should preserve that property. `/v1/models`
+  also passes each metered variant's title, `metadata.context_length`,
+  `active` and `rate_card` through (`model_entries`/`model_pricing`;
+  pricing as USD per Mtok with markup in) — norm turns them into model
+  cost and context limits, so a rate-card shape change on the Ruby side
+  must keep those keys or update both.
   `partial_output`/`new_output_since`/`WAIT_TERMINAL_STATUSES` in
   `tools.rs` are `pub(crate)` specifically so this module can reuse
   `wait_for_order`'s streaming-diff logic rather than reimplementing it.
