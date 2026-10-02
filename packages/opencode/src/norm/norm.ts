@@ -180,6 +180,23 @@ export function defaults(): ConfigV1.Info {
   } as ConfigV1.Info
 }
 
+/**
+ * norm ships with exactly one AI provider: Overpay. Unlike `defaults()`, this
+ * is not a default — it is applied *after* every config source has merged
+ * (global, project, env, managed preferences), so no `opencode.json` can add
+ * another provider back. Without it the picker also lists every provider
+ * opencode knows about — notably OpenCode Zen, which is free and needs no
+ * login, so it shows up for every user and routes around the marketplace
+ * entirely. `NORM_DISABLE=1` turns the whole norm layer off, and this with it.
+ */
+export function enforceProviders(config: ConfigV1.Info): void {
+  config.enabled_providers = [PROVIDER_ID]
+  // A leftover `disabled_providers: ["overpay"]` would leave no provider at all.
+  if (config.disabled_providers) {
+    config.disabled_providers = config.disabled_providers.filter((id) => id !== PROVIDER_ID)
+  }
+}
+
 // $HOME first (matching the install script and owallet itself), os.homedir()
 // as the fallback — the env var also keeps this testable, since bun caches
 // os.homedir() at process start.
