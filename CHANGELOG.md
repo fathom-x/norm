@@ -4,6 +4,16 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Plain completions for housekeeping calls
+
+- **`x-owallet-tools: none`**: a `/v1` request that brings no tools of its
+  own normally runs owallet's server-side loop with its whole roster
+  (wallet tools, `run_python`, listing tools) attached. With this header
+  it is one passthrough turn with no tools at all — no roster tokens in
+  the prompt and no way for the model to buy something. For a client's
+  titles, summaries and compaction (norm sends it for those). A request
+  with its own tools is unchanged; any other header value is a 400.
+
 ### What each model costs, in `GET /v1/models`
 
 - Each model entry now carries what its listing variant publishes, as
