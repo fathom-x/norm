@@ -241,6 +241,25 @@ impl OverpayClient {
             .await
     }
 
+    /// [`Self::get_order_value`], conditional on the streaming buffer: with
+    /// `since_seq` set to the `partial_seq` already seen, the marketplace
+    /// leaves an unchanged `partial_content` out of the response (it still
+    /// sends `partial_seq`), so polling a long reply doesn't re-download it.
+    pub async fn get_order_value_since(
+        &self,
+        id: &str,
+        since_seq: Option<u64>,
+        auth: Auth<'_>,
+    ) -> Result<Value, OverpayError> {
+        match since_seq {
+            Some(seq) => {
+                self.get_json_value(&format!("/api/v1/orders/{id}?since_seq={seq}"), auth)
+                    .await
+            }
+            None => self.get_order_value(id, auth).await,
+        }
+    }
+
     /// Largest delivered file [`Self::fetch_delivered_content`] reads.
     pub const MAX_DELIVERED_CONTENT_BYTES: usize = 16 * 1024 * 1024;
 
