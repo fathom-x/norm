@@ -1,0 +1,17 @@
+# Browser build (crates/owallet-web) settings. Only the wasm32 target is
+# affected; native builds see nothing here.
+
+[target.wasm32-unknown-unknown]
+# getrandom 0.3 picks its JS (crypto.getRandomValues) backend only with
+# this cfg; 0.2 uses its `js` feature (see owallet-crypto/Cargo.toml).
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
+# `cargo test --target wasm32-unknown-unknown` runs the browser suites
+# through wasm-bindgen's runner (headless Chrome via chromedriver).
+runner = "wasm-bindgen-test-runner"
+
+[env]
+# C dependencies cross-compiled for the browser (secp256k1-sys, SQLite in
+# sqlite-wasm-rs) need a wasm-capable C compiler: clang, not gcc. These
+# variables are read only when building for wasm32-unknown-unknown.
+CC_wasm32_unknown_unknown = "clang"
+AR_wasm32_unknown_unknown = "llvm-ar"

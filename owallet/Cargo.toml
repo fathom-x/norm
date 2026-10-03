@@ -11,6 +11,11 @@ members = [
     "crates/owallet-http",
     "crates/owallet",
 ]
+# The browser build is its own workspace: it needs rusqlite's wasm backend
+# (0.38+), while this one is pinned to 0.37 by the zcash stack, and
+# libsqlite3-sys (`links = "sqlite3"`) allows one version per lockfile.
+# See crates/owallet-web/README.md.
+exclude = ["crates/owallet-web"]
 
 [workspace.package]
 version = "0.1.10"
