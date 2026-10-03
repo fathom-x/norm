@@ -57,6 +57,13 @@ describe("NormPricing.parseModels", () => {
     expect(models[3].pricing).toBeUndefined()
   })
 
+  test("remembers the seller's default effort for the variant picker", () => {
+    NormPricing.remember(NormPricing.parseModels(body)!)
+    expect(NormPricing.defaultEffort("anthropic/claude-sonnet-5")).toBe("medium")
+    expect(NormPricing.defaultEffort("mandatory/model")).toBeUndefined()
+    expect(NormPricing.defaultEffort("nope/model")).toBeUndefined()
+  })
+
   test("reads the efforts a model takes, in the seller's order", () => {
     const models = NormPricing.parseModels(body)!
     expect(models[1].reasoning).toEqual({

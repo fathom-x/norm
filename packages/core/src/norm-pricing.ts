@@ -242,6 +242,15 @@ export function get(id: string): Model | undefined {
   return known.get(id)
 }
 
+/**
+ * The effort a model runs at when none is picked (the seller's
+ * `default_effort`), as the variant picker's "Default" label; undefined
+ * when the seller publishes none.
+ */
+export function defaultEffort(id: string): string | undefined {
+  return known.get(id)?.reasoning?.defaultEffort
+}
+
 export function all(): Model[] {
   return [...known.values()]
 }

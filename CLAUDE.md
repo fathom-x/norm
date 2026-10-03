@@ -44,8 +44,11 @@ syncs stay cheap:
   first (`Norm.sortEfforts`; opencode's housekeeping calls run on the
   *first* variant), so ctrl+t / `/variant` / `--variant` work on the
   overpay provider and the request carries `reasoning_effort`, which
-  owallet forwards to the seller. Never `reasoning: true`: opencode would
-  then guess efforts from the model id.
+  owallet forwards to the seller. The "Default" option sends none and
+  runs at the seller's `default_effort`, shown as its footer
+  (`tui/src/component/norm-variant-default.ts`, `NormPricing.defaultEffort`).
+  Never `reasoning: true`: opencode would then guess efforts from the
+  model id.
 - **What models cost** (`packages/core/src/norm-pricing.ts`): parsing,
   list-price estimates (per-turn minimum charge, cache reads,
   long-context tiers) and owallet's refusal floor for the per-message
