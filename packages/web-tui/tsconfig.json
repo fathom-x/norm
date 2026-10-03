@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "@tsconfig/bun/tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["bun", "vite/client"],
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "noUncheckedIndexedAccess": false,
+    "customConditions": ["browser"],
+    "paths": {
+      "@/*": ["../opencode/src/*"]
+    }
+  },
+  "include": [
+    "src",
+    "test",
+    "build",
+    "vite.config.ts",
+    "happydom.ts",
+    "../opencode/src/audio.d.ts",
+    "../opencode/src/markdown.d.ts",
+    "../core/src/markdown.d.ts"
+  ]
+}

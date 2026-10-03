@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { configure, fs, InMemory } from "@zenfs/core"
-import { Effect, FileSystem, Option, Stream } from "effect"
+import { Effect, FileSystem, Option, Scope, Stream } from "effect"
 import { VfsFileSystem } from "@opencode-ai/core/effect/vfs-filesystem"
 
-const run = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
+const run = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Scope.Scope>) =>
   Effect.runPromise(effect.pipe(Effect.provide(VfsFileSystem.layer(fs)), Effect.scoped))
 
 beforeEach(() => configure({ mounts: { "/": InMemory }, disableAccessChecks: true }))

@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>norm</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #fafaf9;
+        --fg: #1c1917;
+        --muted: #78716c;
+        --panel: #f5f5f4;
+        --accent: #b45309;
+        --error: #b91c1c;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0c0a09;
+          --fg: #e7e5e4;
+          --muted: #a8a29e;
+          --panel: #1c1917;
+          --accent: #f59e0b;
+          --error: #f87171;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #app {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 24px 16px;
+      }
+      h1 {
+        margin: 0;
+        font-size: 22px;
+      }
+      h1 span {
+        color: var(--muted);
+        font-weight: normal;
+      }
+      h2 {
+        font-size: 15px;
+        margin: 24px 0 8px;
+      }
+      #status[data-state="ready"] {
+        color: var(--accent);
+      }
+      #status[data-state="error"] {
+        color: var(--error);
+        white-space: pre-wrap;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      button,
+      input {
+        font: inherit;
+        padding: 4px 10px;
+      }
+      pre,
+      ul,
+      ol {
+        background: var(--panel);
+        padding: 12px 16px 12px 32px;
+        border-radius: 6px;
+        overflow-x: auto;
+        min-height: 1.5em;
+      }
+      pre {
+        padding-left: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

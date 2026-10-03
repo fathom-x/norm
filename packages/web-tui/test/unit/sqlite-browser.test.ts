@@ -79,7 +79,7 @@ describe("sqlite.browser", () => {
         const drizzle = yield* Sqlite.Drizzle
         yield* client`CREATE TABLE v (id INTEGER PRIMARY KEY, name TEXT)`
         yield* client`INSERT INTO v (name) VALUES (${"x"}), (${"y"})`
-        return yield* Effect.promise(() => drizzle.all<{ id: number; name: string }>(sql`SELECT id, name FROM v`))
+        return yield* Effect.promise(async () => drizzle.all<{ id: number; name: string }>(sql`SELECT id, name FROM v`))
       }),
     )
     expect(rows).toEqual([
