@@ -126,12 +126,12 @@ export function resolve(input: Info, options: ResolveOptions): Resolved {
     }),
     leader_timeout: input.leader_timeout ?? LeaderTimeoutDefault,
     mouse: input.mouse ?? true,
-    cursor: input.cursor
-      ? {
-          style: input.cursor.style ?? "block",
-          blinking: input.cursor.blinking ?? true,
-        }
-      : undefined,
+    // norm: a steady block by default (upstream leaves the cursor to
+    // opentui, which blinks); `cursor` in tui config still overrides.
+    cursor: {
+      style: input.cursor?.style ?? "block",
+      blinking: input.cursor?.blinking ?? false,
+    },
   }
 }
 

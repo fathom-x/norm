@@ -45,7 +45,8 @@ const keybind = (value: Definition["default"], description: string): Definition 
 export const Definitions = {
   leader: keybind(LeaderDefault, "Leader key for keybind combinations"),
 
-  app_exit: keybind("ctrl+c,ctrl+d,<leader>q", "Exit the application"),
+  // norm: ctrl+c is bound in app.tsx instead, to exit on a second press
+  app_exit: keybind("ctrl+d,<leader>q", "Exit the application"),
   app_debug: keybind("none", "Toggle debug panel"),
   app_console: keybind("none", "Toggle console"),
   app_heap_snapshot: keybind("none", "Write heap snapshot"),
@@ -126,9 +127,9 @@ export const Definitions = {
   mcp_list: keybind("none", "List MCP servers"),
   provider_connect: keybind("none", "Connect provider"),
   console_org_switch: keybind("none", "Switch console organization"),
-  agent_list: keybind("<leader>a", "List agents"),
-  agent_cycle: keybind("tab", "Next agent"),
-  agent_cycle_reverse: keybind("shift+tab", "Previous agent"),
+  agent_list: keybind("<leader>a", "List modes"),
+  agent_cycle: keybind("tab", "Next mode"),
+  agent_cycle_reverse: keybind("shift+tab", "Previous mode"),
   variant_cycle: keybind("ctrl+t", "Cycle model variants"),
   variant_list: keybind("none", "List model variants"),
 

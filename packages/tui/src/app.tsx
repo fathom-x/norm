@@ -60,6 +60,7 @@ import { DialogAlert } from "./ui/dialog-alert"
 import { DialogConfirm } from "./ui/dialog-confirm"
 import { ToastProvider, useToast } from "./ui/toast"
 import { isDefaultTitle } from "./util/session"
+import { NormExit } from "./component/norm-exit"
 import { KVProvider, useKV } from "./context/kv"
 import * as Model from "./util/model"
 import { ArgsProvider, useArgs, type Args } from "./context/args"
@@ -84,7 +85,7 @@ import { DialogVariant } from "./component/dialog-variant"
 import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
-import { destroyRenderer } from "./util/renderer"
+import { destroyRenderer, restoreTerminalInput } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 
 registerOpencodeSpinner()
@@ -359,6 +360,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
     if (result.reason !== undefined)
       process.stderr.write((cliErrorMessage(result.reason) ?? errorFormat(result.reason)) + "\n")
     if (result.epilogue) process.stdout.write(result.epilogue + "\n")
+    restoreTerminalInput()
   })
 })
 
@@ -454,24 +456,24 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     if (!terminalTitleEnabled() || Flag.OPENCODE_DISABLE_TERMINAL_TITLE) return
 
     if (route.data.type === "home") {
-      renderer.setTerminalTitle("OpenCode")
+      renderer.setTerminalTitle("Norm")
       return
     }
 
     if (route.data.type === "session") {
       const session = sync.session.get(route.data.sessionID)
       if (!session || isDefaultTitle(session.title)) {
-        renderer.setTerminalTitle("OpenCode")
+        renderer.setTerminalTitle("Norm")
         return
       }
 
       const title = session.title.length > 40 ? session.title.slice(0, 37) + "..." : session.title
-      renderer.setTerminalTitle(`OC | ${title}`)
+      renderer.setTerminalTitle(`Norm | ${title}`)
       return
     }
 
     if (route.data.type === "plugin") {
-      renderer.setTerminalTitle(`OC | ${route.data.id}`)
+      renderer.setTerminalTitle(`Norm | ${route.data.id}`)
     }
   })
 
@@ -676,9 +678,11 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       },
       {
         name: "agent.list",
-        title: "Switch agent",
+        // norm: the primary agent (Build/Plan) is called a "mode" in the UI.
+        title: "Switch mode",
         category: "Agent",
-        slashName: "agents",
+        slashName: "modes",
+        slashAliases: ["mode", "agents"],
         run: () => {
           dialog.replace(() => <DialogAgent />)
         },
@@ -694,7 +698,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       },
       {
         name: "agent.cycle",
-        title: "Agent cycle",
+        title: "Mode cycle",
         category: "Agent",
         hidden: true,
         run: () => {
@@ -728,7 +732,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       },
       {
         name: "agent.cycle.reverse",
-        title: "Agent cycle reverse",
+        title: "Mode cycle reverse",
         category: "Agent",
         hidden: true,
         run: () => {
@@ -980,6 +984,28 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       return current.current.input === ""
     },
     bindings: tuiConfig.keybinds.gather("app_exit", ["app.exit"]),
+  }))
+
+  // norm: ctrl+c on an empty prompt exits only when pressed twice within
+  // 2 s; the first press shows "ctrl+c again to exit" in the hints row.
+  // With text in the prompt, ctrl+c clears it (prompt.clear) as upstream.
+  useBindings(() => ({
+    mode: OPENCODE_BASE_MODE,
+    enabled: () => {
+      const current = promptRef.current
+      if (!current?.focused) return true
+      return current.current.input === ""
+    },
+    bindings: [
+      {
+        key: "ctrl+c",
+        desc: "Exit (press twice)",
+        group: "System",
+        cmd: () => {
+          if (NormExit.press()) void exit()
+        },
+      },
+    ],
   }))
 
   event.on("tui.command.execute", (evt, { workspace }) => {
