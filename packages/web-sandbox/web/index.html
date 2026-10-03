@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>norm</title>
+    <meta name="description" content="Try norm, the AI coding agent that pays for what it uses through owallet and Overpay." />
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./src/landing.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>norm</h1>
+        <p class="lede">An AI coding agent in your terminal, with a wallet: it pays for models and tools through Overpay as it goes. Two ways to try it, nothing to install.</p>
+      </header>
+      <section class="cards">
+        <a class="card" id="card-browser" href="/browser/">
+          <h2>In your browser</h2>
+          <p>Everything runs locally in this tab: the terminal UI on WebAssembly, the wallet compiled to wasm.</p>
+          <ul>
+            <li>Nothing leaves your machine but the calls to Overpay</li>
+            <li>No shell: the agent edits files in the tab's own storage</li>
+            <li>One tab at a time</li>
+          </ul>
+          <span class="go">Open in this tab →</span>
+        </a>
+        <a class="card" id="card-sandbox" href="/sandbox/">
+          <h2>In a cloud sandbox</h2>
+          <p>The real CLI in a private Linux sandbox, streamed to this page as a terminal.</p>
+          <ul>
+            <li>The native norm and owallet, shell and all</li>
+            <li>Your own sandbox; it can reach Overpay and nothing else</li>
+            <li>Resumes where you left off when you come back</li>
+          </ul>
+          <span class="go">Start a sandbox →</span>
+        </a>
+      </section>
+      <p class="note" id="browser-note" hidden>The in-browser version is not served here.</p>
+    </main>
+    <script type="module" src="./src/landing.ts"></script>
+  </body>
+</html>

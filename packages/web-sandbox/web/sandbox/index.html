@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>norm · sandbox</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="../src/sandbox.css" />
+  </head>
+  <body>
+    <div id="terminal" aria-label="Terminal"></div>
+    <div id="toolbar">
+      <a href="/" title="Back to the start page">norm</a>
+      <button id="start-over" type="button" title="Delete this sandbox and start a fresh one">Start over</button>
+    </div>
+    <div id="overlay" role="status" aria-live="polite">
+      <div class="box">
+        <p id="overlay-text">Connecting…</p>
+        <p id="overlay-detail"></p>
+        <div class="actions">
+          <button id="overlay-action" type="button" hidden>Retry</button>
+        </div>
+      </div>
+    </div>
+    <noscript><p class="noscript">The terminal needs JavaScript.</p></noscript>
+    <script type="module" src="../src/sandbox.ts"></script>
+  </body>
+</html>

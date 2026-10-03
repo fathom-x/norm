@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@opencode-ai/web-sandbox",
+  "version": "1.18.18",
+  "description": "norm demo service: the native CLI in a per-visitor sandbox, its terminal streamed to the browser",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite build && bun --watch server/main.ts",
+    "build": "vite build",
+    "start": "bun server/main.ts",
+    "typecheck": "tsgo --noEmit",
+    "test": "bun test ./test/unit",
+    "test:browser": "bun run build && node ./test/browser/local.mjs"
+  },
+  "dependencies": {
+    "bun-pty": "0.4.8",
+    "e2b": "2.51.0"
+  },
+  "devDependencies": {
+    "@tsconfig/bun": "catalog:",
+    "@types/bun": "catalog:",
+    "@typescript/native-preview": "catalog:",
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/addon-web-links": "0.11.0",
+    "@xterm/xterm": "5.5.0",
+    "typescript": "catalog:",
+    "vite": "catalog:"
+  }
+}

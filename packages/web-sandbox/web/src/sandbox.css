@@ -1,0 +1,99 @@
+@import "./tokens.css";
+@import "@xterm/xterm/css/xterm.css";
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--term-bg);
+}
+#terminal {
+  position: fixed;
+  inset: 0;
+  padding: 6px 0 0 8px;
+  background: var(--term-bg);
+}
+#toolbar {
+  position: fixed;
+  top: 6px;
+  right: 10px;
+  z-index: 5;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+  opacity: 0.55;
+  transition: opacity 120ms;
+}
+#toolbar:hover,
+#toolbar:focus-within {
+  opacity: 1;
+}
+#toolbar a {
+  color: var(--term-fg);
+  text-decoration: none;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+}
+#toolbar button {
+  padding: 2px 8px;
+  border: 1px solid #44403c;
+  border-radius: 5px;
+  background: #1c1917;
+  color: var(--term-fg);
+}
+#overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgb(10 10 10 / 0.72);
+  color: var(--term-fg);
+}
+#overlay[hidden] {
+  display: none;
+}
+#overlay .box {
+  max-width: 420px;
+  padding: 20px 24px;
+  border: 1px solid #292524;
+  border-radius: 10px;
+  background: #1c1917;
+  text-align: center;
+}
+#overlay-text {
+  margin: 0;
+  font-weight: 600;
+}
+#overlay-detail {
+  margin: 6px 0 0;
+  color: #a8a29e;
+  font-size: 14px;
+}
+#overlay-detail:empty {
+  display: none;
+}
+#overlay[data-kind="error"] #overlay-text {
+  color: #f87171;
+}
+#overlay .actions {
+  margin-top: 14px;
+}
+#overlay button {
+  padding: 6px 16px;
+  border: 0;
+  border-radius: 6px;
+  background: #f59e0b;
+  color: #0c0a09;
+  font-weight: 600;
+}
+.noscript {
+  position: fixed;
+  inset: 0;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  color: var(--term-fg);
+}
