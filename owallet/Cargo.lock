@@ -2481,6 +2481,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
+name = "gloo-timers"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb143cf96099802033e0d4f4963b19fd2e0b728bcf076cd9cf7f6634f092994"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "group"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3680,6 +3692,7 @@ dependencies = [
  "bech32",
  "bip32 0.5.3",
  "bip39",
+ "getrandom 0.2.17",
  "hex",
  "hmac 0.12.1",
  "pbkdf2",
@@ -3691,6 +3704,7 @@ dependencies = [
  "subtle",
  "thiserror 1.0.69",
  "tiny-keccak",
+ "web-time",
  "zeroize",
 ]
 
@@ -3709,6 +3723,7 @@ dependencies = [
  "thiserror 1.0.69",
  "time",
  "time-tz",
+ "web-time",
  "zeroize",
 ]
 
@@ -3768,6 +3783,8 @@ dependencies = [
  "async-stream",
  "axum",
  "axum-test",
+ "getrandom 0.3.4",
+ "gloo-timers",
  "hex",
  "hmac 0.12.1",
  "jsonschema",
@@ -3787,6 +3804,7 @@ dependencies = [
  "time-tz",
  "tokio",
  "tracing",
+ "web-time",
  "wiremock",
 ]
 

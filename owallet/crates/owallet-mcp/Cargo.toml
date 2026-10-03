@@ -7,15 +7,27 @@ license.workspace = true
 repository.workspace = true
 description = "Streamable-HTTP MCP server for owallet. Hand-rolled JSON-RPC 2.0 handler with a tool registry that talks to the Overpay REST client + local wallet."
 
+[features]
+# On-chain rails. Both default on (the native binary); the browser build
+# (crates/owallet-web) turns them off, and the tools that need them answer
+# `unavailable_in_browser` instead — merchant credits still come from
+# Overpay.
+default = ["evm", "zcash"]
+evm = ["dep:owallet-evm"]
+zcash = ["dep:owallet-zcash"]
+
 [dependencies]
 owallet-crypto = { workspace = true }
 owallet-db = { workspace = true }
 owallet-overpay = { workspace = true }
-owallet-evm = { workspace = true }
-owallet-zcash = { workspace = true }
+owallet-evm = { workspace = true, optional = true }
+owallet-zcash = { workspace = true, optional = true }
 
-axum = "0.8"
-tokio = { version = "1", features = ["sync", "time", "macros"] }
+# Only what the routers use; native builds add axum's defaults below.
+axum = { version = "0.8", default-features = false, features = ["json", "query", "form"] }
+tokio = { version = "1", features = ["sync", "macros"] }
+# `Instant`/`SystemTime` that work in the browser (std re-exports natively).
+web-time = "1"
 # Ergonomic async generators for the SSE `tools/call` stream in
 # `transport.rs` — lets the tool run inline while progress notifications
 # are yielded as they arrive.
@@ -36,6 +48,18 @@ jsonschema = { version = "0.33.0", default-features = false }
 thiserror = { workspace = true }
 tracing = "0.1"
 qrcode = { workspace = true }
+
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+gloo-timers = { version = "0.3", features = ["futures"] }
+# `OffsetDateTime::now_utc` reads `Date.now()` in the browser.
+time = { version = "=0.3.37", default-features = false, features = ["wasm-bindgen"] }
+# jsonschema → ahash seeds from getrandom 0.3, whose browser backend needs
+# this feature plus the `getrandom_backend` cfg in owallet/.cargo/config.toml.
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

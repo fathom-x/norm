@@ -43,12 +43,20 @@ pub enum ToolError {
     NotAuthorized,
     #[error("overpay: {0}")]
     Overpay(#[from] owallet_overpay::OverpayError),
+    #[cfg(feature = "evm")]
     #[error("evm: {0}")]
     Evm(#[from] owallet_evm::EvmError),
+    #[cfg(feature = "zcash")]
     #[error("zcash: {0}")]
     Zcash(#[from] owallet_zcash::ZcashError),
     #[error("not yet implemented in this build")]
     NotImplemented,
+    /// The browser build has no on-chain wallets (`evm` / `zcash`
+    /// features off); the payload names what was asked for.
+    #[error(
+        "unavailable_in_browser: {0} needs an on-chain wallet, which this build does not include"
+    )]
+    UnavailableInBrowser(&'static str),
     #[error("wait_for_order: target {target} not reached within {seconds}s")]
     WaitTimeout { target: String, seconds: u64 },
     #[error(
@@ -661,8 +669,13 @@ async fn get_account_info(state: &McpState) -> Result<Value, ToolError> {
 
     // Chain metadata: chain_id from CAIP-2 even when the chain isn't in
     // our USDC table, so the field always renders.
+    #[cfg(feature = "evm")]
     let chain_info = owallet_evm::chains::from_caip2(&state.evm_network).ok();
-    let chain_id = chain_info.as_ref().map(|c| c.chain_id).or_else(|| {
+    #[cfg(feature = "evm")]
+    let known_chain_id = chain_info.as_ref().map(|c| c.chain_id);
+    #[cfg(not(feature = "evm"))]
+    let known_chain_id: Option<u64> = None;
+    let chain_id = known_chain_id.or_else(|| {
         state
             .evm_network
             .strip_prefix("eip155:")?
@@ -684,7 +697,16 @@ async fn get_account_info(state: &McpState) -> Result<Value, ToolError> {
     // Best-effort on-chain balances — Python wraps both legs in one try
     // block (`server.py:1734-1744`), surfacing a single `balance_error`
     // string on any failure.
+    #[cfg(feature = "evm")]
     let mut balance_error: Option<String> = None;
+    // No EVM client in this build: say so instead of failing the whole read
+    // — merchant credits below still come from Overpay.
+    #[cfg(not(feature = "evm"))]
+    let balance_error = {
+        let _ = address;
+        Some(ToolError::UnavailableInBrowser("on-chain balances").to_string())
+    };
+    #[cfg(feature = "evm")]
     if let Some(ci) = chain_info.as_ref() {
         match owallet_evm::eth_balance(&state.evm_rpc_url, address).await {
             Ok(raw) => {
@@ -779,6 +801,7 @@ async fn get_account_info(state: &McpState) -> Result<Value, ToolError> {
     // a failure just falls back to the last-known local balance.
     if let Some(ua) = wallet.zcash_address.as_deref() {
         result.insert("zcash_address".into(), json!(ua));
+        #[cfg(feature = "zcash")]
         if let (Ok(zseed), Ok(net), Ok(dir)) = (
             owallet_crypto::bip39_seed_from_stored(&seed),
             state.zcash_net(),
@@ -817,6 +840,7 @@ async fn get_account_info(state: &McpState) -> Result<Value, ToolError> {
 /// in `server.py:1737,1742`. `raw` is emitted as a JSON number when it
 /// fits in u64 (covers any realistic wallet balance) and as a string
 /// otherwise so big-uint precision is preserved.
+#[cfg(feature = "evm")]
 fn balance_value(raw_u128: u128, formatted: String, symbol: &str) -> Value {
     let raw_for_json = if raw_u128 <= u64::MAX as u128 {
         json!(raw_u128 as u64)
@@ -1303,7 +1327,7 @@ async fn wait_for_order(
     let poll = args.poll_interval_seconds.clamp(1, 60);
 
     let (_npub, auth) = state.resolve_owned_auth()?;
-    let start = std::time::Instant::now();
+    let start = crate::clock::Instant::now();
     // Counts polls that found the order still in flight — the `progress`
     // value on each streamed `notifications/progress`.
     let mut tick = 0u64;
@@ -1383,7 +1407,7 @@ async fn wait_for_order(
                 );
             }
         }
-        tokio::time::sleep(Duration::from_secs(poll)).await;
+        crate::clock::sleep(Duration::from_secs(poll)).await;
     }
 }
 
@@ -1815,6 +1839,14 @@ async fn buy(state: &McpState, args: Value) -> Result<Value, ToolError> {
     // Zcash rail: if the server picked ZEC (Orchard UA + ZEC amount), pay
     // shielded. Detected via `PurchaseCreditsResponse::zcash_payment` (a
     // Zcash-shaped address, not an EVM `0x…`).
+    #[cfg(not(feature = "zcash"))]
+    if purchase.zcash_payment().is_some() {
+        return Ok(unpaid_purchase(
+            &purchase,
+            ToolError::UnavailableInBrowser("a ZEC payment").to_string(),
+        ));
+    }
+    #[cfg(feature = "zcash")]
     if let Some((to_ua, amount_zec)) = purchase.zcash_payment() {
         let seed_str = {
             let db = state
@@ -1881,12 +1913,46 @@ async fn buy(state: &McpState, args: Value) -> Result<Value, ToolError> {
     };
 
     // Step 2: on-chain USDC send to the address Rails just minted.
+    pay_purchase_usdc(
+        state,
+        &npub,
+        &purchase,
+        &payment_address,
+        payment_amount_usdc,
+    )
+    .await
+}
+
+/// `buy` step 2 without an EVM client: the order stands, unpaid.
+#[cfg(not(feature = "evm"))]
+async fn pay_purchase_usdc(
+    _state: &McpState,
+    _npub: &str,
+    purchase: &owallet_overpay::models::PurchaseCreditsResponse,
+    _payment_address: &str,
+    _payment_amount_usdc: f64,
+) -> Result<Value, ToolError> {
+    Ok(unpaid_purchase(
+        purchase,
+        ToolError::UnavailableInBrowser("a USDC payment").to_string(),
+    ))
+}
+
+/// `buy` step 2: send the USDC Rails asked for.
+#[cfg(feature = "evm")]
+async fn pay_purchase_usdc(
+    state: &McpState,
+    npub: &str,
+    purchase: &owallet_overpay::models::PurchaseCreditsResponse,
+    payment_address: &str,
+    payment_amount_usdc: f64,
+) -> Result<Value, ToolError> {
     let seed = {
         let db = state
             .db
             .lock()
             .map_err(|e| ToolError::Internal(format!("db mutex: {e}")))?;
-        db.read_seed(&npub)
+        db.read_seed(npub)
             .map_err(|e| ToolError::Internal(e.to_string()))?
             .ok_or(ToolError::NoWallet)?
     };
@@ -1900,7 +1966,7 @@ async fn buy(state: &McpState, args: Value) -> Result<Value, ToolError> {
         &state.evm_rpc_url,
         &chain,
         &sk,
-        &payment_address,
+        payment_address,
         payment_amount_usdc,
     )
     .await
@@ -1930,10 +1996,26 @@ async fn buy(state: &McpState, args: Value) -> Result<Value, ToolError> {
     }))
 }
 
+/// `buy`'s partial-success shape for an order this build can't pay
+/// on-chain: the order exists, the caller can still settle it on the web.
+#[cfg(not(all(feature = "evm", feature = "zcash")))]
+fn unpaid_purchase(
+    purchase: &owallet_overpay::models::PurchaseCreditsResponse,
+    error: String,
+) -> Value {
+    json!({
+        "error":     error,
+        "order_id":  purchase.order_id,
+        "order_url": purchase.order_url,
+        "hint":      "Order created but payment not sent. Pay via order_url.",
+    })
+}
+
 // ---------------------------------------------------------------------------
 // send_usdc — alloy-backed ERC-20 transfer on Base / any EVM chain
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "evm")]
 #[derive(Debug, Deserialize)]
 struct SendUsdcArgs {
     /// Python's name. `to` stays as an alias so existing Rust callers
@@ -1945,6 +2027,12 @@ struct SendUsdcArgs {
     amount_usdc: f64,
 }
 
+#[cfg(not(feature = "evm"))]
+async fn send_usdc(_state: &McpState, _args: Value) -> Result<Value, ToolError> {
+    Err(ToolError::UnavailableInBrowser("send_usdc"))
+}
+
+#[cfg(feature = "evm")]
 async fn send_usdc(state: &McpState, args: Value) -> Result<Value, ToolError> {
     let args: SendUsdcArgs = serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
         arg: "arguments",
@@ -1976,6 +2064,7 @@ async fn send_usdc(state: &McpState, args: Value) -> Result<Value, ToolError> {
     Ok(json!({ "tx_hash": outcome.tx_hash }))
 }
 
+#[cfg(feature = "zcash")]
 #[derive(Deserialize)]
 struct SendZcashArgs {
     #[serde(alias = "to")]
@@ -1986,6 +2075,7 @@ struct SendZcashArgs {
 
 /// Resolve the active wallet's BIP-39 seed, Zcash network, and per-wallet data
 /// directory for the Zcash tools.
+#[cfg(feature = "zcash")]
 fn zcash_ctx(
     state: &McpState,
 ) -> Result<(String, [u8; 64], owallet_zcash::Network, std::path::PathBuf), ToolError> {
@@ -2017,6 +2107,7 @@ fn zcash_ctx(
 /// awaited directly inside an axum (`Send`-future) handler. Running them under
 /// `spawn_blocking` keeps the whole non-`Send` future on one thread; the
 /// handler only awaits the `Send` `JoinHandle`.
+#[cfg(feature = "zcash")]
 async fn blocking_zcash<T, F>(f: F) -> Result<T, ToolError>
 where
     F: FnOnce(&tokio::runtime::Runtime) -> Result<T, owallet_zcash::ZcashError> + Send + 'static,
@@ -2034,6 +2125,17 @@ where
     .map_err(ToolError::Zcash)
 }
 
+#[cfg(not(feature = "zcash"))]
+async fn send_zcash(_state: &McpState, _args: Value) -> Result<Value, ToolError> {
+    Err(ToolError::UnavailableInBrowser("send_zcash"))
+}
+
+#[cfg(not(feature = "zcash"))]
+async fn sync_zcash(_state: &McpState, _args: Value) -> Result<Value, ToolError> {
+    Err(ToolError::UnavailableInBrowser("sync_zcash"))
+}
+
+#[cfg(feature = "zcash")]
 async fn send_zcash(state: &McpState, args: Value) -> Result<Value, ToolError> {
     let args: SendZcashArgs = serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
         arg: "arguments",
@@ -2054,6 +2156,7 @@ async fn send_zcash(state: &McpState, args: Value) -> Result<Value, ToolError> {
     Ok(json!({ "txid": outcome.txid }))
 }
 
+#[cfg(feature = "zcash")]
 async fn sync_zcash(state: &McpState, _args: Value) -> Result<Value, ToolError> {
     let (_npub, seed, network, dir) = zcash_ctx(state)?;
     let lwd = state.zcash_lightwalletd.clone();

@@ -151,13 +151,18 @@ pub fn render_error(e: &ToolError) -> String {
         ToolError::Overpay(_) => {
             "Next: verify the order/listing id and that the wallet is authorized, then retry."
         }
+        #[cfg(feature = "evm")]
         ToolError::Evm(_) => {
             "Next: check the recipient address, chain, and that the wallet holds enough USDC + gas."
         }
+        #[cfg(feature = "zcash")]
         ToolError::Zcash(_) => {
             "Next: check the recipient UA, that ZEC_LIGHTWALLETD_URL is reachable, and that the wallet holds enough spendable ZEC (run sync_zcash)."
         }
         ToolError::NotImplemented => "Next: this action isn't available in this build.",
+        ToolError::UnavailableInBrowser(_) => {
+            "Next: this needs the owallet app on a computer (on-chain wallets don't run in the browser); merchant credits work here."
+        }
         ToolError::ProviderKeyScope => {
             "Next: ask the wallet owner for a provider key minted with the spend scope, or do this from the owallet dashboard."
         }
@@ -230,9 +235,12 @@ fn render_account(data: &Value) -> String {
     // Human chain name (e.g. "Base") for the balance cells, derived from
     // the CAIP-2 network; falls back to the raw network string.
     let network = s("network");
+    #[cfg(feature = "evm")]
     let chain_name = owallet_evm::chains::from_caip2(network)
         .map(|c| c.name.to_string())
         .unwrap_or_else(|_| network.to_string());
+    #[cfg(not(feature = "evm"))]
+    let chain_name = network.to_string();
 
     // Balance cells: the raw shape nests `{formatted}`, the sanitized
     // shape is the formatted string itself; then a balance error, then

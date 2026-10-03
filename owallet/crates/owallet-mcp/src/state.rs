@@ -116,11 +116,13 @@ impl McpState {
     }
 
     /// Parse the configured Zcash network.
+    #[cfg(feature = "zcash")]
     pub fn zcash_net(&self) -> Result<owallet_zcash::Network, owallet_zcash::ZcashError> {
         owallet_zcash::Network::parse(&self.zcash_network)
     }
 
     /// Per-wallet Zcash data directory (`<data dir>/<npub>/zcash/`).
+    #[cfg(feature = "zcash")]
     pub fn zcash_data_dir(
         &self,
         npub: &str,

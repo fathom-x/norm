@@ -32,13 +32,11 @@ where
         .await
 }
 
-use std::sync::Arc;
-
 use axum::{
     routing::{get, post},
     Router,
 };
-use owallet_mcp::transport::{mcp_router_with_auth, AuthResult, BearerAuthCheck};
+use owallet_mcp::transport::{mcp_router_with_auth, provider_key_bearer_auth, BearerAuthCheck};
 use owallet_mcp::McpState;
 
 /// Build the axum router with just the dashboard routes. The same router
@@ -113,30 +111,8 @@ pub fn build_full_router(state: AppState, issuer_url: String) -> Router {
             state.zcash.network.clone(),
         );
     let app_for_auth = state.clone();
-    let auth: BearerAuthCheck = Arc::new(move |bearer: Option<&str>| match bearer {
-        // A /v1 provider key doubles as an /mcp credential, so a client
-        // like norm runs chat and tools on one credential — and one daily
-        // budget: purchases made over /mcp account against the key
-        // exactly like /v1's own. Keys are prefix-distinguishable from
-        // OAuth access tokens by construction.
-        Some(b) if b.starts_with("owk_") => {
-            let Ok(db) = app_for_auth.db.lock() else {
-                return AuthResult::Invalid;
-            };
-            match db.read_provider_key_auth(b) {
-                Ok(Some(key)) => {
-                    let can_spend = key.can_spend();
-                    AuthResult::ProviderKey {
-                        npub: key.npub,
-                        key_id: key.id,
-                        can_spend,
-                    }
-                }
-                _ => AuthResult::Invalid,
-            }
-        }
-        Some(b) => oauth_as::lookup_token(&app_for_auth, b),
-        None => AuthResult::Anonymous,
+    let auth: BearerAuthCheck = provider_key_bearer_auth(state.db.clone(), move |b| {
+        oauth_as::lookup_token(&app_for_auth, b)
     });
 
     build_router(state)

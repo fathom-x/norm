@@ -5,6 +5,11 @@
 //! tools/list, tools/call, ping) so the implementation is intentionally
 //! direct: no SDK pull-in, no transport abstraction.
 
+/// The owallet release this crate belongs to (the workspace version) —
+/// what `/health` and the MCP `initialize` handshake report.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub mod clock;
 pub mod jsonrpc;
 pub mod openai_compat;
 pub mod progress;
@@ -17,4 +22,6 @@ pub mod transport;
 
 pub use progress::ProgressSink;
 pub use state::McpState;
-pub use transport::{mcp_router, mcp_router_with_auth, BearerAuthCheck};
+pub use transport::{
+    mcp_router, mcp_router_with_auth, provider_key_bearer_auth, AuthResult, BearerAuthCheck,
+};

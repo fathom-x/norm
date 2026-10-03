@@ -65,7 +65,7 @@
 //! spending tools: keys are chat-only unless minted with `spend`.
 
 use std::convert::Infallible;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::extract::{Json, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -79,6 +79,7 @@ use std::sync::Arc;
 
 use tokio::sync::OnceCell;
 
+use crate::clock::{self, Instant};
 use crate::progress::ProgressSink;
 use crate::state::{McpState, OwnedAuth, ResolveAuthError};
 use crate::tools::{new_output_since, partial_output, WAIT_TERMINAL_STATUSES};
@@ -1065,7 +1066,7 @@ async fn poll_one_shot(
                 json!({"order_id": order_id, "fulfillment_status": status}),
             );
         }
-        tokio::time::sleep(poll).await;
+        clock::sleep(poll).await;
     }
 }
 
@@ -2905,7 +2906,7 @@ async fn wait_for_order_terminal(
                 timeout.as_secs()
             )));
         }
-        tokio::time::sleep(poll).await;
+        clock::sleep(poll).await;
     }
 }
 
@@ -3834,7 +3835,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
                     return;
                 }
-                tokio::time::sleep(ctx.poll).await;
+                clock::sleep(ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             let mut usage = TurnUsage::default();
@@ -3941,7 +3942,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
                     return;
                 }
-                tokio::time::sleep(ctx.poll).await;
+                clock::sleep(ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             usage.add_order(&snap, redeemed_cents);
@@ -4067,7 +4068,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                                 "order_id": order_id,
                             }).to_string();
                         }
-                        tokio::time::sleep(ctx.poll).await;
+                        clock::sleep(ctx.poll).await;
                     };
                     if lt_emitted {
                         yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n\n"}), None));
@@ -4122,7 +4123,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                         messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
                         continue 'tool_calls;
                     }
-                    tokio::time::sleep(ctx.poll).await;
+                    clock::sleep(ctx.poll).await;
                 }
                 if fence_open {
                     yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n```\n"}), None));
@@ -4184,7 +4185,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
                 return;
             }
-            tokio::time::sleep(ctx.poll).await;
+            clock::sleep(ctx.poll).await;
         };
         net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
         usage.add_order(&snap, redeemed_cents);
@@ -4224,10 +4225,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
 }
 
 fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    clock::unix_now_secs()
 }
 
 #[cfg(test)]
