@@ -1,11 +1,8 @@
 //! `owallet import` — bring an existing BIP-39 mnemonic or hex private key
 //! into the encrypted DB.
 
-use owallet_crypto::{
-    bip39_seed_from_stored, derive_from_mnemonic, npub_from_private_key, Address, Mnemonic,
-    PrivateKey, EVM_HD_PATH,
-};
-use owallet_db::default_db_path;
+use owallet_crypto::bip39_seed_from_stored;
+use owallet_db::{default_db_path, PreparedWallet};
 
 use super::generate::store_orchard_ua;
 use super::overpay::block_on;
@@ -18,34 +15,18 @@ pub fn run(
 ) -> Result<()> {
     let db = open_unlock(&default_db_path())?;
 
-    let (stored_seed, sk) = match (mnemonic, private_key) {
+    let wallet = match (mnemonic, private_key) {
         (Some(_), Some(_)) => unreachable!("clap enforces conflicts_with"),
-        (Some(phrase), None) => {
-            let m = Mnemonic::parse(&phrase)?;
-            let sk = derive_from_mnemonic(&m, EVM_HD_PATH)?;
-            (m.phrase(), sk)
-        }
-        (None, Some(hex)) => {
-            let sk = PrivateKey::from_hex(&hex)?;
-            (format!("0x{}", sk.to_hex()), sk)
-        }
+        (Some(phrase), None) => PreparedWallet::from_phrase(&phrase)?,
+        (None, Some(hex)) => PreparedWallet::from_private_key_hex(&hex)?,
         (None, None) => {
             let typed =
                 rpassword::prompt_password("Mnemonic phrase or hex private key (input hidden): ")?;
-            let trimmed = typed.trim();
-            if trimmed.split_whitespace().count() >= 12 {
-                let m = Mnemonic::parse(trimmed)?;
-                let sk = derive_from_mnemonic(&m, EVM_HD_PATH)?;
-                (m.phrase(), sk)
-            } else {
-                let sk = PrivateKey::from_hex(trimmed)?;
-                (format!("0x{}", sk.to_hex()), sk)
-            }
+            PreparedWallet::from_secret(&typed)?
         }
     };
-
-    let address = Address::from_private_key(&sk);
-    let npub = npub_from_private_key(&sk)?;
+    let npub = wallet.npub.clone();
+    let stored_seed = wallet.stored_seed.clone();
 
     // Collect the per-wallet password before persisting anything — see the
     // matching comment in `generate`: a failed prompt used to leave an orphan
@@ -56,19 +37,13 @@ pub fn run(
         Some(crate::password::read_new_wallet_password()?)
     };
 
-    db.write_wallet(&npub, &stored_seed, Some(&address.to_hex_lower()))?;
-    if let Some(pw) = wallet_pw {
-        db.write_wallet_password(&npub, pw.as_str())?;
-    }
-    if db.read_default_npub()?.is_none() {
-        db.write_default_npub(&npub)?;
-    }
+    db.store_wallet(&wallet, wallet_pw.as_ref().map(|pw| pw.as_str()))?;
     // Cache the Orchard receive address (offline).
     let zcash_ua = store_orchard_ua(&db, &npub, &stored_seed);
 
     println!("Imported wallet:");
     println!("  npub:    {npub}");
-    println!("  address: {}", address.to_checksum());
+    println!("  address: {}", wallet.address.to_checksum());
     if let Some(ua) = &zcash_ua {
         println!("  zcash:   {ua}");
     }

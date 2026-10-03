@@ -6,17 +6,19 @@
 
 mod access_tokens;
 mod auth_codes;
+mod new_wallet;
 mod oauth_clients;
 mod provider_keys;
 mod purchases;
 mod schema;
 mod settings;
+mod storage;
 mod tokens;
 mod wallet_state;
 mod wallets;
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use owallet_crypto::{
     decrypt, derive_key, encrypt, hashes_equal, verify_hash, AesKey, DecryptError,
@@ -28,10 +30,12 @@ use zeroize::Zeroize;
 
 pub use access_tokens::AccessTokenRow;
 pub use auth_codes::AuthCodeRow;
+pub use new_wallet::{NewWalletError, PreparedWallet};
 pub use oauth_clients::OAuthClientRow;
 pub use provider_keys::{
-    budget_day, scopes_allow_spend, timezone_is_valid, BudgetReservation, ProviderKeyRow,
-    PROVIDER_SCOPE_CHAT, PROVIDER_SCOPE_SPEND,
+    budget_day, parse_budget_usd, scopes_allow_spend, timezone_is_valid, BudgetReservation,
+    MintProviderKeyError, MintedProviderKey, ProviderKeyRow, PROVIDER_SCOPE_CHAT,
+    PROVIDER_SCOPE_SPEND,
 };
 pub use purchases::PurchaseRow;
 pub use tokens::TokenRow;
@@ -125,6 +129,8 @@ pub struct Database {
     /// to [`data_dir`]; override with [`Database::with_data_dir`] (used by
     /// tests for isolation).
     data_dir: PathBuf,
+    /// Files natively, a table in this database in the browser build.
+    order_cache: storage::OrderCacheStore,
 }
 
 /// Tighten a freshly created wallet path to owner-only access. Best effort:
@@ -146,7 +152,7 @@ impl Database {
     /// Create a new encrypted database at `path` with the given password.
     /// Fails if the file already exists.
     pub fn init(path: &Path, password: &str) -> Result<Self> {
-        if path.exists() {
+        if storage::db_exists(path) {
             return Err(DbError::AlreadyExists(path.to_path_buf()));
         }
         if let Some(parent) = path.parent() {
@@ -182,6 +188,7 @@ impl Database {
             key: None,
             path: path.to_path_buf(),
             data_dir: state_dir_for(path),
+            order_cache: storage::OrderCacheStore::for_target(),
         };
         // Derive the AES key and leave the DB unlocked, matching db.py:189.
         db.key = Some(AesKey::new(derive_key(password, &salt)));
@@ -195,12 +202,12 @@ impl Database {
     /// Open an existing database without unlocking it. The connection runs
     /// schema migrations on first open (matching `db.py::_migrate`).
     pub fn open(path: &Path) -> Result<Self> {
-        if !path.exists() {
+        if !storage::db_exists(path) {
             return Err(DbError::NotFound(path.to_path_buf()));
         }
         let conn = Connection::open(path)?;
         // Apply the standard PRAGMAs and migrations.
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        storage::enable_wal(&conn)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         schema::migrate(&conn)?;
         Ok(Self {
@@ -208,6 +215,7 @@ impl Database {
             key: None,
             path: path.to_path_buf(),
             data_dir: state_dir_for(path),
+            order_cache: storage::OrderCacheStore::for_target(),
         })
     }
 
@@ -219,10 +227,20 @@ impl Database {
         self
     }
 
+    /// Keep the order cache in a table of this database instead of JSON
+    /// files under the state dir. The browser build's default (it has no
+    /// filesystem); natively an opt-in, mainly so tests can exercise the
+    /// browser path.
+    #[must_use]
+    pub fn with_order_cache_in_db(mut self) -> Self {
+        self.order_cache = storage::OrderCacheStore::Table;
+        self
+    }
+
     /// Check whether a DB file exists at the given path.
     #[must_use]
     pub fn exists(path: &Path) -> bool {
-        path.exists()
+        storage::db_exists(path)
     }
 
     /// Verify the password matches and derive the AES key. Returns Ok(false)
@@ -286,6 +304,31 @@ impl Database {
         let key = self.key()?;
         let (ct, nonce) = encrypt(key, seed.as_bytes());
         wallets::insert(&self.conn, npub, &ct, &nonce, address, now_secs())?;
+        Ok(())
+    }
+
+    /// Persist a [`PreparedWallet`]: the encrypted seed row, its per-wallet
+    /// password (only when `wallet_password` is given — callers ask for one
+    /// only when [`Self::has_wallet_password`] says there is none yet), and
+    /// the default-wallet pointer if no wallet was selected before. The
+    /// common tail of `owallet generate` / `import` and the browser build.
+    pub fn store_wallet(
+        &self,
+        wallet: &PreparedWallet,
+        wallet_password: Option<&str>,
+    ) -> Result<()> {
+        self.write_wallet(
+            &wallet.npub,
+            &wallet.stored_seed,
+            Some(&wallet.address.to_hex_lower()),
+        )?;
+        if let Some(pw) = wallet_password {
+            self.write_wallet_password(&wallet.npub, pw)?;
+        }
+        // First wallet becomes the default automatically.
+        if self.read_default_npub()?.is_none() {
+            self.write_default_npub(&wallet.npub)?;
+        }
         Ok(())
     }
 
@@ -432,6 +475,37 @@ impl Database {
         };
         provider_keys::insert(&self.conn, &row, &provider_key_hash(&token))?;
         Ok((row, token))
+    }
+
+    /// Mint a provider key for `npub` (or the default wallet): the core of
+    /// `owallet provider-key create`, shared with the browser build. `spend`
+    /// adds the spend scope — only ever an explicit user choice.
+    pub fn mint_provider_key(
+        &self,
+        npub: Option<&str>,
+        label: &str,
+        spend: bool,
+        daily_budget_usd_cents: Option<i64>,
+    ) -> std::result::Result<MintedProviderKey, MintProviderKeyError> {
+        let scopes = if spend { "chat spend" } else { "chat" };
+        let npub = match npub {
+            Some(s) => s.to_string(),
+            None => self
+                .read_default_npub()?
+                .ok_or(MintProviderKeyError::NoDefaultWallet)?,
+        };
+        if self.read_seed(&npub)?.is_none() {
+            return Err(MintProviderKeyError::UnknownWallet(npub));
+        }
+        let (row, key) = self.create_provider_key(&npub, label, scopes, daily_budget_usd_cents)?;
+        Ok(MintedProviderKey {
+            key,
+            id: row.id,
+            npub,
+            label: label.to_string(),
+            scopes: scopes.to_string(),
+            daily_budget_usd_cents,
+        })
     }
 
     /// Return the full key row authorized by `token` (id, wallet, scopes,
@@ -591,7 +665,15 @@ impl Database {
         Ok(WalletStateDir::new(dir, key))
     }
 
-    // ---- Order cache (per-wallet JSON files under <data_dir>/<npub>/orders) ----
+    // ---- Order cache (per-wallet JSON files under <data_dir>/<npub>/orders,
+    // or the `order_cache` table in the browser build) ----
+
+    fn purchase_store(&self) -> purchases::Store<'_> {
+        match self.order_cache {
+            storage::OrderCacheStore::Files => purchases::Store::Files(&self.data_dir),
+            storage::OrderCacheStore::Table => purchases::Store::Table(&self.conn),
+        }
+    }
 
     /// Store/refresh a cached order for `npub`. `order` is the Rails order
     /// payload (already unwrapped from any `{data: …}` envelope). Returns the
@@ -599,7 +681,7 @@ impl Database {
     /// unlock — the order cache is stored as plaintext files (regenerable via
     /// `sync_purchases`), so it stays readable without the master password.
     pub fn upsert_purchase(&self, npub: &str, order: &serde_json::Value) -> Result<Option<String>> {
-        purchases::upsert(&self.data_dir, npub, order, now_secs())
+        purchases::upsert(self.purchase_store(), npub, order, now_secs())
     }
 
     /// Cached orders for `npub`, newest first.
@@ -610,20 +692,26 @@ impl Database {
         offset: i64,
         fulfillment_status: Option<&str>,
     ) -> Result<Vec<PurchaseRow>> {
-        purchases::list(&self.data_dir, npub, limit, offset, fulfillment_status)
+        purchases::list(
+            self.purchase_store(),
+            npub,
+            limit,
+            offset,
+            fulfillment_status,
+        )
     }
 
     /// A single cached order by `(npub, order_id)`.
     pub fn read_purchase(&self, npub: &str, order_id: &str) -> Result<Option<PurchaseRow>> {
-        purchases::read(&self.data_dir, npub, order_id)
+        purchases::read(self.purchase_store(), npub, order_id)
     }
 
     pub fn delete_purchase(&self, npub: &str, order_id: &str) -> Result<()> {
-        purchases::delete(&self.data_dir, npub, order_id)
+        purchases::delete(self.purchase_store(), npub, order_id)
     }
 
     pub fn count_purchases(&self, npub: &str) -> Result<i64> {
-        purchases::count(&self.data_dir, npub)
+        purchases::count(self.purchase_store(), npub)
     }
 
     // ---- Default npub ----

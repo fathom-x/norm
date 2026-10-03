@@ -1,10 +1,7 @@
 //! `owallet generate` — fresh BIP-39 seed phrase, store + display.
 
-use owallet_crypto::{
-    bip39_seed_from_stored, derive_from_mnemonic, npub_from_private_key, Address, Mnemonic,
-    WordCount, EVM_HD_PATH,
-};
-use owallet_db::{default_db_path, Database};
+use owallet_crypto::{bip39_seed_from_stored, WordCount};
+use owallet_db::{default_db_path, Database, PreparedWallet};
 
 use super::{open_unlock, zcash, CmdError, Result};
 
@@ -31,11 +28,8 @@ pub fn run(words: u8) -> Result<()> {
     };
 
     let db = open_unlock(&default_db_path())?;
-    let mnemonic = Mnemonic::generate(count);
-    let phrase = mnemonic.phrase();
-    let sk = derive_from_mnemonic(&mnemonic, EVM_HD_PATH)?;
-    let address = Address::from_private_key(&sk);
-    let npub = npub_from_private_key(&sk)?;
+    let wallet = PreparedWallet::generate(count)?;
+    let npub = wallet.npub.clone();
 
     // Collect the per-wallet password (used to log into the web admin) *before
     // anything is persisted*. Deriving the keys above touched only memory, so
@@ -50,22 +44,17 @@ pub fn run(words: u8) -> Result<()> {
         Some(crate::password::read_new_wallet_password()?)
     };
 
-    db.write_wallet(&npub, &phrase, Some(&address.to_hex_lower()))?;
-    if let Some(pw) = wallet_pw {
-        db.write_wallet_password(&npub, pw.as_str())?;
-    }
-    // First wallet becomes the default automatically.
-    if db.read_default_npub()?.is_none() {
-        db.write_default_npub(&npub)?;
-    }
+    // Stores the seed, the password, and makes the first wallet the default.
+    db.store_wallet(&wallet, wallet_pw.as_ref().map(|pw| pw.as_str()))?;
+    let phrase = &wallet.stored_seed;
     // Derive + cache the Orchard receive address (offline). The librustzcash
     // wallet DB itself is created lazily on the first `owallet sync`.
-    let zcash_ua = store_orchard_ua(&db, &npub, &phrase);
+    let zcash_ua = store_orchard_ua(&db, &npub, phrase);
     drop(db); // wipe the in-memory key as soon as possible
 
     println!("Generated new wallet:");
     println!("  npub:    {npub}");
-    println!("  address: {}", address.to_checksum());
+    println!("  address: {}", wallet.address.to_checksum());
     if let Some(ua) = &zcash_ua {
         println!("  zcash:   {ua}");
     }

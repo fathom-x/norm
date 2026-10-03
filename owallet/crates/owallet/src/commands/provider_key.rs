@@ -4,8 +4,7 @@
 //! consumes `create --json` to provision OpenCode's auth store
 //! non-interactively.
 
-use owallet_db::default_db_path;
-use owallet_http::parse_budget_usd;
+use owallet_db::{default_db_path, parse_budget_usd, MintProviderKeyError};
 
 use super::{open_unlock, CmdError, Result};
 use crate::cli::ProviderKeyWhat;
@@ -41,30 +40,24 @@ fn create(
 ) -> Result<()> {
     // Same scope semantics as the dashboard create form: `spend` is only
     // ever granted by an explicit user choice, here the --spend flag.
-    let scopes = if spend { "chat spend" } else { "chat" };
     let budget_usd_cents =
         parse_budget_usd(budget_usd).map_err(|e| CmdError::BadInput(e.into()))?;
 
     let db = open_unlock(&default_db_path())?;
-    let npub = resolve_npub(&db, npub_override)?;
-    if db.read_seed(&npub)?.is_none() {
-        return Err(CmdError::NotFound(npub));
-    }
-    let (row, key) = db.create_provider_key(&npub, label, scopes, budget_usd_cents)?;
+    let minted = db
+        .mint_provider_key(npub_override, label, spend, budget_usd_cents)
+        .map_err(|e| match e {
+            MintProviderKeyError::NoDefaultWallet => {
+                CmdError::BadInput("no default wallet — run `owallet select`".into())
+            }
+            MintProviderKeyError::UnknownWallet(npub) => CmdError::NotFound(npub),
+            MintProviderKeyError::Db(e) => e.into(),
+        })?;
 
     if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "key": key,
-                "id": row.id,
-                "npub": npub,
-                "label": label,
-                "scopes": scopes,
-                "daily_budget_usd_cents": budget_usd_cents,
-            })
-        );
+        println!("{}", minted.to_json());
     } else {
+        let (npub, scopes, key) = (&minted.npub, &minted.scopes, &minted.key);
         eprintln!("Provider key for {npub} (scopes: {scopes}):");
         println!("{key}");
         eprintln!("This key is shown once only — owallet stores just a verifier.");

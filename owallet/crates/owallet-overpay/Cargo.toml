@@ -10,7 +10,7 @@ description = "REST client for the Overpay Rails API + OAuth PKCE helper. Rust p
 [dependencies]
 owallet-crypto = { workspace = true }
 
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 url = "2"
@@ -19,6 +19,11 @@ sha2 = { workspace = true }
 base64 = "0.22"
 rand = { workspace = true }
 tokio = { version = "1", features = ["sync"] }
+
+# Native transport: rustls + gzip. The browser build (wasm32-unknown-unknown)
+# rides the page's `fetch`, which brings its own TLS and decompression.
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

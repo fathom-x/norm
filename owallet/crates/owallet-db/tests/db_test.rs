@@ -1001,3 +1001,114 @@ fn provider_key_rows_predating_the_budget_columns_read_as_unlimited_untouched() 
     let row = db.read_provider_key(&key.id).unwrap().unwrap();
     assert_eq!(row.spent_today_usd_cents(), 100);
 }
+
+// ---------------------------------------------------------------------------
+// Browser-build paths, exercised natively
+// ---------------------------------------------------------------------------
+
+#[test]
+fn order_cache_in_db_matches_the_file_store() {
+    let t = fresh("pw");
+    let db = t.db.with_order_cache_in_db();
+    for (id, at, status) in [
+        ("old", 1000, "delivered"),
+        ("new", 2000, "delivered"),
+        ("x", 1500, "failed"),
+    ] {
+        let order = json!({"order_id": id, "fulfillment_status": status, "delivered_at": at});
+        assert_eq!(
+            db.upsert_purchase("n", &order).unwrap(),
+            Some(id.to_string())
+        );
+    }
+    // Upsert replaces; ids that couldn't be filenames are refused here too.
+    db.upsert_purchase(
+        "n",
+        &json!({"order_id": "x", "fulfillment_status": "delivered", "delivered_at": 1500}),
+    )
+    .unwrap();
+    assert_eq!(
+        db.upsert_purchase("n", &json!({"order_id": "../x"}))
+            .unwrap(),
+        None
+    );
+    assert_eq!(db.count_purchases("n").unwrap(), 3);
+    assert_eq!(db.count_purchases("other").unwrap(), 0);
+    let ids: Vec<String> = db
+        .list_purchases("n", 2, 0, Some("delivered"))
+        .unwrap()
+        .into_iter()
+        .map(|p| p.order_id)
+        .collect();
+    assert_eq!(ids, ["new", "x"]);
+    assert_eq!(
+        db.read_purchase("n", "x").unwrap().unwrap().delivered_at,
+        Some(1500)
+    );
+    db.delete_purchase("n", "x").unwrap();
+    assert!(db.read_purchase("n", "x").unwrap().is_none());
+    // Nothing touched the filesystem state dir.
+    assert!(!t.path.with_file_name("n").exists());
+}
+
+#[test]
+fn store_wallet_and_mint_provider_key() {
+    use owallet_db::{MintProviderKeyError, PreparedWallet};
+    let t = fresh("pw");
+    assert!(matches!(
+        t.db.mint_provider_key(None, "norm", false, None),
+        Err(MintProviderKeyError::NoDefaultWallet)
+    ));
+    let w = PreparedWallet::from_secret(MNEMONIC).unwrap();
+    t.db.store_wallet(&w, Some("wallet-pw")).unwrap();
+    assert_eq!(
+        t.db.read_default_npub().unwrap().as_deref(),
+        Some(w.npub.as_str())
+    );
+    assert!(t.db.verify_wallet_password(&w.npub, "wallet-pw").unwrap());
+    assert_eq!(
+        t.db.read_seed(&w.npub).unwrap().as_deref(),
+        Some(MNEMONIC_ONE_LINE)
+    );
+
+    let minted =
+        t.db.mint_provider_key(None, "norm", true, Some(500))
+            .unwrap();
+    let v = minted.to_json();
+    assert_eq!(
+        v.as_object().unwrap().keys().collect::<Vec<_>>(),
+        [
+            "daily_budget_usd_cents",
+            "id",
+            "key",
+            "label",
+            "npub",
+            "scopes"
+        ]
+    );
+    assert_eq!(v["scopes"], "chat spend");
+    assert_eq!(v["npub"], w.npub.as_str());
+    assert!(t
+        .db
+        .read_provider_key_auth(&minted.key)
+        .unwrap()
+        .unwrap()
+        .can_spend());
+    assert!(matches!(
+        t.db.mint_provider_key(Some("npub1nobody"), "x", false, None),
+        Err(MintProviderKeyError::UnknownWallet(_))
+    ));
+}
+
+const MNEMONIC_ONE_LINE: &str =
+    "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+#[test]
+fn parse_budget_usd_accepts_dollars_and_blank() {
+    use owallet_db::parse_budget_usd;
+    assert_eq!(parse_budget_usd(None), Ok(None));
+    assert_eq!(parse_budget_usd(Some("  ")), Ok(None));
+    assert_eq!(parse_budget_usd(Some("$5")), Ok(Some(500)));
+    assert_eq!(parse_budget_usd(Some("0.015")), Ok(Some(2)));
+    assert!(parse_budget_usd(Some("-1")).is_err());
+}

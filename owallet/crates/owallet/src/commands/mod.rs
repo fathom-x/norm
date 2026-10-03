@@ -35,6 +35,8 @@ pub enum CmdError {
     #[error("{0}")]
     Nostr(#[from] owallet_crypto::NostrError),
     #[error("{0}")]
+    NewWallet(#[from] owallet_db::NewWalletError),
+    #[error("{0}")]
     Config(#[from] owallet_config::ConfigError),
     #[error("{0}")]
     Overpay(#[from] owallet_overpay::OverpayError),

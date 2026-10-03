@@ -588,3 +588,32 @@ mod tests {
         assert_eq!(r.zcash_payment(), Some(("u1another".into(), 2.0)));
     }
 }
+
+/// `POST /api/v1/buyer/register` reply (`{data: {...}}`, unwrapped): the
+/// Overpay buyer bound to the signing wallet key, plus a fresh API token
+/// for it.
+#[derive(Debug, Clone, Serialize)]
+pub struct BuyerRegistration {
+    pub user_id: Option<serde_json::Value>,
+    pub account_number: Option<String>,
+    pub nostr_pubkey: Option<String>,
+    pub token: String,
+    pub token_name: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for BuyerRegistration {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let v = serde_json::Value::deserialize(d)?;
+        let inner = unwrap_data_envelope(&v);
+        let token = opt_string(inner, "token")
+            .ok_or_else(|| D::Error::custom("buyer/register response missing `token`"))?;
+        Ok(Self {
+            user_id: inner.get("user_id").cloned(),
+            account_number: opt_string(inner, "account_number"),
+            nostr_pubkey: opt_string(inner, "nostr_pubkey"),
+            token,
+            token_name: opt_string(inner, "token_name"),
+        })
+    }
+}

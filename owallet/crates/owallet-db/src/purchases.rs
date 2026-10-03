@@ -11,8 +11,14 @@
 //! requiring an unlocked DB just to render the dashboard. The full Rails order
 //! payload is kept under `snapshot` so tools don't have to re-fetch large
 //! blobs.
+//!
+//! The browser build has no filesystem, so there ([`Store::Table`]) the same
+//! rows live in an `order_cache` table of the wallet database, created on
+//! first use — native databases never get it.
 
 use std::path::{Path, PathBuf};
+
+use rusqlite::{params, Connection, OptionalExtension};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,6 +26,14 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::{wallet_state, DbError, Result};
+
+/// Where one wallet DB keeps its order cache (see the module docs).
+pub(crate) enum Store<'a> {
+    /// `<base>/<npub>/orders/<order_id>.json`.
+    Files(&'a Path),
+    /// The `order_cache` table.
+    Table(&'a Connection),
+}
 
 /// One cached order. `snapshot` is the full Rails order payload;
 /// `delivered_content_schema` is the parsed listing schema (if any).
@@ -131,7 +145,12 @@ fn row_from_order(order: &Value, order_id: String, now: i64) -> PurchaseRow {
 /// payload (already unwrapped from any `{data: …}` envelope). Returns the
 /// order_id on success, or `None` if the payload has no id (or the id can't be
 /// used as a filename). Mirrors `upsert_purchase` in `wallet_mcp/db.py`.
-pub(crate) fn upsert(base: &Path, npub: &str, order: &Value, now: i64) -> Result<Option<String>> {
+pub(crate) fn upsert(
+    store: Store<'_>,
+    npub: &str,
+    order: &Value,
+    now: i64,
+) -> Result<Option<String>> {
     if !order.is_object() {
         return Ok(None);
     }
@@ -139,58 +158,38 @@ pub(crate) fn upsert(base: &Path, npub: &str, order: &Value, now: i64) -> Result
         Some(id) => id,
         None => return Ok(None),
     };
-    let Some(path) = order_path(base, npub, &order_id)? else {
+    // Both stores refuse ids that couldn't be a filename, so the two never
+    // disagree on what is cacheable.
+    if !wallet_state::is_safe_component(&order_id) {
         return Ok(None);
-    };
+    }
 
     let row = row_from_order(order, order_id.clone(), now);
-    let bytes = serde_json::to_vec(&row)?;
-
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+    match store {
+        Store::Files(base) => files::upsert(base, npub, &order_id, &row)?,
+        Store::Table(conn) => table::upsert(conn, npub, &order_id, &row)?,
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &bytes)?;
-    std::fs::rename(&tmp, &path)?;
     Ok(Some(order_id))
 }
 
-/// Read and parse every cached order for `npub`. Missing dir → empty.
-fn read_all(base: &Path, npub: &str) -> Result<Vec<PurchaseRow>> {
-    let dir = orders_dir(base, npub)?;
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(DbError::Io(e)),
-    };
-    let mut rows = Vec::new();
-    for entry in entries {
-        let path = entry?.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue; // skip stray *.json.tmp or unrelated files
-        }
-        let bytes = std::fs::read(&path)?;
-        match serde_json::from_slice::<PurchaseRow>(&bytes) {
-            Ok(row) => rows.push(row),
-            // A corrupt cache entry shouldn't sink the whole listing; the
-            // cache is regenerable via sync_purchases.
-            Err(_) => continue,
-        }
+fn read_all(store: Store<'_>, npub: &str) -> Result<Vec<PurchaseRow>> {
+    match store {
+        Store::Files(base) => files::read_all(base, npub),
+        Store::Table(conn) => table::read_all(conn, npub),
     }
-    Ok(rows)
 }
 
 /// Cached orders for a wallet, newest first
 /// (`COALESCE(delivered_at, paid_at, cached_at)` descending), optionally
 /// filtered by `fulfillment_status`, then `offset`/`limit` applied.
 pub(crate) fn list(
-    base: &Path,
+    store: Store<'_>,
     npub: &str,
     limit: i64,
     offset: i64,
     fulfillment_status: Option<&str>,
 ) -> Result<Vec<PurchaseRow>> {
-    let mut rows = read_all(base, npub)?;
+    let mut rows = read_all(store, npub)?;
     if let Some(fs) = fulfillment_status {
         rows.retain(|r| r.fulfillment_status.as_deref() == Some(fs));
     }
@@ -204,29 +203,161 @@ pub(crate) fn list(
     Ok(out)
 }
 
-pub(crate) fn read(base: &Path, npub: &str, order_id: &str) -> Result<Option<PurchaseRow>> {
-    let Some(path) = order_path(base, npub, order_id)? else {
-        return Ok(None);
-    };
-    let bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(DbError::Io(e)),
-    };
-    Ok(Some(serde_json::from_slice(&bytes)?))
-}
-
-pub(crate) fn delete(base: &Path, npub: &str, order_id: &str) -> Result<()> {
-    let Some(path) = order_path(base, npub, order_id)? else {
-        return Ok(());
-    };
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(DbError::Io(e)),
+pub(crate) fn read(store: Store<'_>, npub: &str, order_id: &str) -> Result<Option<PurchaseRow>> {
+    match store {
+        Store::Files(base) => files::read(base, npub, order_id),
+        Store::Table(conn) => table::read(conn, npub, order_id),
     }
 }
 
-pub(crate) fn count(base: &Path, npub: &str) -> Result<i64> {
-    Ok(read_all(base, npub)?.len() as i64)
+pub(crate) fn delete(store: Store<'_>, npub: &str, order_id: &str) -> Result<()> {
+    match store {
+        Store::Files(base) => files::delete(base, npub, order_id),
+        Store::Table(conn) => table::delete(conn, npub, order_id),
+    }
+}
+
+pub(crate) fn count(store: Store<'_>, npub: &str) -> Result<i64> {
+    Ok(read_all(store, npub)?.len() as i64)
+}
+
+/// One JSON file per order (native).
+mod files {
+    use super::*;
+
+    pub(super) fn upsert(base: &Path, npub: &str, order_id: &str, row: &PurchaseRow) -> Result<()> {
+        let Some(path) = order_path(base, npub, order_id)? else {
+            return Ok(());
+        };
+        let bytes = serde_json::to_vec(row)?;
+
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
+    }
+
+    /// Read and parse every cached order for `npub`. Missing dir → empty.
+    pub(super) fn read_all(base: &Path, npub: &str) -> Result<Vec<PurchaseRow>> {
+        let dir = orders_dir(base, npub)?;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(DbError::Io(e)),
+        };
+        let mut rows = Vec::new();
+        for entry in entries {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue; // skip stray *.json.tmp or unrelated files
+            }
+            let bytes = std::fs::read(&path)?;
+            match serde_json::from_slice::<PurchaseRow>(&bytes) {
+                Ok(row) => rows.push(row),
+                // A corrupt cache entry shouldn't sink the whole listing; the
+                // cache is regenerable via sync_purchases.
+                Err(_) => continue,
+            }
+        }
+        Ok(rows)
+    }
+
+    pub(super) fn read(base: &Path, npub: &str, order_id: &str) -> Result<Option<PurchaseRow>> {
+        let Some(path) = order_path(base, npub, order_id)? else {
+            return Ok(None);
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(DbError::Io(e)),
+        };
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    }
+
+    pub(super) fn delete(base: &Path, npub: &str, order_id: &str) -> Result<()> {
+        let Some(path) = order_path(base, npub, order_id)? else {
+            return Ok(());
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(DbError::Io(e)),
+        }
+    }
+}
+
+/// The `order_cache` table (browser build): the same serialized
+/// [`PurchaseRow`] per `(npub, order_id)`.
+mod table {
+    use super::*;
+
+    fn ensure(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS order_cache (
+                npub     TEXT NOT NULL,
+                order_id TEXT NOT NULL,
+                row      TEXT NOT NULL,
+                PRIMARY KEY (npub, order_id)
+            )",
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn upsert(
+        conn: &Connection,
+        npub: &str,
+        order_id: &str,
+        row: &PurchaseRow,
+    ) -> Result<()> {
+        ensure(conn)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO order_cache (npub, order_id, row) VALUES (?1, ?2, ?3)",
+            params![npub, order_id, serde_json::to_string(row)?],
+        )?;
+        Ok(())
+    }
+
+    pub(super) fn read_all(conn: &Connection, npub: &str) -> Result<Vec<PurchaseRow>> {
+        ensure(conn)?;
+        let mut stmt = conn.prepare("SELECT row FROM order_cache WHERE npub = ?1")?;
+        let raw = stmt
+            .query_map(params![npub], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        // Same tolerance as the file store: skip a corrupt entry.
+        Ok(raw
+            .iter()
+            .filter_map(|j| serde_json::from_str(j).ok())
+            .collect())
+    }
+
+    pub(super) fn read(
+        conn: &Connection,
+        npub: &str,
+        order_id: &str,
+    ) -> Result<Option<PurchaseRow>> {
+        ensure(conn)?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT row FROM order_cache WHERE npub = ?1 AND order_id = ?2",
+                params![npub, order_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(match raw {
+            Some(j) => Some(serde_json::from_str(&j)?),
+            None => None,
+        })
+    }
+
+    pub(super) fn delete(conn: &Connection, npub: &str, order_id: &str) -> Result<()> {
+        ensure(conn)?;
+        conn.execute(
+            "DELETE FROM order_cache WHERE npub = ?1 AND order_id = ?2",
+            params![npub, order_id],
+        )?;
+        Ok(())
+    }
 }

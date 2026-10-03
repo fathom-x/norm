@@ -35,6 +35,68 @@ pub fn timezone_is_valid(name: &str) -> bool {
     time_tz::timezones::get_by_name(name).is_some()
 }
 
+/// Parse a user-typed budget field: blank/whitespace → no limit; otherwise
+/// a positive dollar amount (up to cents precision) → cents. The one parser
+/// every surface uses (dashboard forms, consent page, CLI, browser build).
+pub fn parse_budget_usd(input: Option<&str>) -> std::result::Result<Option<i64>, &'static str> {
+    let Some(raw) = input.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let raw = raw.strip_prefix('$').unwrap_or(raw);
+    let usd: f64 = raw
+        .parse()
+        .map_err(|_| "budget must be a dollar amount, or blank for no limit")?;
+    if !usd.is_finite() || usd <= 0.0 {
+        return Err("budget must be a positive dollar amount, or blank for no limit");
+    }
+    let cents = (usd * 100.0).round() as i64;
+    if cents <= 0 {
+        return Err("budget must be at least $0.01, or blank for no limit");
+    }
+    Ok(Some(cents))
+}
+
+/// A freshly minted provider key, as `owallet provider-key create --json`
+/// reports it (see [`MintedProviderKey::to_json`]). `key` is the raw bearer
+/// — shown once, never stored.
+#[derive(Debug, Clone)]
+pub struct MintedProviderKey {
+    pub key: String,
+    pub id: String,
+    pub npub: String,
+    pub label: String,
+    pub scopes: String,
+    pub daily_budget_usd_cents: Option<i64>,
+}
+
+impl MintedProviderKey {
+    /// The exact JSON object `provider-key create --json` prints — norm's
+    /// bootstrap parses it, from the CLI and from the browser build alike.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "key": self.key,
+            "id": self.id,
+            "npub": self.npub,
+            "label": self.label,
+            "scopes": self.scopes,
+            "daily_budget_usd_cents": self.daily_budget_usd_cents,
+        })
+    }
+}
+
+/// Why [`crate::Database::mint_provider_key`] refused.
+#[derive(Debug, thiserror::Error)]
+pub enum MintProviderKeyError {
+    #[error("no default wallet — run `owallet select`")]
+    NoDefaultWallet,
+    /// No stored seed for this npub.
+    #[error("wallet not found: {0}")]
+    UnknownWallet(String),
+    #[error(transparent)]
+    Db(#[from] crate::DbError),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderKeyRow {
     pub id: String,

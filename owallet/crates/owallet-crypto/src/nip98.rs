@@ -7,7 +7,7 @@
 //! serialised as JSON, then base64-encoded into an `Authorization: Nostr <b64>`
 //! header.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;

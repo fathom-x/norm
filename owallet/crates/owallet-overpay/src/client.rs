@@ -1,5 +1,6 @@
 //! Async REST client for the Overpay Rails API.
 
+use std::future::Future;
 use std::time::Duration;
 
 use owallet_crypto::{nip98, PrivateKey};
@@ -9,13 +10,21 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::compat::sendable;
 use crate::error::OverpayError;
 use crate::models::{
-    AccountInfo, LightningLoadResponse, ListingFilters, ListingsPage, LoadCoreCreditsRequest,
-    MerchantCredits, MerchantCreditsList, OAuthRegisterRequest, OAuthRegisterResponse,
-    OAuthTokenResponse, Order, OrderFilters, OrdersPage, PurchaseCreditsRequest,
-    PurchaseCreditsResponse, RedeemCreditsRequest, RedeemCreditsResponse, WebSessionResponse,
+    AccountInfo, BuyerRegistration, LightningLoadResponse, ListingFilters, ListingsPage,
+    LoadCoreCreditsRequest, MerchantCredits, MerchantCreditsList, OAuthRegisterRequest,
+    OAuthRegisterResponse, OAuthTokenResponse, Order, OrderFilters, OrdersPage,
+    PurchaseCreditsRequest, PurchaseCreditsResponse, RedeemCreditsRequest, RedeemCreditsResponse,
+    WebSessionResponse,
 };
+use crate::pkce::Pkce;
+
+/// Per-request ceiling. Natively it is the client-wide timeout; the
+/// browser's fetch has no client-wide setting, so there each request
+/// carries it (reqwest enforces it with an `AbortSignal`).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Canonical key an Overpay bearer token is filed under in the wallet DB's
 /// `tokens` table: the Overpay API base URL, normalized and without a
@@ -45,6 +54,18 @@ pub enum Auth<'a> {
     Nip98(&'a PrivateKey),
 }
 
+/// One in-flight browser (PKCE) login, from
+/// [`OverpayClient::begin_pkce_login`]: the ephemeral OAuth client it
+/// registered, the redirect it registered for, the verifier/state pair,
+/// and the authorize URL to send the user to.
+#[derive(Debug, Clone)]
+pub struct PkceLogin {
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub pkce: Pkce,
+    pub authorize_url: Url,
+}
+
 #[derive(Clone)]
 pub struct OverpayClient {
     base_url: Url,
@@ -57,10 +78,16 @@ pub struct OverpayClient {
 impl OverpayClient {
     pub fn new(base_url: &str) -> Result<Self, OverpayError> {
         let base = Url::parse(base_url)?;
+        // The browser build sets neither: fetch has no client-wide timeout
+        // (see [`REQUEST_TIMEOUT`]), and a custom User-Agent is not a
+        // CORS-safelisted header — it would fail Overpay's preflight.
+        #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(REQUEST_TIMEOUT)
             .user_agent(concat!("owallet/", env!("CARGO_PKG_VERSION")))
             .build()?;
+        #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+        let http = reqwest::Client::builder().build()?;
         Ok(Self {
             base_url: base.clone(),
             public_url: base,
@@ -118,8 +145,7 @@ impl OverpayClient {
         req: &OAuthRegisterRequest,
     ) -> Result<OAuthRegisterResponse, OverpayError> {
         let url = self.join("/oauth/clients")?;
-        let resp = self.http.post(url).json(req).send().await?;
-        decode_json(resp).await
+        execute(self.http.post(url).json(req)).await
     }
 
     /// Exchange a PKCE authorization code for an access token.
@@ -138,8 +164,78 @@ impl OverpayClient {
             ("code_verifier", verifier),
             ("redirect_uri", redirect_uri),
         ];
-        let resp = self.http.post(url).form(&body).send().await?;
-        decode_json(resp).await
+        execute(self.http.post(url).form(&body)).await
+    }
+
+    /// Start a browser (PKCE) login: register an ephemeral public OAuth
+    /// client for `redirect_uri` and build the authorize URL the user must
+    /// visit. Hand the returned [`PkceLogin`] back to
+    /// [`Self::finish_pkce_login`] with the code the redirect delivers.
+    pub async fn begin_pkce_login(
+        &self,
+        client_name: &str,
+        redirect_uri: &str,
+        scope: &str,
+    ) -> Result<PkceLogin, OverpayError> {
+        let pkce = Pkce::generate();
+        let reg = self
+            .register_oauth_client(&OAuthRegisterRequest {
+                client_name: client_name.into(),
+                redirect_uris: vec![redirect_uri.to_string()],
+                grant_types: vec!["authorization_code".into()],
+                response_types: vec!["code".into()],
+                scope: Some(scope.into()),
+                token_endpoint_auth_method: Some("none".into()),
+            })
+            .await?;
+        let authorize_url = self.authorize_url(
+            &reg.client_id,
+            redirect_uri,
+            &pkce.state,
+            &pkce.challenge,
+            scope,
+        )?;
+        Ok(PkceLogin {
+            client_id: reg.client_id,
+            redirect_uri: redirect_uri.to_string(),
+            pkce,
+            authorize_url,
+        })
+    }
+
+    /// Finish a login started by [`Self::begin_pkce_login`]: exchange the
+    /// authorization code (bound to this login's verifier) for an access
+    /// token. Checking the redirect's `state` is the caller's job — it
+    /// knows where the code came from.
+    pub async fn finish_pkce_login(
+        &self,
+        login: &PkceLogin,
+        code: &str,
+    ) -> Result<OAuthTokenResponse, OverpayError> {
+        self.exchange_code(
+            &login.client_id,
+            code,
+            &login.pkce.verifier,
+            &login.redirect_uri,
+        )
+        .await
+    }
+
+    /// `POST /api/v1/buyer/register`, NIP-98-signed with the wallet key:
+    /// creates the Overpay buyer account bound to that key (or finds the
+    /// existing one) and mints an API token for it. A zero-click sign-up —
+    /// no browser login. `token_name` labels the token (Rails defaults it).
+    pub async fn register_buyer(
+        &self,
+        sk: &PrivateKey,
+        token_name: Option<&str>,
+    ) -> Result<BuyerRegistration, OverpayError> {
+        let mut body = serde_json::Map::new();
+        if let Some(name) = token_name {
+            body.insert("token_name".into(), Value::String(name.to_string()));
+        }
+        self.post_json("/api/v1/buyer/register", Auth::Nip98(sk), &body)
+            .await
     }
 
     /// Build the browser-facing authorization URL the user must visit. The
@@ -192,8 +288,7 @@ impl OverpayClient {
         filters: &ListingFilters,
     ) -> Result<ListingsPage, OverpayError> {
         let url = self.listings_url(filters)?;
-        let resp = self.http.get(url).send().await?;
-        decode_json(resp).await
+        execute(self.http.get(url)).await
     }
 
     /// Raw-`Value` variant of [`list_listings`]. Returns the Rails
@@ -204,8 +299,7 @@ impl OverpayClient {
         filters: &ListingFilters,
     ) -> Result<Value, OverpayError> {
         let url = self.listings_url(filters)?;
-        let resp = self.http.get(url).send().await?;
-        decode_value(resp).await
+        execute(self.http.get(url)).await
     }
 
     pub async fn list_orders(
@@ -214,9 +308,7 @@ impl OverpayClient {
         filters: &OrderFilters,
     ) -> Result<OrdersPage, OverpayError> {
         let url = self.orders_url(filters)?;
-        let req = self.build(Method::GET, url, auth)?;
-        let resp = req.send().await?;
-        decode_json(resp).await
+        execute(self.build(Method::GET, url, auth)?).await
     }
 
     /// Raw-`Value` variant of [`list_orders`]. See `list_listings_value`.
@@ -226,9 +318,7 @@ impl OverpayClient {
         filters: &OrderFilters,
     ) -> Result<Value, OverpayError> {
         let url = self.orders_url(filters)?;
-        let req = self.build(Method::GET, url, auth)?;
-        let resp = req.send().await?;
-        decode_value(resp).await
+        execute(self.build(Method::GET, url, auth)?).await
     }
 
     pub async fn get_order(&self, id: &str, auth: Auth<'_>) -> Result<Order, OverpayError> {
@@ -272,42 +362,7 @@ impl OverpayClient {
                 target.host_str().unwrap_or("an unknown host")
             )));
         }
-        let resp = self.http.get(target).send().await?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(OverpayError::HttpStatus {
-                status: status.as_u16(),
-                body: resp.text().await.unwrap_or_default(),
-            });
-        }
-        let content_type = resp
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .map(|v| v.split(';').next().unwrap_or(v).trim().to_ascii_lowercase())
-            .filter(|v| !v.is_empty());
-        if content_type.as_deref().is_some_and(is_binary_media_type) {
-            return Ok(DeliveredContent::Binary {
-                content_type,
-                bytes: resp.content_length(),
-            });
-        }
-        let bytes = resp.bytes().await?;
-        if bytes.len() > Self::MAX_DELIVERED_CONTENT_BYTES {
-            return Err(OverpayError::Delivery(format!(
-                "file is {} bytes, over the {}-byte limit",
-                bytes.len(),
-                Self::MAX_DELIVERED_CONTENT_BYTES
-            )));
-        }
-        let len = bytes.len() as u64;
-        Ok(match String::from_utf8(bytes.to_vec()) {
-            Ok(text) => DeliveredContent::Text(text),
-            Err(_) => DeliveredContent::Binary {
-                content_type,
-                bytes: Some(len),
-            },
-        })
+        sendable(fetch_file(with_timeout(self.http.get(target)))).await
     }
 
     pub async fn create_order(
@@ -548,8 +603,7 @@ impl OverpayClient {
         auth: Auth<'_>,
     ) -> Result<T, OverpayError> {
         let url = self.join(path)?;
-        let resp = self.build(Method::GET, url, auth)?.send().await?;
-        decode_json(resp).await
+        execute(self.build(Method::GET, url, auth)?).await
     }
 
     async fn post_json<B: Serialize, T: DeserializeOwned>(
@@ -563,8 +617,7 @@ impl OverpayClient {
         req = req
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .json(body);
-        let resp = req.send().await?;
-        decode_json(resp).await
+        execute(req).await
     }
 
     /// Raw-`Value` GET. Returns the Rails response body verbatim — no
@@ -573,8 +626,7 @@ impl OverpayClient {
     /// Rust (fathom-x/overpay#288).
     async fn get_json_value(&self, path: &str, auth: Auth<'_>) -> Result<Value, OverpayError> {
         let url = self.join(path)?;
-        let resp = self.build(Method::GET, url, auth)?.send().await?;
-        decode_value(resp).await
+        execute(self.build(Method::GET, url, auth)?).await
     }
 
     /// Same passthrough story as [`get_json_value`] but for POST.
@@ -589,8 +641,7 @@ impl OverpayClient {
         req = req
             .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
             .json(body);
-        let resp = req.send().await?;
-        decode_value(resp).await
+        execute(req).await
     }
 }
 
@@ -631,19 +682,65 @@ async fn decode_json<T: DeserializeOwned>(resp: Response) -> Result<T, OverpayEr
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-/// Same shape as [`decode_json`] but returns the raw `serde_json::Value`
-/// for the verbatim-passthrough call sites.
-async fn decode_value(resp: Response) -> Result<Value, OverpayError> {
+/// Apply [`REQUEST_TIMEOUT`] per request where the client can't (the
+/// browser build); natively the client-wide timeout already covers it.
+fn with_timeout(req: RequestBuilder) -> RequestBuilder {
+    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+    let req = req.timeout(REQUEST_TIMEOUT);
+    req
+}
+
+/// Send `req` and decode its JSON reply (or its HTTP error) — one future
+/// for both legs, so the browser build can mark it `Send` in one place
+/// (see [`crate::compat`]). Every JSON call goes through here.
+fn execute<T: DeserializeOwned>(
+    req: RequestBuilder,
+) -> impl Future<Output = Result<T, OverpayError>> + Send {
+    let req = with_timeout(req);
+    sendable(async move {
+        let resp = req.send().await?;
+        decode_json(resp).await
+    })
+}
+
+/// The download half of [`OverpayClient::fetch_delivered_content`].
+async fn fetch_file(req: RequestBuilder) -> Result<DeliveredContent, OverpayError> {
+    let resp = req.send().await?;
     let status = resp.status();
-    let bytes = resp.bytes().await?;
     if !status.is_success() {
-        let body = String::from_utf8_lossy(&bytes).into_owned();
         return Err(OverpayError::HttpStatus {
             status: status.as_u16(),
-            body,
+            body: resp.text().await.unwrap_or_default(),
         });
     }
-    Ok(serde_json::from_slice(&bytes)?)
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(';').next().unwrap_or(v).trim().to_ascii_lowercase())
+        .filter(|v| !v.is_empty());
+    if content_type.as_deref().is_some_and(is_binary_media_type) {
+        return Ok(DeliveredContent::Binary {
+            content_type,
+            bytes: resp.content_length(),
+        });
+    }
+    let bytes = resp.bytes().await?;
+    if bytes.len() > OverpayClient::MAX_DELIVERED_CONTENT_BYTES {
+        return Err(OverpayError::Delivery(format!(
+            "file is {} bytes, over the {}-byte limit",
+            bytes.len(),
+            OverpayClient::MAX_DELIVERED_CONTENT_BYTES
+        )));
+    }
+    let len = bytes.len() as u64;
+    Ok(match String::from_utf8(bytes.to_vec()) {
+        Ok(text) => DeliveredContent::Text(text),
+        Err(_) => DeliveredContent::Binary {
+            content_type,
+            bytes: Some(len),
+        },
+    })
 }
 
 /// What [`OverpayClient::fetch_delivered_content`] found behind a

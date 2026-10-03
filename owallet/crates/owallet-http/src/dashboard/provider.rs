@@ -31,25 +31,9 @@ pub struct CreateProviderKeyForm {
     pub budget_usd: Option<String>,
 }
 
-/// Parse a user-typed budget field: blank/whitespace → no limit; otherwise
-/// a positive dollar amount (up to cents precision) → cents.
-pub fn parse_budget_usd(input: Option<&str>) -> Result<Option<i64>, &'static str> {
-    let Some(raw) = input.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(None);
-    };
-    let raw = raw.strip_prefix('$').unwrap_or(raw);
-    let usd: f64 = raw
-        .parse()
-        .map_err(|_| "budget must be a dollar amount, or blank for no limit")?;
-    if !usd.is_finite() || usd <= 0.0 {
-        return Err("budget must be a positive dollar amount, or blank for no limit");
-    }
-    let cents = (usd * 100.0).round() as i64;
-    if cents <= 0 {
-        return Err("budget must be at least $0.01, or blank for no limit");
-    }
-    Ok(Some(cents))
-}
+/// The one budget parser every surface uses (lives in owallet-db so the
+/// CLI and the browser build share it without this crate).
+pub use owallet_db::parse_budget_usd;
 
 pub async fn create_post(
     State(state): State<AppState>,

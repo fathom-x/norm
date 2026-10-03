@@ -27,5 +27,12 @@ tiny-keccak = { version = "2", features = ["keccak"] }
 
 # NIP-98 envelope
 base64 = "0.22"
+# `SystemTime` that works in the browser (re-exports `std::time` natively).
+web-time = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# Browser build (wasm32-unknown-unknown): rand 0.8's OsRng reads
+# getrandom 0.2, which needs its JS (crypto.getRandomValues) backend there.
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

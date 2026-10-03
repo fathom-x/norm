@@ -88,6 +88,65 @@ impl BuiltinEnv {
 }
 
 // ---------------------------------------------------------------------------
+// Config from values (no env, no dotenv)
+// ---------------------------------------------------------------------------
+
+/// The Overpay endpoints one wallet talks to, built from plain values
+/// rather than env vars / dotenv files — how the browser build is
+/// configured (its JS host passes these in). `rails_url` falls back to the
+/// built-in default for `env` when one exists; `public_url` (browser-facing
+/// links) to `rails_url`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverpayEndpoints {
+    /// Environment label (`prod`, `dev`, `staging`, or a custom name).
+    pub env: String,
+    /// Overpay API base URL — also the key bearers are filed under.
+    pub rails_url: String,
+    /// Browser-facing Overpay URL.
+    pub public_url: String,
+}
+
+impl OverpayEndpoints {
+    /// `None` when `rails_url` is missing and `env` has no built-in URL.
+    #[must_use]
+    pub fn from_values(
+        env: &str,
+        rails_url: Option<&str>,
+        public_url: Option<&str>,
+    ) -> Option<Self> {
+        let nonempty =
+            |v: Option<&str>| v.map(str::trim).filter(|v| !v.is_empty()).map(String::from);
+        let rails_url = nonempty(rails_url).or_else(|| {
+            BuiltinEnv::from_label(env)
+                .and_then(|e| e.config().rails_url)
+                .map(String::from)
+        })?;
+        let public_url = nonempty(public_url).unwrap_or_else(|| rails_url.clone());
+        Some(Self {
+            env: env.to_string(),
+            rails_url,
+            public_url,
+        })
+    }
+}
+
+impl BuiltinEnv {
+    /// The built-in environment called `label` (`"prod"`, and `"dev"` /
+    /// `"staging"` in dev-envs builds).
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "prod" => Some(Self::Prod),
+            #[cfg(feature = "dev-envs")]
+            "dev" => Some(Self::Dev),
+            #[cfg(feature = "dev-envs")]
+            "staging" => Some(Self::Staging),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resolved config
 // ---------------------------------------------------------------------------
 
@@ -399,6 +458,20 @@ fn expand_tilde(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoints_from_values() {
+        let e = OverpayEndpoints::from_values("prod", None, None).unwrap();
+        assert_eq!(e.rails_url, defaults::OVERPAY_RAILS_URL);
+        assert_eq!(e.public_url, e.rails_url);
+        let e =
+            OverpayEndpoints::from_values("demo", Some("http://127.0.0.1:9"), Some(" ")).unwrap();
+        assert_eq!(
+            (e.env.as_str(), e.rails_url.as_str(), e.public_url.as_str()),
+            ("demo", "http://127.0.0.1:9", "http://127.0.0.1:9")
+        );
+        assert!(OverpayEndpoints::from_values("demo", None, None).is_none());
+    }
 
     #[test]
     fn lenient_dot_env_keeps_the_lines_it_can_parse() {

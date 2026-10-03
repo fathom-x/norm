@@ -17,8 +17,6 @@ use axum::routing::get;
 use axum::Router;
 use owallet_crypto::{derive_from_mnemonic, Mnemonic, PrivateKey, EVM_HD_PATH};
 use owallet_db::default_db_path;
-use owallet_overpay::models::OAuthRegisterRequest;
-use owallet_overpay::Pkce;
 use serde::Deserialize;
 use tokio::sync::{oneshot, Mutex};
 
@@ -42,8 +40,6 @@ pub fn run() -> Result<()> {
     let host = host_key();
 
     block_on(async move {
-        let pkce = Pkce::generate();
-
         // Bind first to learn the port; then we know what redirect_uri to
         // register with the OAuth provider.
         let listener =
@@ -53,30 +49,17 @@ pub fn run() -> Result<()> {
         let local_addr = listener.local_addr().map_err(CmdError::Io)?;
         let redirect_uri = format!("http://127.0.0.1:{}/callback", local_addr.port());
 
-        // Register an ephemeral public OAuth client.
-        let reg = overpay
-            .register_oauth_client(&OAuthRegisterRequest {
-                client_name: "owallet".into(),
-                redirect_uris: vec![redirect_uri.clone()],
-                grant_types: vec!["authorization_code".into()],
-                response_types: vec!["code".into()],
-                scope: Some("wallet".into()),
-                token_endpoint_auth_method: Some("none".into()),
-            })
+        // Register an ephemeral public OAuth client and build the
+        // authorize URL (PKCE).
+        let login = overpay
+            .begin_pkce_login("owallet", &redirect_uri, "wallet")
             .await?;
-
-        let auth_url = overpay.authorize_url(
-            &reg.client_id,
-            &redirect_uri,
-            &pkce.state,
-            &pkce.challenge,
-            "wallet",
-        )?;
+        let auth_url = login.authorize_url.clone();
 
         // One-shot channel for the callback to hand back the (code, state).
         let (tx, rx) = oneshot::channel::<CallbackResult>();
         let inbound = Arc::new(InboundState {
-            expected_state: pkce.state.clone(),
+            expected_state: login.pkce.state.clone(),
             tx: Mutex::new(Some(tx)),
         });
 
@@ -122,9 +105,7 @@ pub fn run() -> Result<()> {
             CallbackResult::Error(msg) => return Err(CmdError::OauthCallback(msg)),
         };
 
-        let token = overpay
-            .exchange_code(&reg.client_id, &code, &pkce.verifier, &redirect_uri)
-            .await?;
+        let token = overpay.finish_pkce_login(&login, &code).await?;
         db.write_token(&npub, &host, &token.access_token, "overpay-oauth")?;
 
         // Confirm by fetching the account; cache the username for offline view.
