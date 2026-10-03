@@ -166,6 +166,15 @@ word "Norm" (`tui/src/component/logo.tsx`), and the exit summary is just
 the session lines (`tui/src/util/presentation.ts`); the terminal window title is
 "Norm" / "Norm | <session title>" (`tui/src/app.tsx`).
 
+The primary agent the user picks with tab (Build/Plan) is labelled a
+**mode** in the TUI — hints row, "Switch mode" / `/modes` (`/agents`
+still works), "Select mode", the keybind descriptions and tips
+(`tui/src/app.tsx`, `component/dialog-agent.tsx`,
+`component/prompt/index.tsx`, `config/keybind.ts`,
+`feature-plugins/home/tips-view.tsx`). Code, config keys (`agent`,
+`.opencode/agents/`), command names (`agent.cycle`), subagents and
+`norm agent` keep upstream's "agent".
+
 Deliberately *kept* from upstream for compatibility and cheap merges:
 `OPENCODE_*` env vars, `opencode.json`/`opencode.jsonc` config file
 names, project `.opencode/` dirs, the `$schema` URL, and internal

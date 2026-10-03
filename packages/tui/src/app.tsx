@@ -678,9 +678,11 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       },
       {
         name: "agent.list",
-        title: "Switch agent",
+        // norm: the primary agent (Build/Plan) is called a "mode" in the UI.
+        title: "Switch mode",
         category: "Agent",
-        slashName: "agents",
+        slashName: "modes",
+        slashAliases: ["mode", "agents"],
         run: () => {
           dialog.replace(() => <DialogAgent />)
         },
@@ -696,7 +698,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       },
       {
         name: "agent.cycle",
-        title: "Agent cycle",
+        title: "Mode cycle",
         category: "Agent",
         hidden: true,
         run: () => {
@@ -730,7 +732,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       },
       {
         name: "agent.cycle.reverse",
-        title: "Agent cycle reverse",
+        title: "Mode cycle reverse",
         category: "Agent",
         hidden: true,
         run: () => {
