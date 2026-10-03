@@ -90,6 +90,23 @@ it.instance("plan agent denies the general subagent by default", () =>
   }),
 )
 
+it.instance("norm: plan agent runs read-only shell commands and asks for the rest", () =>
+  Effect.gen(function* () {
+    const plan = yield* load((svc) => svc.get("plan"))
+    const build = yield* load((svc) => svc.get("build"))
+    const shell = (command: string) => Permission.evaluate("bash", command, plan!.permission).action
+
+    expect(shell("ls -la")).toBe("allow")
+    expect(shell("git log --oneline -5")).toBe("allow")
+    expect(shell("rg TODO src")).toBe("allow")
+    expect(shell("sed -i s/a/b/ file.ts")).toBe("ask")
+    expect(shell("rm -rf build")).toBe("ask")
+    expect(shell("echo hi > notes.md")).toBe("ask")
+    expect(shell("cat a.txt > b.txt")).toBe("ask")
+    expect(Permission.evaluate("bash", "rm -rf build", build!.permission).action).toBe("allow")
+  }),
+)
+
 it.instance(
   "user permission can allow the general subagent from plan mode",
   () =>

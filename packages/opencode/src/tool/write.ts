@@ -1,6 +1,7 @@
 import { Schema } from "effect"
 import * as path from "path"
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
+import { NormWriteGuard } from "@/norm/write-guard"
 import * as Tool from "./tool"
 import { LSP } from "@/lsp/lsp"
 import { createTwoFilesPatch } from "diff"
@@ -44,6 +45,21 @@ export const WriteTool = Tool.define(
           yield* assertExternalDirectoryEffect(ctx, filepath)
 
           const exists = yield* fs.existsSafe(filepath)
+          // norm: no overwriting a file this session never read, or that
+          // changed since it last did (see norm/write-guard.ts).
+          if (exists) {
+            const info = yield* fs.stat(filepath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+            const modified = info ? Option.getOrUndefined(info.mtime) : undefined
+            const refusal = modified
+              ? NormWriteGuard.refusal({
+                  messages: ctx.messages,
+                  filepath,
+                  directory: instance.directory,
+                  modifiedMs: modified.getTime(),
+                })
+              : undefined
+            if (refusal) throw new Error(refusal)
+          }
           const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
           const next = Bom.split(params.content)
           const desiredBom = source.bom || next.bom

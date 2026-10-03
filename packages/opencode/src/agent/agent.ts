@@ -55,6 +55,34 @@ export const Info = Schema.Struct({
 }).annotate({ identifier: "Agent" })
 export type Info = DeepMutable<Schema.Schema.Type<typeof Info>>
 
+// norm: shell commands Plan mode runs without asking — ones that only read.
+// Patterns match a command's whole text ("git log*" also covers
+// "git log --oneline"). Deliberately absent: find (-delete, -exec), sed
+// (-i), git branch/checkout/etc., anything that installs or runs code.
+export const PLAN_READONLY_COMMANDS = [
+  "ls*",
+  "pwd",
+  "cat *",
+  "head *",
+  "tail *",
+  "wc *",
+  "grep *",
+  "rg *",
+  "tree*",
+  "file *",
+  "stat *",
+  "which *",
+  "du *",
+  "git status*",
+  "git log*",
+  "git diff*",
+  "git show*",
+  "git blame*",
+  "git grep*",
+  "git ls-files*",
+  "git rev-parse*",
+]
+
 const GeneratedAgent = Schema.Struct({
   identifier: Schema.String,
   whenToUse: Schema.String,
@@ -172,6 +200,17 @@ const layer = Layer.effect(
                   "*": "deny",
                   [path.join(".opencode", "plans", "*.md")]: "allow",
                   [path.relative(ctx.worktree, path.join(Global.Path.data, path.join("plans", "*.md")))]: "allow",
+                },
+                // norm: the edit deny above didn't cover the shell, so a model
+                // could still change files with `sed -i` or `echo >` while
+                // planning. Read-only commands run; anything else asks. Each
+                // command of a pipeline / && chain is checked on its own, and
+                // the last matching rule wins — so the final rule makes any
+                // redirect ask, even after an allowed command.
+                bash: {
+                  "*": "ask",
+                  ...Object.fromEntries(PLAN_READONLY_COMMANDS.map((command) => [command, "allow"])),
+                  "*>*": "ask",
                 },
               }),
               user,

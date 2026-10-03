@@ -50,9 +50,25 @@ const init = Effect.fn("WriteToolTest.init")(function* () {
   return yield* info.init()
 })
 
+// norm: a session history in which `filePath` was just read (the write
+// tool refuses to overwrite a file the session never read — norm/write-guard).
+const readOf = (filePath: string, end = Date.now()) =>
+  [
+    {
+      info: { id: "msg_read", role: "assistant" },
+      parts: [
+        {
+          type: "tool",
+          tool: "read",
+          state: { status: "completed", input: { filePath }, output: "", title: "", metadata: {}, time: { start: end, end } },
+        },
+      ],
+    },
+  ] as unknown as Tool.Context["messages"]
+
 const run = Effect.fn("WriteToolTest.run")(function* (
   args: Tool.InferParameters<typeof WriteTool>,
-  next: Tool.Context = ctx,
+  next: Tool.Context = { ...ctx, messages: readOf(args.filePath) },
 ) {
   const tool = yield* init()
   return yield* tool.execute(args, next)
@@ -92,6 +108,48 @@ describe("tool.write", () => {
 
         const content = yield* Effect.promise(() => fs.readFile(path.join(test.directory, "relative.txt"), "utf-8"))
         expect(content).toBe("relative content")
+      }),
+    )
+  })
+
+  describe("norm: overwrite guard", () => {
+    it.instance("refuses to overwrite a file the session never read", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "unread.txt")
+        yield* Effect.promise(() => fs.writeFile(filepath, "keep me", "utf-8"))
+        const exit = yield* run({ filePath: filepath, content: "clobbered" }, ctx).pipe(Effect.exit)
+
+        expect(exit._tag).toBe("Failure")
+        expect(String(exit)).toContain("hasn't been read in this session")
+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe("keep me")
+      }),
+    )
+
+    it.instance("refuses when the file changed since the session read it", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "changed.txt")
+        yield* Effect.promise(() => fs.writeFile(filepath, "edited by the user", "utf-8"))
+        const exit = yield* run(
+          { filePath: filepath, content: "stale rewrite" },
+          { ...ctx, messages: readOf(filepath, Date.now() - 60_000) },
+        ).pipe(Effect.exit)
+
+        expect(exit._tag).toBe("Failure")
+        expect(String(exit)).toContain("has changed on disk since you last read it")
+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe("edited by the user")
+      }),
+    )
+
+    it.instance("still creates new files without a read", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "fresh.txt")
+        const result = yield* run({ filePath: filepath, content: "hello" }, ctx)
+
+        expect(result.metadata.exists).toBe(false)
+        expect(yield* Effect.promise(() => fs.readFile(filepath, "utf-8"))).toBe("hello")
       }),
     )
   })

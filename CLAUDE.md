@@ -188,6 +188,18 @@ recipes; the short version:
   Overpay through a browser login. Ask once for a linked agent sandbox and
   reuse its `NORM_HOME`.
 
+- **Safer file writes and planning** (two one-spot edits):
+  - `src/tool/write.ts` refuses to overwrite an existing file this session
+    never read, or one modified on disk since the session last read or
+    wrote it (`src/norm/write-guard.ts`, from the session's own tool
+    history; write.txt always claimed this, upstream didn't enforce it).
+    edit is unchanged: it must match the file's exact text anyway.
+  - The plan agent (`src/agent/agent.ts`) asks before shell commands
+    other than a read-only list (`PLAN_READONLY_COMMANDS`), and before
+    any redirect — upstream denied only the edit tools, so `sed -i` /
+    `echo >` still changed files while planning. User `permission`
+    config still wins.
+
 ## Rebrand
 
 The fork installs as **`norm`**, side-by-side-safe with a stock
