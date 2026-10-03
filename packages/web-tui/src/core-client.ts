@@ -17,6 +17,11 @@ export interface WorkerOptions {
   mockOwallet?: boolean
   /** Extra environment for the core, over env.ts's ENV (e.g. OPENCODE_PRINT_LOGS). */
   env?: Record<string, string>
+  /**
+   * The Overpay owallet-web talks to (src/owallet.ts); defaults to norm's
+   * staging Overpay. The page fills it from `?overpay=<url>`.
+   */
+  overpay?: { railsUrl: string; env?: string; publicUrl?: string }
 }
 
 export interface Core {

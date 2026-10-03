@@ -4,8 +4,9 @@
 // capture `fetch` or touch the file system before they exist.
 import "./shims/globals"
 import type { WorkerOptions } from "./core-client"
-import { installFetchRouter, OWALLET_ORIGIN, owalletUnavailable } from "./fetch-router"
+import { installFetchRouter, OWALLET_ORIGIN } from "./fetch-router"
 import { mockOwallet } from "./mock-owallet"
+import { owallet } from "./owallet"
 import { mountVfs } from "./vfs"
 
 // The page passes its options as the worker's name (core-client.ts).
@@ -19,10 +20,12 @@ const options: WorkerOptions = (() => {
 
 Object.assign(process.env, options.env)
 
-// owallet-web (the WebAssembly owallet) registers itself here once it is
-// built into the page; until then owallet.internal answers 503, or the
-// scripted mock when asked for.
-export const router = installFetchRouter({ [OWALLET_ORIGIN]: options.mockOwallet ? mockOwallet : owalletUnavailable })
+// owallet.internal: owallet-web (the WebAssembly owallet, src/owallet.ts —
+// 503 until `bun run build:owallet` has built it), or the scripted mock when
+// asked for.
+export const router = installFetchRouter({
+  [OWALLET_ORIGIN]: options.mockOwallet ? mockOwallet : owallet(options).route,
+})
 
 const boot = (data: object) => postMessage(JSON.stringify({ type: "rpc.event", event: "boot", data }))
 

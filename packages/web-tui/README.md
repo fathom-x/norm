@@ -143,3 +143,47 @@ Outside a worker with OPFS (tests) both fall back to memory.
    that runs the worker's `fetch` (which the router there answers) — once
    owallet-web is registered in `core.worker.ts` in place of
    `owalletUnavailable`.
+
+## owallet-web in the page
+
+The real owallet — `owallet/crates/owallet-web`, Rust compiled to
+`wasm32-unknown-unknown` — answers `http://owallet.internal` in the core worker
+(`src/owallet.ts`, registered in `core.worker.ts` unless `?mock-owallet`).
+
+| What | Command |
+| --- | --- |
+| Build the module into `src/owallet-web/` (generated, gitignored) | `bun run build:owallet` (`scripts/build-owallet-web.sh`) |
+| Then the page | `bun run build` |
+| Browser test against the mock Overpay | `bun run test:owallet` |
+
+`build:owallet` is not part of `build` (a cold release build of the Rust crate
+takes minutes and needs Rust + the wasm32 target, clang/llvm-ar and
+`wasm-bindgen-cli` at the version in owallet-web's `Cargo.lock`; the script
+checks each and says what is missing). Without it the page still builds — the
+module is found through `import.meta.glob` — and owallet.internal answers 503
+`owallet_unavailable` saying to run it.
+
+- **Lazy**: the ~7 MB module loads on the first owallet request, which awaits
+  it; a failed or stuck start (30 s, e.g. the wallet open in another tab)
+  answers 503 JSON with the reason and is retried on the next request.
+- **Config** (`WorkerOptions.overpay = { railsUrl, env?, publicUrl? }`, from
+  the page's `?overpay=<url>`): defaults to norm's staging Overpay
+  (`https://overpay-eykm.onrender.com`, env `staging`). At runtime,
+  `configureOwallet(worker, overpay)` (an `owallet.configure` message) re-points
+  it; the wallet database is kept.
+- **Storage**: the wallet DB `owallet.db` in its own OPFS access-handle pool
+  (`.owallet-web`, separate from the core's `.norm-sqlite`), or memory where
+  OPFS sync handles don't exist. The password is never stored: after a reload
+  `/_mgmt/status` reports `initialized` + locked until `/_mgmt/unlock`.
+- **Overpay** is called cross-origin from the worker: it must list the page's
+  origin in `API_CORS_ORIGINS` (overpay's `config/initializers/cors.rb`). The
+  mock (`owallet/crates/owallet-web/tests/mock-overpay/server.mjs`) allows any.
+
+`test/browser/owallet.mjs` (env as smoke.mjs, `PORT` default 4318) starts the
+mock on a random port, opens `/?debug-panel&overpay=…`, and checks: `/_mgmt`
+init → generate → overpay/register through the worker's router; norm's
+bootstrap minting an `owk_` key into `auth.json`; `/v1/models`; a prompt
+streaming the mock seller's reply with the turn's cost = `charged_cents`; the
+owallet MCP server connected with its tools; and after a reload the wallet
+persisted but locked, then unlocked. Screenshots: `04-owallet-web-chat.png`,
+`05-owallet-web-unlocked.png`.

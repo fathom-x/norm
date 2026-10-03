@@ -12,7 +12,9 @@
     "preview": "vite preview",
     "typecheck": "tsgo --noEmit",
     "test": "bun test --conditions=browser --preload ./happydom.ts ./src ./test/unit",
-    "test:browser": "bun run build && node ./test/browser/smoke.mjs"
+    "test:browser": "bun run build && node ./test/browser/smoke.mjs",
+    "build:owallet": "./scripts/build-owallet-web.sh",
+    "test:owallet": "bun run build:owallet && bun run build && node ./test/browser/owallet.mjs"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "20.0.11",

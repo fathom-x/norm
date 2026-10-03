@@ -80,6 +80,18 @@ const res = await handle(new Request("http://owallet.internal/_mgmt/status"));
   drops the Rust side.
 - `importMemoryDb(name, bytes)` — preload a database file into the memory VFS.
 
+### In norm's page
+
+`packages/web-tui` builds this crate with `bun run build:owallet`
+(`scripts/build-owallet-web.sh`: release wasm32 build + `wasm-bindgen --target
+web` into `packages/web-tui/src/owallet-web/`, checking the toolchain and the
+wasm-bindgen-cli version) and loads it lazily in its core worker
+(`src/owallet.ts`) behind `http://owallet.internal`: OPFS storage
+(`owallet.db` in the `.owallet-web` pool; memory where OPFS sync handles don't
+exist), Overpay from the page's `?overpay=<url>` (default: norm's staging
+Overpay). `bun run test:owallet` drives it end to end against
+`tests/mock-overpay/server.mjs`. See that package's README.
+
 `/_mgmt` routes (JSON in/out; errors are non-2xx
 `{"error": {"code", "message"}}`): `GET status`, `POST init {password}`,
 `POST unlock {password}`, `POST generate {wallet_password?, words?}`,
