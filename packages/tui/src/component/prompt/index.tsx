@@ -54,6 +54,7 @@ import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
+import { NormBalance } from "../norm-balance"
 
 registerOpencodeSpinner()
 
@@ -270,11 +271,19 @@ export function Prompt(props: PromptProps) {
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
-    const cost = session?.cost ?? 0
     return {
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
-      cost: cost > 0 ? money.format(cost) : undefined,
     }
+  })
+
+  // norm: "$spent / $core" — this conversation's spend over the wallet's
+  // Overpay core-credit balance (NormBalance, read by the owallet plugin);
+  // just the spend when the balance isn't known.
+  const spend = createMemo(() => {
+    const cost = props.sessionID ? (sync.session.get(props.sessionID)?.cost ?? 0) : 0
+    const core = NormBalance.coreCents()
+    if (core === undefined) return cost > 0 ? money.format(cost) : undefined
+    return `${money.format(cost)} / ${money.format(core / 100)}`
   })
 
   const [store, setStore] = createStore<{
@@ -1633,7 +1642,14 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
-                          {[item().context, item().cost].filter(Boolean).join(" · ")}
+                          {[item().context, spend()].filter(Boolean).join(" · ")}
+                        </text>
+                      )}
+                    </Match>
+                    <Match when={spend()}>
+                      {(value) => (
+                        <text fg={theme.textMuted} wrapMode="none">
+                          {value()}
                         </text>
                       )}
                     </Match>

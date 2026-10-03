@@ -104,7 +104,10 @@ syncs stay cheap:
   "Build · model" starts in the column typed text does; while working a
   one-character braille spinner sits two columns left of it (upstream: a
   block sweep that pushed it right). → on an empty prompt toggles the
-  sidebar (session route and home).
+  sidebar (session route and home). The hints row shows "$spent / $core" — the
+  conversation's spend over the wallet's core credits — from one
+  `/v1/status` poller the owallet plugin runs for the whole app
+  (`component/norm-balance.ts`), re-read when a turn ends.
   Edits: `routes/home.tsx`, `tui/src/component/prompt/index.tsx` (`Meta`),
   `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
   `feature-plugins/sidebar/footer.tsx` — expect conflicts there on syncs.
