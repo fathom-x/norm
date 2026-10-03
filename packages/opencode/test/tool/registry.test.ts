@@ -118,6 +118,27 @@ describe("tool.registry", () => {
     }),
   )
 
+  it.instance("norm: offers apply_patch to every model, edit/write beside it except on GPT", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agents = yield* Agent.Service
+      const agent = yield* agents.defaultInfo()
+      const ids = (modelID: string) =>
+        registry
+          .tools({ providerID: ProviderV2.ID.opencode, modelID: ModelV2.ID.make(modelID), agent })
+          .pipe(Effect.map((tools) => tools.map((tool) => tool.id)))
+
+      const claude = yield* ids("claude-sonnet-5")
+      expect(claude).toContain("apply_patch")
+      expect(claude).toContain("edit")
+      expect(claude).toContain("write")
+
+      const gpt = yield* ids("gpt-5.5")
+      expect(gpt).toContain("apply_patch")
+      expect(gpt).not.toContain("edit")
+    }),
+  )
+
   withCodeMode.instance("exposes execute when code mode is enabled", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service

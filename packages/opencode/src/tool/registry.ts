@@ -291,7 +291,10 @@ const layer = Layer.effect(
 
         const usePatch =
           input.modelID.includes("gpt-") && !input.modelID.includes("oss") && !input.modelID.includes("gpt-4")
-        if (tool.id === ApplyPatchTool.id) return usePatch
+        // norm: apply_patch (multi-file diffs in one call) is offered to every
+        // model; upstream gives it only to GPT models. Other models keep
+        // edit/write beside it, and GPT models still get apply_patch alone.
+        if (tool.id === ApplyPatchTool.id) return true
         if (tool.id === EditTool.id || tool.id === WriteTool.id) return !usePatch
 
         return true

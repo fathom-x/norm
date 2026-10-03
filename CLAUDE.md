@@ -123,6 +123,11 @@ fresh install (or anything else that would otherwise write to
 start, so export it before launching. `rm -rf` the directory to undo.
 
 
+- **apply_patch for every model** (`src/tool/registry.ts`): upstream
+  offers the diff-editing `apply_patch` tool only to GPT models (instead
+  of edit/write); norm offers it to all of them, with edit/write kept
+  beside it except on GPT. Test in `test/tool/registry.test.ts`.
+
 ## Rebrand
 
 The fork installs as **`norm`**, side-by-side-safe with a stock
