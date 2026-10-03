@@ -165,7 +165,7 @@ export const TuiThreadCommand = cmd({
       await Norm.ensureServePassword(UI.inputSecret).catch(() => {})
       // Getting started means being connected to Overpay: retry a
       // not-yet-successful authorize on every launch until it lands.
-      await Norm.ensureOverpayConnected().catch(() => {})
+      await Norm.ensureOverpayConnected(UI.input).catch(() => {})
     }
     const noReplay = args.replay === false || args.noReplay === true
 

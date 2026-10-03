@@ -74,6 +74,12 @@ owallet generate
 
 # (optional) link the wallet to your Overpay account via OAuth
 owallet authorize
+# …or create a new Overpay account for this wallet, no browser needed
+# (NIP-98 sign-up with the wallet's key; finds the account if it exists)
+owallet register
+# a demo Overpay (staging) may offer new accounts one-time credits
+owallet demo-credits            # offered? claimed? core balance
+owallet demo-credits --claim
 
 # run the dashboard + MCP server on http://127.0.0.1:8765
 owallet serve

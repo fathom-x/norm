@@ -4,6 +4,7 @@ mod account;
 mod authorize;
 mod config;
 mod credits;
+mod demo_credits;
 mod export;
 mod generate;
 mod import;
@@ -14,6 +15,7 @@ mod login;
 mod overpay;
 mod password;
 mod provider_key;
+mod register;
 mod select;
 mod send;
 mod serve;
@@ -121,6 +123,8 @@ pub fn dispatch(args: Cli) -> Result<()> {
         },
         Command::Export { what } => export::run(what),
         Command::Authorize => authorize::run(),
+        Command::Register { json } => register::run(json),
+        Command::DemoCredits { claim, json } => demo_credits::run(claim, json),
         Command::Login => login::run(),
         Command::List { what } => list::run(what),
         Command::Send { to, amount, asset } => send::run(&to, amount, asset),

@@ -515,12 +515,123 @@ function runInteractive(bin: string, args: string[], env: NodeJS.ProcessEnv): Pr
  * phrase is deliberately never displayed (fathom-x/norm#18);
  * `owallet export key --format mnemonic` prints it on demand.
  */
-function runQuiet(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; stderr: string }> {
+function runQuiet(
+  bin: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    execFile(bin, args, { env, timeout: 60_000 }, (error: any, _stdout, stderr) => {
-      resolve({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stderr: stderr ?? "" })
+    execFile(bin, args, { env, timeout: 60_000 }, (error: any, stdout, stderr) => {
+      resolve({
+        code: error ? (typeof error.code === "number" ? error.code : 1) : 0,
+        stdout: stdout ?? "",
+        stderr: stderr ?? "",
+      })
     })
   })
+}
+
+function parseJson(text: string): any {
+  try {
+    return JSON.parse(text.trim().split("\n").pop() ?? "")
+  } catch {
+    return undefined
+  }
+}
+
+function usd(cents: number) {
+  return `$${(cents / 100).toFixed(2)}`
+}
+
+/**
+ * Connecting a new wallet to Overpay — the native twin of the browser setup
+ * screen's choice. "New account" is zero-click: `owallet register` signs up
+ * with the wallet's own key (NIP-98), so nothing opens and nothing is pasted;
+ * a $0 balance is then offered the Overpay deployment's one-time demo
+ * credits when it has them. "Log in" is the browser OAuth flow
+ * (`owallet authorize`). Records whether the wallet ended up linked, so
+ * `ensureOverpayConnected` asks again on the next launch if not.
+ */
+export async function connectOverpay(
+  bin: string,
+  env: NodeJS.ProcessEnv,
+  ask: (prompt: string) => Promise<string>,
+  deps: { authorize?: () => Promise<number> } = {},
+): Promise<boolean> {
+  const authorize = deps.authorize ?? (() => runInteractive(bin, [...envFlagArgs(), "authorize"], env))
+  process.stderr.write(
+    [
+      "",
+      "Connect this wallet to Overpay (the marketplace norm pays through):",
+      "  1) Create a new Overpay account — nothing to log in to",
+      "  2) Log in to an existing Overpay account (opens your browser)",
+      "  3) Later",
+      "",
+    ].join("\n"),
+  )
+  const answer = (await ask("Choice [1/2/3] (default 1): ").catch(() => "3")).trim()
+  let linked = false
+  if (answer === "" || answer === "1") {
+    const result = await runQuiet(bin, [...envFlagArgs(), "register", "--json"], env)
+    const out = result.code === 0 ? parseJson(result.stdout) : undefined
+    if (out?.linked) {
+      linked = true
+      process.stderr.write("\nCreated your Overpay account.\n")
+      if (out.account_number)
+        process.stderr.write(
+          `  Account number: ${out.account_number}\n` +
+            "  It is your Overpay login — keep it somewhere safe.\n",
+        )
+      await offerDemoCredits(bin, env, ask)
+    } else if (/unrecognized subcommand|unexpected argument/i.test(result.stderr)) {
+      // An owallet that predates `register`: the browser login still works.
+      process.stderr.write("\nThis owallet can't create accounts itself; logging in instead.\n")
+      linked = (await authorize()) === 0
+    } else {
+      const detail = result.stderr.trim()
+      process.stderr.write(`\nCouldn't create the account${detail ? `: ${detail}` : ""}.\n`)
+    }
+  } else if (answer === "2") {
+    linked = (await authorize()) === 0
+  }
+  await recordOverpayAuthorized(linked)
+  process.stderr.write(
+    linked
+      ? "Connected to Overpay.\n"
+      : "Not connected to Overpay yet — norm will offer again on the next launch\n" +
+          "(or run `owallet register` / `owallet authorize` yourself).\n",
+  )
+  return linked
+}
+
+/** On a $0 core balance: claim a demo deployment's credits, or say how to top up. */
+async function offerDemoCredits(bin: string, env: NodeJS.ProcessEnv, ask: (prompt: string) => Promise<string>) {
+  const status = await runQuiet(bin, [...envFlagArgs(), "demo-credits", "--json"], env)
+  const info = status.code === 0 ? parseJson(status.stdout) : undefined
+  if (!info || (info.core_balance_cents ?? 0) > 0) return
+  const lightning =
+    "Your balance is $0.00. To add credits, ask norm (\"load $5 of credits\") for a Lightning\n" +
+    "invoice, or run `owallet credits load --amount-cents 500`.\n"
+  if (!info.enabled || info.granted || !(info.amount_cents > 0)) {
+    process.stderr.write(lightning)
+    return
+  }
+  const amount = usd(info.amount_cents)
+  const yes = (await ask(`This Overpay offers new accounts ${amount} of demo credits. Add them? [Y/n]: `).catch(() => "n"))
+    .trim()
+    .toLowerCase()
+  if (yes !== "" && yes !== "y" && yes !== "yes") {
+    process.stderr.write(lightning)
+    return
+  }
+  const claim = await runQuiet(bin, [...envFlagArgs(), "demo-credits", "--claim", "--json"], env)
+  const granted = claim.code === 0 ? parseJson(claim.stdout) : undefined
+  if (granted?.granted_cents)
+    process.stderr.write(`Added ${usd(granted.granted_cents)} of demo credits.\n`)
+  else {
+    const refusal = parseJson(claim.stdout)?.error?.message ?? claim.stderr.trim()
+    process.stderr.write(`No demo credits${refusal ? `: ${refusal}` : ""}.\n${lightning}`)
+  }
 }
 
 /**
@@ -537,6 +648,7 @@ function runQuiet(bin: string, args: string[], env: NodeJS.ProcessEnv): Promise<
 async function autoWalletSetup(
   bin: string,
   askSecret: (prompt: string) => Promise<string>,
+  ask: (prompt: string) => Promise<string> = askSecret,
 ): Promise<void> {
   process.stderr.write(
     [
@@ -548,6 +660,7 @@ async function autoWalletSetup(
       "",
     ].join("\n"),
   )
+  const presetPassword = !!process.env.OWALLET_PASSWORD
   let password = process.env.OWALLET_PASSWORD
   if (!password) {
     process.stderr.write(
@@ -603,29 +716,18 @@ async function autoWalletSetup(
   // auto-start working across launches (said below, post-connect).
   process.env.OWALLET_PASSWORD = password
 
-  // Connecting to Overpay is part of getting started, not an option: norm
-  // exists to route through the marketplace, and an unlinked wallet can't
-  // buy anything. The browser OAuth (PKCE) flow opens now; a failed or
-  // abandoned attempt is retried on every launch until it succeeds
-  // (`ensureOverpayConnected`).
-  process.stderr.write(
-    "\nWallet ready. Connecting to Overpay — this links the wallet to your\n" +
-      "Overpay account (your browser opens to log in and authorize; norm's\n" +
-      "provider key is minted automatically afterwards).\n\n",
-  )
-  const code = await runInteractive(bin, [...envFlagArgs(), "authorize"], env)
-  await recordOverpayAuthorized(code === 0)
-  process.stderr.write(
-    code === 0
-      ? "Connected to Overpay.\n"
-      : "Overpay connect didn't complete — norm will retry on the next launch\n" +
-          "(or run `owallet authorize` yourself).\n",
-  )
-  process.stderr.write(
-    "\nTo let norm start owallet automatically on future launches, export\n" +
-      "OWALLET_PASSWORD in your shell profile; otherwise run `owallet serve`\n" +
-      "yourself before starting norm.\n",
-  )
+  // Connecting to Overpay is part of getting started: norm exists to route
+  // through the marketplace, and an unlinked wallet can't buy anything. A new
+  // account needs no login (`connectOverpay`); an unfinished connection is
+  // offered again on every launch (`ensureOverpayConnected`).
+  process.stderr.write("\nWallet ready.\n")
+  await connectOverpay(bin, env, ask)
+  if (!presetPassword)
+    process.stderr.write(
+      "\nTo let norm start owallet automatically on future launches, export\n" +
+        "OWALLET_PASSWORD in your shell profile; otherwise run `owallet serve`\n" +
+        "yourself before starting norm.\n",
+    )
 }
 
 /**
@@ -660,7 +762,7 @@ export async function firstRunWalletSetup(
   // NORM_HOME at an empty directory silently exercises the *interactive*
   // first-run instead of the one real users get — a sandbox that quietly
   // tests the wrong code path is worse than no sandbox.
-  if (bin === bundledOwalletPath() || normHome()) return autoWalletSetup(bin, askSecret)
+  if (bin === bundledOwalletPath() || normHome()) return autoWalletSetup(bin, askSecret, ask)
   process.stderr.write(
     [
       "",
@@ -729,14 +831,8 @@ export async function firstRunWalletSetup(
 
   // Same mandate as the auto path: a norm wallet gets started by
   // connecting to Overpay. Failed attempts retry on later launches.
-  process.stderr.write("\nWallet ready. Connecting to Overpay (your browser opens to authorize)...\n")
-  const authCode = await runInteractive(bin, [...envFlagArgs(), "authorize"], env)
-  await recordOverpayAuthorized(authCode === 0)
-  process.stderr.write(
-    authCode === 0
-      ? "Connected to Overpay.\n"
-      : "Overpay connect didn't complete — norm will retry on the next launch.\n",
-  )
+  process.stderr.write("\nWallet ready.\n")
+  await connectOverpay(bin, env, ask)
   process.stderr.write(
     "\nnorm will now start `owallet serve` and mint an overpay provider key\n" +
       "for this session. To keep that automatic across launches, export\n" +
@@ -808,7 +904,7 @@ export async function ensureServePassword(askSecret: (prompt: string) => Promise
  * eligible — a pre-existing wallet norm didn't create is never nagged.
  * TTY-only (the flow needs a browser and a terminal).
  */
-export async function ensureOverpayConnected(): Promise<void> {
+export async function ensureOverpayConnected(ask?: (prompt: string) => Promise<string>): Promise<void> {
   if (disabled()) return
   applySandboxEnv()
   if (!process.stdin.isTTY || !process.stdout.isTTY) return
@@ -817,6 +913,11 @@ export async function ensureOverpayConnected(): Promise<void> {
   const bin = await owalletBinary()
   if (!bin) return
   await applyAutoSetupPassword().catch(() => {})
+  if (ask) {
+    process.stderr.write("\nnorm needs this wallet connected to Overpay to get started.\n")
+    await connectOverpay(bin, { ...process.env }, ask)
+    return
+  }
   process.stderr.write(
     "\nnorm needs this wallet connected to Overpay to get started — opening\n" +
       "your browser to authorize...\n",

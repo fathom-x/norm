@@ -116,6 +116,27 @@ pub enum Command {
     /// Opens the browser; spins up a local callback server on a free port.
     Authorize,
 
+    /// Link this wallet to Overpay without a browser: sign up (or find the
+    /// account already bound to this wallet's key) with a NIP-98-signed
+    /// request, and store the returned API token like `authorize` does.
+    Register {
+        /// Print `{linked, npub, username, account_number}` as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// A demo Overpay's one-time credits for a new account: show whether
+    /// they are offered (and the core-credit balance), or claim them.
+    DemoCredits {
+        /// Claim them (once per account).
+        #[arg(long)]
+        claim: bool,
+        /// Print JSON (`{enabled, amount_cents, granted, core_balance_cents}`,
+        /// or the claim result; a refusal prints `{error: {code, message}}`).
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Open the Overpay web UI using the stored OAuth token (one-time
     /// session URL).
     Login,

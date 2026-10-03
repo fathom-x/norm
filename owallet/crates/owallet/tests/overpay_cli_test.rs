@@ -497,3 +497,164 @@ async fn login_errors_without_token() {
 
 // Needed for the std::io::Read trait on BufReader's underlying stdout.
 use std::io::Read as _;
+
+// ---------------------------------------------------------------------------
+// register (NIP-98 zero-click sign-up) + demo-credits
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn register_signs_up_with_nip98_and_links_the_wallet() {
+    use wiremock::matchers::header_regex;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/buyer/register"))
+        .and(header_regex("authorization", r"^Nostr .+$"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "data": {"account_number": "1111222233334444", "token": "reg-token", "token_name": "owallet-cli"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    // The stored token is what later calls use: the account fetch must carry it.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/account"))
+        .and(header_regex("authorization", r"^Bearer reg-token$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "username": "new-buyer", "account_number": "1111222233334444"
+        })))
+        .mount(&server)
+        .await;
+    // demo-credits after registering authenticates with the stored bearer too.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/demo_credits"))
+        .and(header_regex("authorization", r"^Bearer reg-token$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"enabled": true, "amount_cents": 100, "granted": false}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/merchant_credits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"core": true, "balance_cents": 0}, {"core": false, "balance_cents": 700}]
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.db");
+    let config = write_test_config(tmp.path(), &server.uri());
+    tokio::task::spawn_blocking(move || {
+        init_and_import(&db_path);
+        let run = |args: &[&str]| {
+            Command::cargo_bin("owallet")
+                .unwrap()
+                .env("OWALLET_DB_PATH", &db_path)
+                .env("OWALLET_PASSWORD", "pw")
+                .arg("--config")
+                .arg(&config)
+                .args(args)
+                .assert()
+        };
+        let out = run(&["register", "--json"])
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["linked"], true);
+        assert_eq!(v["account_number"], "1111222233334444");
+        assert_eq!(v["username"], "new-buyer");
+
+        let out = run(&["demo-credits", "--json"])
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["amount_cents"], 100);
+        assert_eq!(v["core_balance_cents"], 0, "seller credits don't count");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn demo_credits_claim_reports_grants_and_refusals() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/demo_credits"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "data": {"granted_cents": 100, "balance_cents": 100}
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/demo_credits"))
+        .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+            "error": "This account already received its demo credits", "code": "already_granted"
+        })))
+        .mount(&server)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.db");
+    let config = write_test_config(tmp.path(), &server.uri());
+    tokio::task::spawn_blocking(move || {
+        init_and_import(&db_path);
+        // No stored token: NIP-98 with the wallet key.
+        let run = |args: &[&str]| {
+            Command::cargo_bin("owallet")
+                .unwrap()
+                .env("OWALLET_DB_PATH", &db_path)
+                .env("OWALLET_PASSWORD", "pw")
+                .arg("--config")
+                .arg(&config)
+                .args(args)
+                .assert()
+        };
+        run(&["demo-credits", "--claim"])
+            .success()
+            .stdout(contains("Added $1.00 of demo credits"));
+        let out = run(&["demo-credits", "--claim", "--json"])
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["error"]["code"], "already_granted");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn demo_credits_reads_an_overpay_without_the_endpoint_as_not_offered() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/merchant_credits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&server)
+        .await;
+    // /api/v1/demo_credits is not mounted: wiremock answers 404.
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.db");
+    let config = write_test_config(tmp.path(), &server.uri());
+    tokio::task::spawn_blocking(move || {
+        init_and_import(&db_path);
+        Command::cargo_bin("owallet")
+            .unwrap()
+            .env("OWALLET_DB_PATH", &db_path)
+            .env("OWALLET_PASSWORD", "pw")
+            .arg("--config")
+            .arg(&config)
+            .arg("demo-credits")
+            .assert()
+            .success()
+            .stdout(contains("not offered"));
+    })
+    .await
+    .unwrap();
+}
