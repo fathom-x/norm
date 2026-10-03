@@ -1407,6 +1407,7 @@ export function Prompt(props: PromptProps) {
           border={["top", "bottom"]}
           borderColor={theme.border}
           title={ruleTitle()}
+          titleColor={theme.textMuted}
           titleAlignment="right"
         >
           <text flexShrink={0} fg={borderHighlight()}>
