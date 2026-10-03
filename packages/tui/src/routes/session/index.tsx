@@ -54,6 +54,7 @@ import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
+import { queuedCount } from "../../util/norm-queue"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
@@ -1306,6 +1307,14 @@ export function Session() {
                     </Switch>
                   )}
                 </For>
+                {/* norm: once, under the queued messages */}
+                <Show when={queuedCount(messages()) > 0}>
+                  <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                    <text fg={theme.textMuted}>
+                      press <span style={{ fg: theme.text }}>esc</span> to send immediately
+                    </text>
+                  </box>
+                </Show>
               </scrollbox>
               <box flexShrink={0}>
                 <Show when={permissions().length > 0}>

@@ -56,6 +56,7 @@ import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { NormBalance } from "../norm-balance"
 import { NormExit } from "../norm-exit"
+import { queuedCount, sendQueued } from "../../util/norm-queue"
 import { isDefaultTitle } from "../../util/session"
 
 registerOpencodeSpinner()
@@ -423,6 +424,15 @@ export function Prompt(props: PromptProps) {
             return
           }
           if (!props.sessionID) return
+
+          // norm: with messages queued behind the reply, one esc (text in
+          // the prompt or not) interrupts it and answers them right away.
+          if (queuedCount(sync.data.message[props.sessionID] ?? []) > 0) {
+            setStore("interrupt", 0)
+            void sendQueued(sdk.client, props.sessionID).catch(() => {})
+            dialog.clear()
+            return
+          }
 
           setStore("interrupt", store.interrupt + 1)
 
@@ -1578,7 +1588,11 @@ export function Prompt(props: PromptProps) {
                 <text flexShrink={0} fg={store.interrupt > 0 ? theme.primary : theme.text}>
                   esc{" "}
                   <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
-                    {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
+                    {queuedCount(sync.data.message[props.sessionID ?? ""] ?? []) > 0
+                      ? "send now"
+                      : store.interrupt > 0
+                        ? "again to interrupt"
+                        : "interrupt"}
                   </span>
                 </text>
                 {/* norm: where "esc again to interrupt" goes */}

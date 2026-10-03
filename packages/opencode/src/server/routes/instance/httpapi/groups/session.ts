@@ -89,6 +89,8 @@ export const SessionPaths = {
   update: `${root}/:sessionID`,
   fork: `${root}/:sessionID/fork`,
   abort: `${root}/:sessionID/abort`,
+  // norm: interrupt and answer the queued messages now
+  sendQueued: `${root}/:sessionID/send_queued`,
   share: `${root}/:sessionID/share`,
   init: `${root}/:sessionID/init`,
   summarize: `${root}/:sessionID/summarize`,
@@ -260,6 +262,19 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.abort",
             summary: "Abort session",
             description: "Abort an active session and stop any ongoing AI processing or command execution.",
+          }),
+        ),
+        HttpApiEndpoint.post("sendQueued", SessionPaths.sendQueued, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(HttpApiSchema.NoContent, "Restarted with the queued messages"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.send_queued",
+            summary: "Send queued messages now",
+            description:
+              "norm: interrupt the reply in progress and start a new one that answers the messages queued behind it, returning immediately.",
           }),
         ),
         HttpApiEndpoint.post("init", SessionPaths.init, {

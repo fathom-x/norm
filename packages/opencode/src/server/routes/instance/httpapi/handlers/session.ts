@@ -234,6 +234,29 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       return true
     })
 
+    // norm: messages sent while a reply is in progress wait behind it
+    // ("queued") until it finishes. This interrupts that reply and runs the
+    // loop again at once: it answers the newest message, with every queued
+    // one already in the conversation. Returns immediately, like
+    // prompt_async.
+    const sendQueued = Effect.fn("SessionHttpApi.sendQueued")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      yield* promptSvc.cancel(ctx.params.sessionID)
+      yield* promptSvc.loop({ sessionID: ctx.params.sessionID }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.gen(function* () {
+            yield* Effect.logError("send_queued failed", { sessionID: ctx.params.sessionID, cause })
+            yield* events.publish(Session.Event.Error, {
+              sessionID: ctx.params.sessionID,
+              error: new NamedError.Unknown({ message: Cause.pretty(cause) }).toObject(),
+            })
+          }),
+        ),
+        Effect.forkIn(scope, { startImmediately: true }),
+      )
+      return HttpApiSchema.NoContent.make()
+    })
+
     const init = Effect.fn("SessionHttpApi.init")(function* (ctx: {
       params: { sessionID: SessionID }
       payload: typeof InitPayload.Type
@@ -424,6 +447,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handle("update", update)
       .handleRaw("fork", forkRaw)
       .handle("abort", abort)
+      .handle("sendQueued", sendQueued)
       .handle("init", init)
       .handle("share", share)
       .handle("unshare", unshare)
