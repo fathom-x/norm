@@ -1376,7 +1376,7 @@ export function Prompt(props: PromptProps) {
             </Show>
             <Show when={store.mode === "normal"}>
               <box flexDirection="row" gap={1} flexShrink={1} overflow="hidden">
-                <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
+                <text flexShrink={0} fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
                 <text
                   flexShrink={0}
                   wrapMode="none"
@@ -1515,9 +1515,14 @@ export function Prompt(props: PromptProps) {
                 flexDirection="row"
                 gap={1}
                 flexGrow={1}
+                minWidth={0}
+                overflow="hidden"
                 justifyContent={status().type === "retry" ? "space-between" : "flex-start"}
               >
-                <box flexShrink={0} flexDirection="row" gap={1}>
+                {/* norm: shrinkable, so on a narrow screen "Build · model" is
+                    clipped rather than the row overflowing into the hints on
+                    the right (which left stray characters while working). */}
+                <box flexShrink={1} minWidth={0} overflow="hidden" flexDirection="row" gap={1}>
                   {/* norm: one column at 1, a space, then Meta at column 3 —
                       where typed text starts and where it sits when idle, so
                       "Build" doesn't move while working. */}
@@ -1526,7 +1531,7 @@ export function Prompt(props: PromptProps) {
                       <spinner color={spinnerColor()} frames={SPINNER_FRAMES} interval={80} />
                     </Show>
                   </box>
-                  <box flexDirection="row" gap={1} flexShrink={0}>
+                  <box flexDirection="row" gap={1} flexShrink={1} minWidth={0} overflow="hidden">
                     {(() => {
                       const retry = createMemo(() => {
                         const s = status()
