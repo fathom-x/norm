@@ -27,6 +27,7 @@ crates/
   owallet-mcp/      JSON-RPC 2.0 MCP transport + tool registry
   owallet-http/     axum router: dashboard + OAuth AS + /mcp mount
   owallet/          binary crate (clap CLI)
+  owallet-web/      wasm32 build for the browser (its own workspace)
 ```
 
 Original Python source lives in the `fathom-x/overpay` repository at
@@ -422,6 +423,39 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   live `sync`/`send` only work outside the sandbox or against a local
   plaintext lightwalletd. Offline paths (UA derivation, balance read,
   data-dir layout, amount formatting) are unit-tested and do work in-sandbox.
+
+## owallet-web (wasm)
+
+`crates/owallet-web` runs `/health`, `/v1`, `/mcp` and a `/_mgmt` JSON API
+(the CLI verbs norm's bootstrap uses) in the browser behind
+`handle(Request) -> Promise<Response>`; build/test commands and the JS API are
+in its README. What keeps the shared crates portable — keep it that way:
+
+- **Own workspace** (excluded here): rusqlite's wasm backend needs 0.38, this
+  lockfile is pinned to 0.37 by zcash. `owallet-db` asks for `>=0.37, <0.39`;
+  each lockfile resolves what fits.
+- **owallet-mcp features** `evm` / `zcash` (default on). Off in the browser:
+  those tool arms, `blocking_zcash` and the balance legs of
+  `get_account_info` / `/v1/status` report `unavailable_in_browser`.
+  `cargo clippy -p owallet-mcp --no-default-features --all-targets` must stay
+  clean.
+- **Time**: use `owallet_mcp::clock` (`Instant`, `sleep`, `timeout`,
+  `unix_now_secs`) and `web_time` elsewhere — never `std::time::Instant` /
+  `SystemTime::now()` or `tokio::time` in shared code (they panic or need a
+  runtime on wasm32).
+- **Send**: browser futures are `!Send`; every reqwest call in
+  owallet-overpay goes through `execute`/`sendable` (identity natively).
+- **No filesystem** in the browser: `owallet-db::storage` (DB existence via
+  the VFS, best-effort WAL) and the order cache's `Store::Table`
+  (`order_cache` table, created on first use; native keeps JSON files).
+- Shared helpers the CLI and owallet-web both call: `PreparedWallet` +
+  `Database::store_wallet`, `Database::mint_provider_key` /
+  `MintedProviderKey::to_json` (the exact `provider-key create --json`
+  output), `parse_budget_usd` (owallet-db), `OverpayClient::
+  {begin,finish}_pkce_login` / `register_buyer`, and
+  `transport::provider_key_bearer_auth`.
+- wasm settings live in `owallet/.cargo/config.toml` (clang for C deps,
+  getrandom's `wasm_js` cfg, `wasm-bindgen-test-runner`).
 
 ## API quirks that cost me time
 
