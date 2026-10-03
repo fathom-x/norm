@@ -117,7 +117,10 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   listing tools forward their in-flight partial output too, unfenced —
   the preview is buyer-facing markdown — set off by blank lines, with
   keep-alive comments between deltas. First consumer: the weather reporter's
-  `forecast`. **Every order poll goes through `get_order_resolved`**: Rails
+  `forecast`. **Every order poll goes through `poll_order`**: conditional
+  on the last `partial_seq` seen (`?since_seq=`, so an unchanged streaming
+  buffer isn't re-downloaded), paced start-to-start by `pace`, and with a
+  file-delivered result inlined (`inline_delivered_file`) — Rails
   offloads `delivered_content` over 4 KB to object storage
   (`delivered_content_url`), and a poll that reads the inline field alone
   fails every long chat reply after it was paid for. One-shot executions
@@ -267,8 +270,10 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   at all yields the safety-cap error. A failed tool
   execution becomes an `{"error": ...}` tool-result message fed back to
   the model rather than aborting the request — see `execute_tool_call`'s
-  doc comment for why. The request timeout (120s) and poll cadence (1s)
-  are `const`s, not request parameters — real OpenAI clients have no way
+  doc comment for why. The request timeout (120s) and poll cadence (400 ms,
+  `OWALLET_V1_POLL_MS` overrides it at serve start; a streamed reply reaches
+  the client one poll at a time, so this is its visible cadence)
+  are not request parameters — real OpenAI clients have no way
   to ask a server for a different timeout, so this doesn't either — but
   tests need short values to avoid a 120s-real-time test, hence the
   private `router_with_timing(state, timeout, poll)` construction-time

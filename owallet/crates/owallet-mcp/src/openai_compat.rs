@@ -182,7 +182,22 @@ pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// Poll cadence, matching `wait_for_order`'s own floor/default — see that
 /// tool's docs for why 1s: the marketplace's own broadcast fan-out
 /// (Solid Cable) polls at roughly the same granularity today.
-pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
+pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(400);
+
+/// `OWALLET_V1_POLL_MS` overrides [`POLL_INTERVAL`] (clamped to 100 ms..10 s)
+/// — for diagnosing, or easing off a marketplace under load.
+const POLL_ENV: &str = "OWALLET_V1_POLL_MS";
+
+/// How often an order in flight is polled: [`POLL_INTERVAL`] unless
+/// `OWALLET_V1_POLL_MS` says otherwise. A streamed reply reaches the client
+/// one poll at a time, so this is the cadence the user sees text arrive at.
+pub(crate) fn poll_interval() -> Duration {
+    std::env::var(POLL_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|ms| Duration::from_millis(ms.clamp(100, 10_000)))
+        .unwrap_or(POLL_INTERVAL)
+}
 
 /// Resolved listing ids, process-wide. Each id is derived from its bot's
 /// private key (`Overpay::Uuid.derive_listing_id`) and so differs per
@@ -233,7 +248,7 @@ struct Ctx {
 }
 
 pub fn router(state: McpState) -> Router {
-    router_with_timing(state, REQUEST_TIMEOUT, POLL_INTERVAL)
+    router_with_timing(state, REQUEST_TIMEOUT, poll_interval())
 }
 
 /// Same as [`router`], but with the request timeout / poll cadence
@@ -1038,8 +1053,10 @@ async fn poll_one_shot(
     let start = Instant::now();
     let mut tick = 0u64;
     let mut streamed = 0usize;
+    let mut seen = None;
     loop {
-        let snap = get_order_resolved(state, auth, order_id).await?;
+        let polled = Instant::now();
+        let snap = poll_order(state, auth, order_id, &mut seen).await?;
         let status = order_status(&snap);
         if is_terminal(status) {
             return Ok((snap, true));
@@ -1065,7 +1082,7 @@ async fn poll_one_shot(
                 json!({"order_id": order_id, "fulfillment_status": status}),
             );
         }
-        tokio::time::sleep(poll).await;
+        pace(polled, poll).await;
     }
 }
 
@@ -2816,27 +2833,13 @@ fn net_key_budget_from_delivery(
     }
 }
 
-/// Poll an order silently until it reaches a terminal status. Used by the
-/// buffered path and by every `run_python` tool execution (which never
-/// streams — the caller only sees the outer OpenRouter turns' text). The
-/// streaming path's own per-turn loop duplicates the polling shape rather
-/// than calling this, since it also has to diff `partial_content` and
-/// yield SSE events along the way.
 /// An order snapshot with a file-delivered result inlined: once the order
 /// is `delivered`, Rails may hand back a `delivered_content_url` (an Active
 /// Storage link) instead of the content itself. Every /v1 parser reads
 /// inline `delivered_content`, so fetch the file and put it there — before,
 /// these replies failed as "order has no delivered_content". Pending,
 /// failed and already-inline snapshots pass through untouched.
-async fn get_order_resolved(
-    state: &McpState,
-    auth: &OwnedAuth,
-    order_id: &str,
-) -> Result<Value, OverpayError> {
-    let mut snap = state
-        .overpay
-        .get_order_value(order_id, auth.as_auth())
-        .await?;
+async fn inline_delivered_file(state: &McpState, mut snap: Value) -> Result<Value, OverpayError> {
     let data = if snap.get("data").is_some() {
         &mut snap["data"]
     } else {
@@ -2886,6 +2889,39 @@ async fn get_order_resolved(
     Ok(snap)
 }
 
+/// One poll of an order in flight: conditional on the `partial_seq` already
+/// seen (`seen`, updated here), so the marketplace only sends the streaming
+/// buffer when it has grown — a long reply polled every few hundred ms
+/// would otherwise be re-downloaded in full each time.
+async fn poll_order(
+    state: &McpState,
+    auth: &OwnedAuth,
+    order_id: &str,
+    seen: &mut Option<u64>,
+) -> Result<Value, OverpayError> {
+    let snap = state
+        .overpay
+        .get_order_value_since(order_id, *seen, auth.as_auth())
+        .await?;
+    if let (_, Some(seq)) = partial_output(&snap) {
+        *seen = Some(seq);
+    }
+    inline_delivered_file(state, snap).await
+}
+
+/// Waits out the rest of a poll interval that began at `started`: the
+/// cadence is start-to-start, so a slow request doesn't add its own time on
+/// top of the interval (it used to: 1 s sleep + ~0.6 s request per poll).
+async fn pace(started: Instant, poll: Duration) {
+    tokio::time::sleep(poll.saturating_sub(started.elapsed())).await;
+}
+
+/// Poll an order silently until it reaches a terminal status. Used by the
+/// buffered path and by every `run_python` tool execution (which never
+/// streams — the caller only sees the outer OpenRouter turns' text). The
+/// streaming path's own per-turn loop duplicates the polling shape rather
+/// than calling this, since it also has to diff `partial_content` and
+/// yield SSE events along the way.
 async fn wait_for_order_terminal(
     state: &McpState,
     auth: &OwnedAuth,
@@ -2894,8 +2930,10 @@ async fn wait_for_order_terminal(
     poll: Duration,
 ) -> Result<Value, OpenAiError> {
     let start = Instant::now();
+    let mut seen = None;
     loop {
-        let snap = get_order_resolved(state, auth, order_id).await?;
+        let polled = Instant::now();
+        let snap = poll_order(state, auth, order_id, &mut seen).await?;
         if is_terminal(order_status(&snap)) {
             return Ok(snap);
         }
@@ -2905,7 +2943,7 @@ async fn wait_for_order_terminal(
                 timeout.as_secs()
             )));
         }
-        tokio::time::sleep(poll).await;
+        pace(polled, poll).await;
     }
 }
 
@@ -3810,9 +3848,11 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             yield Ok(chunk_event(&order_id, &requested_model, json!({"role": "assistant"}), None));
 
             let mut streamed = 0usize;
+            let mut seen = None;
             let start = Instant::now();
             let snap = loop {
-                let snap = match get_order_resolved(&ctx.mcp, &auth, &order_id).await {
+                let polled = Instant::now();
+                let snap = match poll_order(&ctx.mcp, &auth, &order_id, &mut seen).await {
                     Ok(s) => s,
                     Err(e) => {
                         for ev in error_events(&order_id, &requested_model, OpenAiError::from(e)) { yield Ok(ev); }
@@ -3834,7 +3874,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
                     return;
                 }
-                tokio::time::sleep(ctx.poll).await;
+                pace(polled, ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             let mut usage = TurnUsage::default();
@@ -3915,9 +3955,11 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             }
 
             let mut streamed = 0usize;
+            let mut seen = None;
             let start = Instant::now();
             let snap = loop {
-                let snap = match get_order_resolved(&ctx.mcp, &auth, &order_id).await {
+                let polled = Instant::now();
+                let snap = match poll_order(&ctx.mcp, &auth, &order_id, &mut seen).await {
                     Ok(s) => s,
                     Err(e) => {
                         for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
@@ -3941,7 +3983,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
                     return;
                 }
-                tokio::time::sleep(ctx.poll).await;
+                pace(polled, ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             usage.add_order(&snap, redeemed_cents);
@@ -4034,9 +4076,11 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     };
                     let started = Instant::now();
                     let mut lt_streamed = 0usize;
+                    let mut seen = None;
                     let mut lt_emitted = false;
                     let result_text = loop {
-                        let snap = match get_order_resolved(&ctx.mcp, &auth, &order_id).await {
+                        let polled = Instant::now();
+                        let snap = match poll_order(&ctx.mcp, &auth, &order_id, &mut seen).await {
                             Ok(s) => s,
                             Err(e) => break json!({"error": OpenAiError::from(e).message()}).to_string(),
                         };
@@ -4067,7 +4111,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                                 "order_id": order_id,
                             }).to_string();
                         }
-                        tokio::time::sleep(ctx.poll).await;
+                        pace(polled, ctx.poll).await;
                     };
                     if lt_emitted {
                         yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n\n"}), None));
@@ -4086,11 +4130,13 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 };
 
                 let mut py_streamed = 0usize;
+                let mut seen = None;
                 let mut fence_open = false;
                 let py_start = Instant::now();
                 let python_snap;
                 loop {
-                    let snap = match get_order_resolved(&ctx.mcp, &auth, &python_order_id).await {
+                    let polled = Instant::now();
+                    let snap = match poll_order(&ctx.mcp, &auth, &python_order_id, &mut seen).await {
                         Ok(s) => s,
                         Err(e) => {
                             let result_text = json!({"error": OpenAiError::from(e).message()}).to_string();
@@ -4122,7 +4168,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                         messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
                         continue 'tool_calls;
                     }
-                    tokio::time::sleep(ctx.poll).await;
+                    pace(polled, ctx.poll).await;
                 }
                 if fence_open {
                     yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n```\n"}), None));
@@ -4160,9 +4206,11 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             yield Ok(chunk_event(&response_id, &last_model, json!({"role": "assistant"}), None));
         }
         let mut streamed = 0usize;
+        let mut seen = None;
         let start = Instant::now();
         let snap = loop {
-            let snap = match get_order_resolved(&ctx.mcp, &auth, &order_id).await {
+            let polled = Instant::now();
+            let snap = match poll_order(&ctx.mcp, &auth, &order_id, &mut seen).await {
                 Ok(s) => s,
                 Err(e) => {
                     for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
@@ -4184,7 +4232,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
                 return;
             }
-            tokio::time::sleep(ctx.poll).await;
+            pace(polled, ctx.poll).await;
         };
         net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
         usage.add_order(&snap, redeemed_cents);
@@ -5396,7 +5444,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let state = seeded_state(&overpay.uri(), &tmp);
         let (_npub, auth) = state.resolve_owned_auth().unwrap();
-        let snap = get_order_resolved(&state, &auth, "G1")
+        let snap = poll_order(&state, &auth, "G1", &mut None)
             .await
             .unwrap_or_else(|e| panic!("an image is a delivery, not an error: {e}"));
         let out = extract_listing_delivered("G1", &snap);
@@ -5425,7 +5473,7 @@ mod tests {
             )
             .mount(&overpay)
             .await;
-        let snap = get_order_resolved(&state, &auth, "G2").await.unwrap();
+        let snap = poll_order(&state, &auth, "G2", &mut None).await.unwrap();
         let out = extract_listing_delivered("G2", &snap);
         assert_eq!(out["delivered_content_type"], "application/octet-stream");
         assert_eq!(out["delivered_content_bytes"], 3);
