@@ -104,6 +104,8 @@ on real E2B + staging Overpay when `E2B_API_KEY` is set.
 | `BROWSER_DIST` | unset | variant A's build, served at `/browser/` (build it with `NORM_WEB_BASE=/browser/`); unset = no `/browser/`, and the landing page hides that card |
 | `PAUSE_GRACE_MS` | `60000` | after the last connection closes, pause the sandbox this much later unless the visitor is back |
 | `MAX_SANDBOXES` | `20` | refuse to create a sandbox while this many are running |
+| `RETENTION_DAYS` | `7` | e2b: delete this app's paused sandboxes created more than this many days ago (`0` keeps them) |
+| `SWEEP_INTERVAL_MS` | `3600000` | how often the retention sweeper runs (also once at start) |
 | `CREATES_PER_IP_PER_HOUR` | `5` | sandbox creations per client IP (token bucket; resuming your own is free) |
 | `HELLO_TIMEOUT_MS` | `10000` | a socket that sends no `hello` in time is closed |
 | `NORM_OWALLET_ENV` | `staging` | passed to norm (`prod`/`dev`/`staging`) |
@@ -215,5 +217,7 @@ pause/connect, `pty.connect` after a resume.
 - **Static files** are resolved inside their root only (no `..`, no NUL).
 - Behind a proxy set `TRUST_PROXY` to its hop count, or the per-IP limit sees
   only the proxy's address (and the cookie misses `Secure`).
-- Not yet: a sweeper that kills paused sandboxes after N days (E2B keeps
-  paused sandboxes until killed).
+- **Retention**: E2B keeps paused sandboxes until they are killed, so the
+  server sweeps this app's paused ones older than `RETENTION_DAYS` (counted
+  from creation) every `SWEEP_INTERVAL_MS`. A visitor back after that starts
+  fresh.

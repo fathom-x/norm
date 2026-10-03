@@ -49,6 +49,7 @@ class FakePty {
 }
 
 class FakeSandbox implements E2BSandbox {
+  startedAt = new Date()
   files_ = new Map<string, string>()
   paused = false
   timeouts: number[] = []
@@ -103,7 +104,12 @@ class FakeSdk implements E2BSdk {
     const states = query.state ?? ["running", "paused"]
     const items: E2BSandboxInfo[] = [...this.sandboxes.values()]
       .filter((s) => Object.entries(query.metadata ?? {}).every(([k, v]) => s.metadata[k] === v))
-      .map((s) => ({ sandboxId: s.sandboxId, metadata: s.metadata, state: s.paused ? ("paused" as const) : ("running" as const) }))
+      .map((s) => ({
+        sandboxId: s.sandboxId,
+        metadata: s.metadata,
+        startedAt: s.startedAt,
+        state: s.paused ? ("paused" as const) : ("running" as const),
+      }))
       .filter((info) => states.includes(info.state))
     let hasNext = true
     return {
@@ -361,6 +367,25 @@ describe("e2b provider", () => {
     // Next visit creates afresh.
     await provider.findOrCreate(SID, { cols: 80, rows: 24, admit: noAdmit })
     expect(sdk.createCalls.filter((c) => c.opts.metadata?.sid === SID)).toHaveLength(2)
+  })
+
+  test("the sweeper deletes only this app's paused sandboxes past retention", async () => {
+    const { sdk, provider } = setup()
+    const DAY = 86_400_000
+    await provider.findOrCreate(SID, { cols: 80, rows: 24, admit: noAdmit }) // old, paused → swept
+    await provider.findOrCreate("D".repeat(22), { cols: 80, rows: 24, admit: noAdmit }) // recent, paused → kept
+    await provider.findOrCreate("E".repeat(22), { cols: 80, rows: 24, admit: noAdmit }) // old, running → kept
+    await sdk.create("other", { metadata: { app: "something-else" } }) // not ours → kept
+    sdk.sandboxes.get("sbx-1")!.startedAt = new Date(Date.now() - 8 * DAY)
+    sdk.sandboxes.get("sbx-3")!.startedAt = new Date(Date.now() - 8 * DAY)
+    sdk.sandboxes.get("sbx-4")!.startedAt = new Date(Date.now() - 8 * DAY)
+    sdk.sandboxes.get("sbx-4")!.paused = true
+    await provider.pause(SID)
+    await provider.pause("D".repeat(22))
+
+    expect(await provider.sweep(7 * DAY)).toBe(1)
+    expect(sdk.killed).toEqual(["sbx-1"])
+    expect(sdk.listCalls.at(-1)?.query).toEqual({ metadata: { app: APP }, state: ["paused"] })
   })
 
   test("pause without a cached instance pauses by id", async () => {

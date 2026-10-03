@@ -61,6 +61,12 @@ export interface SandboxProvider {
   status(sid: string): Promise<SandboxState>
   /** Sandboxes currently running (what `MAX_SANDBOXES` caps). */
   count(): Promise<number>
+  /**
+   * Delete this app's paused sandboxes created more than `maxAgeMs` ago (the
+   * retention sweeper); returns how many went. Optional: the local provider
+   * keeps nothing worth sweeping beyond the process's life.
+   */
+  sweep?(maxAgeMs: number): Promise<number>
   /** Stop everything this process started (server shutdown). */
   close?(): Promise<void>
 }

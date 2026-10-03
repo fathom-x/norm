@@ -54,6 +54,9 @@ export interface Config {
   webDist: string
   browserDist: string | undefined
   pauseGraceMs: number
+  /** Paused sandboxes older than this are deleted; 0 keeps them (E2B's own limits apply). */
+  retentionMs: number
+  sweepIntervalMs: number
   maxSandboxes: number
   createsPerIpPerHour: number
   helloTimeoutMs: number
@@ -166,6 +169,8 @@ export function loadConfig(env: Env = process.env): Config {
     browserDist: env.BROWSER_DIST?.trim() ? path.resolve(env.BROWSER_DIST.trim()) : undefined,
     pauseGraceMs: int(env, "PAUSE_GRACE_MS", 60_000),
     maxSandboxes: int(env, "MAX_SANDBOXES", 20, 1),
+    retentionMs: int(env, "RETENTION_DAYS", 7, 0) * 86_400_000,
+    sweepIntervalMs: int(env, "SWEEP_INTERVAL_MS", 3_600_000, 60_000),
     createsPerIpPerHour: int(env, "CREATES_PER_IP_PER_HOUR", 5, 1),
     helloTimeoutMs: int(env, "HELLO_TIMEOUT_MS", 10_000, 100),
     normOwalletEnv: env.NORM_OWALLET_ENV?.trim() || "staging",

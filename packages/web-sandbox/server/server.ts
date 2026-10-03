@@ -71,6 +71,15 @@ export function createServer(config: Config, options: CreateServerOptions = {}):
     log,
   })
 
+  // Retention: paused sandboxes are deleted once they are RETENTION_DAYS old.
+  const sweep = async () => {
+    if (!provider.sweep || config.retentionMs <= 0) return
+    const killed = await provider.sweep(config.retentionMs).catch((error) => (log(`sweep failed: ${error}`), 0))
+    if (killed) log(`retention: deleted ${killed} paused sandbox(es)`)
+  }
+  const sweeper = provider.sweep && config.retentionMs > 0 ? setInterval(sweep, config.sweepIntervalMs) : undefined
+  void sweep()
+
   const secure = (request: Request) => config.cookieSecure || isHttps(request, context)
 
   /** The visitor's sid, and the Set-Cookie header when it is new. */
@@ -194,6 +203,7 @@ export function createServer(config: Config, options: CreateServerOptions = {}):
     hub,
     url: new URL(`http://${config.host.includes(":") ? `[${config.host}]` : config.host}:${server.port}/`),
     async stop() {
+      if (sweeper) clearInterval(sweeper)
       hub.close()
       // Bun 1.3's stop() promise never settles once a WebSocket has been
       // served (the server does stop): don't wait on it for long.

@@ -52,7 +52,8 @@ export interface E2BSandbox {
   pause(): Promise<boolean>
 }
 
-export type E2BSandboxInfo = Pick<SandboxInfo, "sandboxId" | "state" | "metadata">
+export type E2BSandboxInfo = Pick<SandboxInfo, "sandboxId" | "state" | "metadata"> &
+  Partial<Pick<SandboxInfo, "startedAt">>
 
 /** The slice of the e2b `Sandbox` class (static API) this provider uses. */
 export interface E2BSdk {
@@ -291,6 +292,22 @@ export class E2BProvider implements SandboxProvider {
   async status(sid: string): Promise<SandboxState> {
     const [info] = await this.find(sid)
     return info ? info.state : "none"
+  }
+
+  async sweep(maxAgeMs: number) {
+    const sdk = await this.sdk()
+    const paginator = sdk.list({ ...this.api, query: { metadata: { app: APP }, state: ["paused"] }, limit: 100 })
+    const cutoff = Date.now() - maxAgeMs
+    let killed = 0
+    while (paginator.hasNext)
+      for (const info of await paginator.nextItems()) {
+        const started = info.startedAt ? new Date(info.startedAt).getTime() : NaN
+        if (!(started < cutoff)) continue
+        await sdk.kill(info.sandboxId, this.api).catch(() => false)
+        killed++
+        this.log(`swept ${info.sandboxId} (paused, started ${new Date(started).toISOString()})`)
+      }
+    return killed
   }
 
   async count() {
