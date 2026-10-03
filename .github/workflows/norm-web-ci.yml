@@ -12,6 +12,7 @@ on:
     paths:
       - "packages/opentui-wasm/**"
       - "packages/web-tui/**"
+      - "packages/web-sandbox/**"
       - "packages/tui/**"
       - "packages/core/**"
       - "packages/opencode/**"
@@ -21,6 +22,7 @@ on:
     paths:
       - "packages/opentui-wasm/**"
       - "packages/web-tui/**"
+      - "packages/web-sandbox/**"
       - "packages/tui/**"
       - "packages/core/**"
       - "packages/opencode/**"
@@ -159,6 +161,58 @@ jobs:
         with:
           name: web-tui-screenshots
           path: packages/web-tui/test/screenshots
+          if-no-files-found: ignore
+
+  web-sandbox:
+    name: norm in a cloud sandbox (broker, page, real norm via the local provider)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: packages/web-sandbox
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      # The real-norm test runs native owallet (built with `dev-envs` for
+      # --staging, pointed at the mock Overpay).
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: owallet
+      - name: owallet (dev-envs)
+        working-directory: owallet
+        run: cargo build -p owallet --features dev-envs --locked
+
+      - name: Playwright + Chromium
+        run: |
+          npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/pw" playwright@1.56.1
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+          echo "PLAYWRIGHT=$RUNNER_TEMP/pw/node_modules/playwright/index.js" >> "$GITHUB_ENV"
+          echo "CHROME=$(node -e "console.log(require('$RUNNER_TEMP/pw/node_modules/playwright').chromium.executablePath())")" >> "$GITHUB_ENV"
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun run test
+
+      - name: Build the pages
+        run: bun run build
+
+      - name: Broker + page with a scripted program (local provider)
+        run: node test/browser/local.mjs
+
+      - name: The real norm through the broker (local provider, mock Overpay)
+        run: node test/browser/norm.mjs
+
+      - name: Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-sandbox-screenshots
+          path: packages/web-sandbox/test/screenshots
           if-no-files-found: ignore
 
   # The same end-to-end test against the real staging Overpay, nightly and on

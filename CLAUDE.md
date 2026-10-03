@@ -156,6 +156,27 @@ the full map; the rules for core and TUI code:
   `packages/web-tui/src/mgmt-gate.ts` (norm's host sends it via
   `NormHost.mgmtHeaders()`), and `/mcp` needs a provider key.
 
+## norm in a cloud sandbox (E2B)
+
+The other demo: the **native** CLI in a per-visitor E2B sandbox, its
+terminal streamed to an xterm.js page. `packages/web-sandbox` is the broker
+(Bun; holds `E2B_API_KEY`; signed `sid` cookie; WebSocket `/api/tty`, binary
+frames = terminal bytes) and the pages (landing, `/sandbox/`; `/browser/` is
+the browser build, so one service demos both). Providers: `e2b` (sandbox per
+visitor from the `norm-demo` template, auto-pauses when idle, resumed on the
+next visit, egress limited to `OVERPAY_HOSTS`, swept after `RETENTION_DAYS`)
+and `local` (a PTY on this machine — tests, development; not isolation).
+`template/` builds the image (native `norm` + `owallet` under
+`NORM_HOME=/home/user/.norm`, the `norm-demo` restart-loop wrapper). The
+broker sets `OWALLET_PASSWORD` per sandbox, so norm's first run goes straight
+to "connect to Overpay": `Norm.connectOverpay` offers a new account with no
+login (`owallet register`, NIP-98) and then the demo credits (`owallet
+demo-credits`) — the same choice real CLI users get. Run from
+`packages/web-sandbox`: `bun run test` (unit), `bun run test:browser`,
+`bun run test:norm` (the real norm through the local provider + mock
+Overpay). Deploy: `Dockerfile`, `.github/workflows/norm-demo-image.yml`,
+`render.yaml` — its README has the details.
+
 ## Rebrand
 
 The fork installs as **`norm`**, side-by-side-safe with a stock
@@ -220,6 +241,9 @@ Run the relevant test suite after every sync.
   (push to main + PRs).
 - `.github/workflows/owallet-ci.yml` — fmt/clippy/test + Docker build
   for `owallet/**`.
+- `.github/workflows/norm-web-ci.yml` — norm in the browser (opentui wasm,
+  web-tui suites) and in a cloud sandbox (web-sandbox suites);
+  `norm-web-pages.yml` / `norm-demo-image.yml` — manual deploys.
 - `.github/workflows/norm-release.yml` / `owallet-release.yml` — see
   Installing above; bare `v*` tags are the fork's, `owallet-v*` are
   owallet's.

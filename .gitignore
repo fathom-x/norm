@@ -32,3 +32,6 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+
+# packages/web-sandbox/scripts/stage-demo.sh output
+/.demo/

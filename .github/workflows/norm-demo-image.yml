@@ -1,0 +1,70 @@
+# Build and push the norm demo service image (packages/web-sandbox/Dockerfile)
+# to ghcr.io/<owner>/norm-demo, on demand. It bundles the browser build, so
+# this also builds the opentui wasm core and owallet-web.
+#
+# Deploy: render.yaml (image-backed web service). The sandboxes themselves
+# run the E2B template from packages/web-sandbox/template (built separately:
+# `bun run template:build`).
+name: norm-demo-image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Cache the opentui checkout, Zig and its packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/opentui-wasm/.work
+            ~/.cache/zig
+          key: opentui-wasm-${{ hashFiles('packages/opentui-wasm/UPSTREAM', 'packages/opentui-wasm/patches/**') }}
+
+      - name: opentui wasm core
+        run: bash packages/opentui-wasm/scripts/build.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: owallet/crates/owallet-web
+
+      - name: owallet-web
+        working-directory: packages/web-tui
+        run: |
+          command -v clang && command -v llvm-ar || { sudo apt-get update && sudo apt-get install -y clang llvm; }
+          v=$(grep -A1 '^name = "wasm-bindgen"$' ../../owallet/crates/owallet-web/Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          cargo install wasm-bindgen-cli --version "$v" --locked
+          bun run build:owallet
+
+      - name: Stage the pages
+        run: packages/web-sandbox/scripts/stage-demo.sh
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/web-sandbox/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/norm-demo:latest
+            ghcr.io/${{ github.repository_owner }}/norm-demo:${{ github.sha }}
+          cache-from: type=gha,scope=norm-demo
+          cache-to: type=gha,mode=max,scope=norm-demo

@@ -44,6 +44,8 @@ Run from `packages/web-sandbox`.
 | Build once, then run with restart-on-change | `bun run dev` (for page changes also run `bunx vite build --watch` in another terminal) |
 | Unit tests | `bun run test` |
 | Browser test (build, then headless Chromium) | `bun run test:browser` |
+| The real norm through the broker (local provider, mock Overpay) | `bun run test:norm` |
+| Build the E2B template | `bun run template:build` (see `template/README.md`) |
 | Typecheck | `bun run typecheck` |
 
 ### Run it locally (local provider)
@@ -82,12 +84,44 @@ counter keeps counting) → a second tab takes over and the first shows
 console error fails it. Env: `CHROME`, `PLAYWRIGHT`, `PORT`, `DIST` (as in
 `packages/web-tui`). Screenshots: `test/screenshots/local-*.png`.
 
-**TODO — a real-norm scenario:** a second browser scenario that runs the
-native `norm` (and `owallet` against the mock Overpay,
-`owallet/crates/owallet-web/tests/mock-overpay/server.mjs`) through the local
-provider: first run → "new account" → demo credits → a prompt → the mock
-seller's reply → reload resumes → start over. Then `test/e2b-live.mjs`, the same
-on real E2B + staging Overpay when `E2B_API_KEY` is set.
+### The real-norm test
+
+`test/browser/norm.mjs` (`bun run test:norm`) is the E2B flow minus E2B: the
+local provider runs the template's own wrapper (`template/norm-demo.sh`) with
+norm from source and native owallet (`cargo build -p owallet --features
+dev-envs` in `owallet/`; `OWALLET_BIN` overrides) against the mock Overpay
+(`owallet/crates/owallet-web/tests/mock-overpay/server.mjs`), where a new
+account starts at $0 with demo credits on offer. It checks: norm's first run
+asks how to connect (no password prompt) → new account, no login → demo
+credits → the TUI → a prompt answered by the mock seller through owallet,
+with its real charge in the sidebar → a reload resumes the same norm process.
+Screenshots: `test/screenshots/norm-*.png`.
+
+Not yet: the same flow on real E2B against staging Overpay — it needs
+`E2B_API_KEY` and a built template.
+
+## Deploy (one demo service)
+
+The image serves the landing page, `/sandbox/` and `/browser/` (variant A,
+built with `NORM_WEB_BASE=/browser/`) from one origin:
+
+```bash
+packages/web-sandbox/scripts/stage-demo.sh       # pages → .demo/ (needs the browser build's inputs)
+docker build -f packages/web-sandbox/Dockerfile -t norm-demo .
+docker run -p 8080:8080 -e E2B_API_KEY=… -e SESSION_SECRET=$(openssl rand -base64 48) norm-demo
+```
+
+`.github/workflows/norm-demo-image.yml` (manual) does all of that and pushes
+`ghcr.io/<owner>/norm-demo`; `render.yaml` (repo root) deploys it as a Render
+web service (needs a GHCR registry credential in Render, and `E2B_API_KEY`).
+The sandboxes run the E2B template (`bun run template:build`, separately).
+
+What the Overpay behind it must allow (staging by default): `API_CORS_ORIGINS`
+gets the demo origin (variant A calls Overpay from the page);
+`OAUTH_ALLOWED_REDIRECT_URIS` gets `https://<demo>/browser/oauth/callback.html`
+(variant A's "use my existing account"); `DEMO_CREDITS_CENTS` set so new
+visitors can try it without paying. Sandboxes reach Overpay server-to-server,
+so they need no CORS — only `OVERPAY_HOSTS` (their egress allowlist).
 
 ## Environment
 

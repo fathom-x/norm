@@ -1,0 +1,33 @@
+# The norm demo service (packages/web-sandbox): landing page, /sandbox/
+# (norm in an E2B sandbox) and /browser/ (norm compiled for the browser).
+# The image comes from .github/workflows/norm-demo-image.yml (manual run);
+# a private GHCR package needs a registry credential in Render
+# (Settings → Registry credentials) named below.
+services:
+  - type: web
+    name: norm-demo
+    runtime: image
+    image:
+      url: ghcr.io/fathom-x/norm-demo:latest
+      creds:
+        fromRegistryCreds:
+          name: ghcr-fathom-x
+    plan: starter
+    healthCheckPath: /healthz
+    envVars:
+      - key: E2B_API_KEY
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      # Render's proxy is one hop in front of the service.
+      - key: TRUST_PROXY
+        value: "1"
+      # The only hosts a sandbox may reach (the Overpay it pays through).
+      - key: OVERPAY_HOSTS
+        value: overpay-eykm.onrender.com
+      - key: E2B_TEMPLATE
+        value: norm-demo
+      - key: MAX_SANDBOXES
+        value: "20"
+      - key: RETENTION_DAYS
+        value: "7"
