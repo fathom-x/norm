@@ -144,9 +144,16 @@ recipes; the short version:
   fingerprint, `/v1/status`, models); `--bootstrap` starts serve/mints first.
 - `norm budget [sessionID] [--set <usd|off>] [--request-max <usd|off>]` —
   the TUI's `/budget` and sidebar spend figures (`src/cli/cmd/budget.ts`).
+- `scripts/fake-owallet` (`packages/opencode/script/fake-owallet.ts`): a
+  fake owallet on the sandbox's port. It has a scripted model and owallet's
+  spend rules (`charged_cents`, budget-header refusals, daily budget), plus a
+  request log. This is the default for testing norm-side changes: no wallet,
+  no Overpay link, and no real money, which staging does spend. End-to-end
+  test: `test/norm/fake-owallet.test.ts`.
 - TUI-only checks: tmux on a private socket + `capture-pane -p`.
-- Linking a wallet to Overpay (browser OAuth) is the one step that needs a
-  human: ask once for a linked agent sandbox and reuse its `NORM_HOME`.
+- Only real-owallet/Overpay testing needs a human, who links a wallet to
+  Overpay through a browser login. Ask once for a linked agent sandbox and
+  reuse its `NORM_HOME`.
 
 ## Rebrand
 

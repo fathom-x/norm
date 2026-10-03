@@ -4,4 +4,8 @@
 # `budget` and `run` would all see the wrong project). For agents testing
 # their changes; see .claude/skills/norm-test/SKILL.md.
 root=$(cd "$(dirname "$0")/.." && pwd)
-exec bun --conditions=browser "$root/packages/opencode/src/index.ts" "$@"
+# bun reads bunfig.toml — whose preload sets up the TUI's Solid JSX — from the
+# cwd, so pass the preload explicitly, resolved inside this checkout.
+# --no-install: never let bun fetch a missing package from the network.
+preload=$(cd "$root/packages/opencode" && bun -e 'console.log(Bun.resolveSync("@opentui/solid/preload", process.cwd()))') || exit 1
+exec bun --no-install --preload "$preload" --conditions=browser "$root/packages/opencode/src/index.ts" "$@"
