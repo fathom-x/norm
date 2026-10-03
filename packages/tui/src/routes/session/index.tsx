@@ -2030,12 +2030,7 @@ export function InlineToolRow(props: {
       onMouseUp={props.onMouseUp}
       ref={(el: BoxRenderable) => {
         if (props.separate) alwaysSeparate.add(el)
-        setPreLayoutSiblingMargin(el, (previous) => {
-          return props.separate ||
-            (previous instanceof BoxRenderable && (previous.height > 1 || alwaysSeparate.has(previous)))
-            ? 1
-            : 0
-        })
+        separateInlineRow(el, () => props.separate)
       }}
     >
       <Switch>
@@ -2081,6 +2076,16 @@ export function InlineToolRow(props: {
       </Show>
     </box>
   )
+}
+
+// A blank line above an inline row only when what precedes it is a block: a
+// multi-line box, or one that always separates (a user message, shell output).
+function separateInlineRow(el: BoxRenderable, separate?: () => boolean | undefined) {
+  setPreLayoutSiblingMargin(el, (previous) => {
+    return separate?.() || (previous instanceof BoxRenderable && (previous.height > 1 || alwaysSeparate.has(previous)))
+      ? 1
+      : 0
+  })
 }
 
 function BlockTool(props: {
@@ -2166,12 +2171,15 @@ function Shell(props: ToolProps) {
 
   return (
     <Switch>
-      <Match when={stringValue(props.metadata.output) !== undefined && !isRunning() && !ctx.editsExpanded()}>
+      {/* norm: one line from the moment the command starts — showing the
+          output while it streams and collapsing it at the end flickers. */}
+      <Match when={shellCollapsed(props.part, ctx.editsExpanded())}>
         <CollapsedEdit
           part={props.part}
           icon="$"
+          spinner={isRunning()}
           label={stringValue(props.input.command) ?? ""}
-          counts={output() ? `${output().split("\n").length} lines` : undefined}
+          counts={!isRunning() && output() ? `${output().split("\n").length} lines` : undefined}
         />
       </Match>
       <Match when={stringValue(props.metadata.output) !== undefined}>
@@ -2511,12 +2519,12 @@ function Execute(props: ToolProps) {
  * the collapsed conditions in Edit, Write, ApplyPatch and Shell. */
 function collapsedKind(part: Part, expanded: boolean): "collapsed" | "visible" | "skip" {
   if (part.type === "tool") {
+    if (shellCollapsed(part, expanded)) return "collapsed"
     if (expanded || part.state.status !== "completed") return "visible"
     const metadata = (part.state.metadata ?? {}) as Record<string, unknown>
     if (part.tool === "edit" && typeof metadata.diff === "string") return "collapsed"
     if (part.tool === "write" && metadata.diagnostics !== undefined) return "collapsed"
     if (part.tool === "apply_patch" && parseApplyPatchFiles(metadata.files).length > 0) return "collapsed"
-    if (part.tool === "bash" && typeof metadata.output === "string") return "collapsed"
     return "visible"
   }
   if ((part.type === "text" || part.type === "reasoning") && part.text.trim()) return "visible"
@@ -2524,11 +2532,19 @@ function collapsedKind(part: Part, expanded: boolean): "collapsed" | "visible" |
   return "skip"
 }
 
+/** A shell command shows as one line while it runs and after it finishes. */
+function shellCollapsed(part: ToolPart, expanded: boolean) {
+  if (expanded || part.tool !== "bash") return false
+  if (part.state.status === "running") return typeof part.state.input.command === "string"
+  return part.state.status === "completed"
+}
+
 function CollapsedEdit(props: {
   part: ToolPart
   label: string
   counts?: string
   icon?: string
+  spinner?: boolean
   diagnostics?: unknown
   filePath?: string
 }) {
@@ -2536,8 +2552,10 @@ function CollapsedEdit(props: {
   const ctx = use()
   const shortcut = useCommandShortcut("session.toggle.edits")
   return (
-    <box>
-      <InlineTool icon={props.icon ?? "←"} pending="" complete={true} part={props.part}>
+    // The margin rule goes on this wrapper: the row inside it has no sibling
+    // above, so on its own it would sit flush against a user message.
+    <box ref={(el: BoxRenderable) => separateInlineRow(el)}>
+      <InlineTool icon={props.icon ?? "←"} pending="" complete={true} spinner={props.spinner} part={props.part}>
         {props.label}
         <Show when={props.counts}>
           <span style={{ fg: theme.textMuted }}> ({props.counts})</span>
