@@ -4,6 +4,16 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Faster streaming in `/v1`
+
+- Orders in flight are polled every 400 ms instead of every second, and the
+  interval now runs start-to-start: it used to be a 1 s sleep *after* each
+  request, so with a ~0.6 s request a streamed reply arrived in bursts
+  every ~1.6 s. `OWALLET_V1_POLL_MS` overrides the interval.
+- Polls are conditional on the last `partial_seq` seen (`?since_seq=`):
+  the marketplace leaves an unchanged streaming buffer out of the
+  response, so a long reply isn't re-downloaded several times a second.
+
 ### Plain completions for housekeeping calls
 
 - **`x-owallet-tools: none`**: a `/v1` request that brings no tools of its
