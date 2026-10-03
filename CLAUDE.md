@@ -128,6 +128,19 @@ syncs stay cheap:
   of edit/write); norm offers it to all of them, with edit/write kept
   beside it except on GPT. Test in `test/tool/registry.test.ts`.
 
+- `src/norm/wake.ts` (`SessionWake`) is how anything outside a turn gets
+  the model's attention: `deliver` persists a (by default hidden) user
+  message and guarantees a turn sees it, `whenIdle` does so after a delay
+  once the session is idle. It exists because a bare `SessionPrompt.prompt`
+  from the background can be dropped: a message that lands while a run is
+  finishing joins that run and is never read. `SessionPrompt` hands it its
+  `prompt`/`loop` at layer build (`wake.attach`) and calls `wake.interrupt`
+  on cancel so a cancelled run is not started again; the abort route
+  (`handlers/session.ts`) also calls `wake.clear`, so Esc drops pending
+  timers while `send_queued` (which cancels too) keeps them. In-memory and
+  per instance: timers die with the process or a config reload. The scheduling and
+  background tools (ScheduleWakeup, Monitor, cron) build on it.
+
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until

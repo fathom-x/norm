@@ -57,6 +57,7 @@ import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
 import { Norm } from "@/norm/norm"
+import { SessionWake } from "@/norm/wake"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -134,6 +135,7 @@ const layer = Layer.effect(
     const scope = yield* Scope.Scope
     const instruction = yield* Instruction.Service
     const state = yield* SessionRunState.Service
+    const wake = yield* SessionWake.Service
     const revert = yield* SessionRevert.Service
     const summary = yield* SessionSummary.Service
     const sys = yield* SystemPrompt.Service
@@ -152,6 +154,7 @@ const layer = Layer.effect(
 
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       yield* Effect.logInfo("cancel", { "session.id": sessionID })
+      yield* wake.interrupt(sessionID)
       yield* state.cancel(sessionID)
     })
 
@@ -1487,6 +1490,8 @@ const layer = Layer.effect(
       return result
     })
 
+    yield* wake.attach({ prompt: (input) => prompt(input).pipe(Effect.catch(Effect.die)), loop })
+
     return Service.of({
       cancel,
       prompt,
@@ -1625,6 +1630,7 @@ export const node = LayerNode.make({
     CrossSpawnSpawner.node,
     Instruction.node,
     SessionRunState.node,
+    SessionWake.node,
     SessionRevert.node,
     SessionSummary.node,
     SystemPrompt.node,
