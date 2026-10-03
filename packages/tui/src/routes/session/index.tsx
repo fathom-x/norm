@@ -1520,11 +1520,29 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
     return props.message.time.completed - user.time.created
   })
 
+  // norm: "Thinking..." while the model works on this reply and nothing of
+  // it shows yet — marketplace models don't stream their reasoning, so the
+  // transcript otherwise sits empty until the first words arrive.
+  const thinking = createMemo(() => {
+    if (props.message.time.completed || props.message.error) return false
+    if ((sync.data.session_status[props.message.sessionID]?.type ?? "idle") === "idle") return false
+    return !props.parts.some(
+      (part) =>
+        part.type === "tool" ||
+        ((part.type === "text" || part.type === "reasoning") && part.text.trim().length > 0),
+    )
+  })
+
   const childShortcut = useCommandShortcut("session.child.first")
   const backgroundShortcut = useCommandShortcut("session.background")
 
   return (
     <>
+      <Show when={thinking()}>
+        <box paddingLeft={3} marginTop={1} flexShrink={0}>
+          <text fg={theme.textMuted}>Thinking...</text>
+        </box>
+      </Show>
       <For each={props.parts}>
         {(part, index) => {
           const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
