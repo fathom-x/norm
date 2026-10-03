@@ -215,6 +215,28 @@ describe("norm's provider key", () => {
     expect(await storedKey()).toBe("owk_already_spend_capable")
     expect(await mintCalls()).toHaveLength(0)
   })
+
+  test("`debug norm` reports the serve and key status without the key itself", async () => {
+    spendKeys.add("owk_already_spend_capable")
+    await writeAuth("owk_already_spend_capable")
+    const report = await Norm.diagnose()
+    expect(report.owallet.serve_reachable).toBe(true)
+    expect(report.owallet.db_exists).toBe(true)
+    expect(report.provider_key).toEqual({ fingerprint: "owk_already_" })
+    expect(report.status).toEqual({ key_can_spend: true })
+    expect(JSON.stringify(report)).not.toContain("owk_already_spend_capable")
+    // Read-only: nothing minted.
+    expect(await mintCalls()).toHaveLength(0)
+  })
+
+  test("`debug norm` with no key and no serve says so", async () => {
+    server.stop(true)
+    const report = await Norm.diagnose()
+    expect(report.owallet.serve_reachable).toBe(false)
+    expect(report.provider_key).toBeNull()
+    expect(report.status).toBeNull()
+    expect(report.models).toBeNull()
+  })
 })
 
 describe("server-side session access", () => {

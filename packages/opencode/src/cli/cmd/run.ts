@@ -22,7 +22,7 @@ import { UI } from "../ui"
 import { effectCmd } from "../effect-cmd"
 import { EOL } from "os"
 import { Filesystem } from "@/util/filesystem"
-import { createOpencodeClient, type OpencodeClient, type ToolPart } from "@opencode-ai/sdk/v2"
+import { createOpencodeClient, type OpencodeClient, type QuestionRequest, type ToolPart } from "@opencode-ai/sdk/v2"
 import { FormatError, FormatUnknownError } from "../error"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
 
@@ -121,6 +121,32 @@ async function toolError(part: ToolPart) {
       title: `${part.tool} failed`,
     })
   }
+}
+
+// norm: the question tool from the command line (`--ask` / `--answer`).
+// Without --ask, sessions `run` creates deny the tool outright.
+const QUESTION_DENY: PermissionV1.Rule = { permission: "question", action: "deny", pattern: "*" }
+/** Exit code for "stopped at a question — answer it with --answer". */
+const QUESTION_WAITING_EXIT = 3
+
+/** One `--answer`: an option label or custom text, or a JSON array of labels (multi-select). */
+function parseAnswer(value: string): string[] {
+  const text = value.trim()
+  if (text.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(text)
+      if (Array.isArray(parsed)) return parsed.map(String)
+    } catch {}
+  }
+  return [value]
+}
+
+function printQuestion(request: QuestionRequest, reply?: string[][]) {
+  request.questions.forEach((q, i) => {
+    UI.println(UI.Style.TEXT_WARNING_BOLD + "?", UI.Style.TEXT_NORMAL + q.question)
+    for (const option of q.options) UI.println(`    - ${option.label}: ${option.description}`)
+    if (reply) UI.println(`    → ${reply[i]?.join(", ") || "(unanswered)"}`)
+  })
 }
 
 export const RunCommand = effectCmd({
@@ -244,6 +270,22 @@ export const RunCommand = effectCmd({
         describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
         default: false,
       })
+      // norm: answer the question tool from the command line, so scripts and
+      // coding agents can drive conversations that ask (see the norm-test skill).
+      .option("ask", {
+        type: "boolean",
+        default: false,
+        describe:
+          "let the agent ask questions: each is printed (a `question` event with --format json) and the run stops with exit code 3 until it is answered with --answer",
+      })
+      .option("answer", {
+        type: "string",
+        array: true,
+        // One value per flag, so `--answer Red "message"` keeps the message.
+        nargs: 1,
+        describe:
+          "answer a question (repeat once per question, in order): an option label, custom text, or a JSON array of labels for multi-select. Answers the session's pending question, else questions asked during this run. Implies --ask",
+      })
       .option("yolo", {
         type: "boolean",
         hidden: true,
@@ -272,6 +314,9 @@ export const RunCommand = effectCmd({
       const rawMessage = [...args.message, ...(args["--"] || [])].join(" ")
       const interactive = args.mini
       const auto = args.auto || args.yolo || args["dangerously-skip-permissions"]
+      // norm: answers queued for the question tool, consumed in order.
+      const answers = [...(args.answer ?? [])]
+      const ask = args.ask || answers.length > 0
       const thinking = interactive ? (args.thinking ?? true) : (args.thinking ?? false)
       const die = (message: string): never => {
         UI.error(message)
@@ -295,6 +340,14 @@ export const RunCommand = effectCmd({
 
       if (interactive && args._?.[0] !== "mini") {
         die("--mini must be used without the run subcommand")
+      }
+
+      if (interactive && ask) {
+        die("--mini asks questions in the terminal; --ask/--answer are for non-interactive runs")
+      }
+
+      if (ask && args.attach && args.command) {
+        die("--ask with --attach can't be combined with --command (commands run synchronously on the server)")
       }
 
       if (args.demo && !interactive) {
@@ -417,7 +470,9 @@ export const RunCommand = effectCmd({
       message = resolveRunInput(message, piped) ?? ""
       const initialInput = resolveRunInput(rawMessage, piped)
 
-      if (message.trim().length === 0 && !args.command && !interactive) {
+      // norm: `-s <id> --answer …` alone answers the session's pending question.
+      const answering = answers.length > 0 && Boolean(args.session || args.continue)
+      if (message.trim().length === 0 && !args.command && !interactive && !answering) {
         UI.error("You must provide a message or a command")
         process.exit(1)
       }
@@ -430,11 +485,7 @@ export const RunCommand = effectCmd({
       const rules: PermissionV1.Ruleset = interactive
         ? []
         : [
-            {
-              permission: "question",
-              action: "deny",
-              pattern: "*",
-            },
+            ...(ask ? [] : [QUESTION_DENY]),
             {
               permission: "plan_enter",
               action: "deny",
@@ -674,6 +725,8 @@ export const RunCommand = effectCmd({
           process.exit(1)
         }
         const sessionID = sess.id
+        // norm: did this run stop at a question it couldn't answer?
+        let waiting = false
 
         function emit(type: string, data: Record<string, unknown>) {
           if (args.format === "json") {
@@ -793,6 +846,47 @@ export const RunCommand = effectCmd({
               break
             }
 
+            // norm: answer from --answer when enough are queued; otherwise
+            // print it and stop. Attached, the question stays pending on the
+            // server for a later `--answer`; locally the server ends with this
+            // process, so it is dismissed and the turn ends.
+            if (event.type === "question.asked") {
+              const request = event.properties
+              if (request.sessionID !== sessionID) continue
+              if (answers.length >= request.questions.length) {
+                const reply = answers.splice(0, request.questions.length).map(parseAnswer)
+                if (!emit("question", { request, answers: reply })) printQuestion(request, reply)
+                await client.question.reply({ requestID: request.id, answers: reply })
+                continue
+              }
+              if (!emit("question", { request })) printQuestion(request)
+              if (!ask) {
+                UI.println(
+                  UI.Style.TEXT_WARNING_BOLD + "!",
+                  UI.Style.TEXT_NORMAL + "question asked without --ask; dismissing",
+                )
+                await client.question.reject({ requestID: request.id })
+                continue
+              }
+              waiting = true
+              if (args.attach) {
+                UI.println(
+                  UI.Style.TEXT_INFO_BOLD + "?",
+                  UI.Style.TEXT_NORMAL +
+                    `waiting for an answer: norm run --attach ${args.attach} -s ${sessionID} --answer <label> (one per question)`,
+                )
+                break
+              }
+              UI.println(
+                UI.Style.TEXT_INFO_BOLD + "?",
+                UI.Style.TEXT_NORMAL +
+                  `dismissed — a question only stays pending on a \`norm serve\` you --attach to. ` +
+                  `Reply as a message: norm run -s ${sessionID} "<answer>"`,
+              )
+              await client.question.reject({ requestID: request.id })
+              continue
+            }
+
             if (event.type === "permission.asked") {
               const permission = event.properties
               if (permission.sessionID !== sessionID) continue
@@ -825,16 +919,60 @@ export const RunCommand = effectCmd({
 
         await share(client, sessionID)
 
+        // norm: a session `run` created without --ask denies the question tool;
+        // asking now re-allows it (rules are last-match-wins).
+        if (ask && (args.session || args.continue)) {
+          const permission = (await client.session.get({ sessionID })).data?.permission ?? []
+          const denied = permission.findLast((rule) => rule.permission === "question")?.action === "deny"
+          if (denied) {
+            await client.session.update({
+              sessionID,
+              permission: [{ permission: "question", action: "allow", pattern: "*" }],
+            })
+          }
+        }
+
         if (!interactive) {
+          // norm: answer the question this session is waiting on, then follow
+          // the rest of the turn (and any further questions).
+          const pending =
+            answering && message.trim().length === 0 && !args.command
+              ? (await client.question.list()).data?.find((item) => item.sessionID === sessionID)
+              : undefined
+          if (answering && message.trim().length === 0 && !args.command && !pending) {
+            UI.error(
+              "No question is pending on this session. Questions stay pending only on a `norm serve` you --attach to; " +
+                "otherwise reply with a message.",
+            )
+            process.exit(1)
+          }
+          if (pending && answers.length < pending.questions.length) {
+            UI.error(`That question needs ${pending.questions.length} answers (one --answer each)`)
+            process.exit(1)
+          }
+
           const events = await client.event.subscribe()
           const completed = loop(client, events).catch((e) => {
             console.error(e)
             process.exitCode = 1
           })
           async function finish() {
-            if (args.attach) return
+            if (args.attach && !ask) return
             const error = await completed
             if (error) process.exitCode = 1
+            if (waiting) {
+              process.exitCode = QUESTION_WAITING_EXIT
+              // Attached, the turn is still running server-side: don't wait on it.
+              if (args.attach) process.exit(QUESTION_WAITING_EXIT)
+            }
+          }
+
+          if (pending) {
+            const reply = answers.splice(0, pending.questions.length).map(parseAnswer)
+            if (!emit("question", { request: pending, answers: reply })) printQuestion(pending, reply)
+            await client.question.reply({ requestID: pending.id, answers: reply })
+            await finish()
+            return
           }
 
           if (args.command) {
@@ -856,13 +994,17 @@ export const RunCommand = effectCmd({
           }
 
           const model = pick(args.model)
-          const result = await client.session.prompt({
+          // norm: attached with --ask, run may exit while the turn waits on a
+          // question; prompt_async keeps the turn alive server-side after we go.
+          const input = {
             sessionID,
             agent,
             model,
             variant: args.variant,
-            parts: [...files, { type: "text", text: message }],
-          })
+            parts: [...files, { type: "text" as const, text: message }],
+          }
+          const result =
+            args.attach && ask ? await client.session.promptAsync(input) : await client.session.prompt(input)
           if (result.error) {
             if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
             process.exitCode = 1
@@ -1003,6 +1145,8 @@ export async function runMini(input: MiniCommandInput) {
     "replay-limit": input.replayLimit,
     replayLimit: input.replayLimit,
     auto: false,
+    ask: false,
+    answer: undefined,
     yolo: false,
     "dangerously-skip-permissions": false,
     dangerouslySkipPermissions: false,

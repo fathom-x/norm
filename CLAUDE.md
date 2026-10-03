@@ -152,6 +152,38 @@ fresh install (or anything else that would otherwise write to
 start, so export it before launching. `rm -rf` the directory to undo.
 
 
+## Testing norm as an agent
+
+Don't hand manual testing back to the user: norm is fully drivable without
+the TUI. The `norm-test` skill (`.claude/skills/norm-test/SKILL.md`) has the
+recipes; the short version:
+
+- `scripts/norm-dev` runs this checkout's source in the current directory
+  (`bun dev` cds into `packages/opencode`, which puts sessions in the wrong
+  project). Always under your own absolute `NORM_HOME`, and never touch
+  norm/owallet processes you didn't start (check `ps`/`ss -ltn` first).
+- `norm run --format json "<msg>"` is one turn as JSONL; `-s <sessionID>`
+  resumes, `--fork` branches. Permission prompts are auto-rejected without
+  `--auto`. The question tool is denied unless `--ask`/`--answer` (norm's
+  addition to upstream's `run.ts`, marked `// norm:`; test in
+  `test/cli/run/run-question.test.ts`): `--answer` scripts answers;
+  `--ask` stops at a question with exit code 3, and on a `norm serve` you
+  `--attach` to it stays pending for `-s <id> --answer <label>`.
+- `norm debug norm` — the norm layer's state as JSON (serve, key
+  fingerprint, `/v1/status`, models); `--bootstrap` starts serve/mints first.
+- `norm budget [sessionID] [--set <usd|off>] [--request-max <usd|off>]` —
+  the TUI's `/budget` and sidebar spend figures (`src/cli/cmd/budget.ts`).
+- `scripts/fake-owallet` (`packages/opencode/script/fake-owallet.ts`): a
+  fake owallet on the sandbox's port. It has a scripted model and owallet's
+  spend rules (`charged_cents`, budget-header refusals, daily budget), plus a
+  request log. This is the default for testing norm-side changes: no wallet,
+  no Overpay link, and no real money, which staging does spend. End-to-end
+  test: `test/norm/fake-owallet.test.ts`.
+- TUI-only checks: tmux on a private socket + `capture-pane -p`.
+- Only real-owallet/Overpay testing needs a human, who links a wallet to
+  Overpay through a browser login. Ask once for a linked agent sandbox and
+  reuse its `NORM_HOME`.
+
 ## Rebrand
 
 The fork installs as **`norm`**, side-by-side-safe with a stock
