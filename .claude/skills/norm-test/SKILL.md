@@ -94,6 +94,10 @@ bootstrap diagnostics on stderr.
 ## 2. Drive conversations step by step — `norm run`
 
 One turn per invocation; it exits when the turn is done. Resume with `-s`.
+If the turn left a scheduled wakeup, monitor or background command pending,
+`run` keeps going until those have had their turns (it prints "Waiting for
+..." / a `waiting` JSON event); pass `--no-wait` to exit at the end of the
+first turn anyway.
 
 ```bash
 $N run --format json -m overpay/default "say hi in 3 words" > turn1.jsonl

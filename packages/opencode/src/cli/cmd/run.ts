@@ -25,6 +25,7 @@ import { Filesystem } from "@/util/filesystem"
 import { createOpencodeClient, type OpencodeClient, type QuestionRequest, type ToolPart } from "@opencode-ai/sdk/v2"
 import { FormatError, FormatUnknownError } from "../error"
 import { INTERACTIVE_INPUT_ERROR, resolveInteractiveStdin } from "./run/runtime.stdin"
+import { NormRunWait } from "@/norm/run-wait"
 
 type ModelInput = Parameters<OpencodeClient["session"]["prompt"]>[0]["model"]
 
@@ -269,6 +270,13 @@ export const RunCommand = effectCmd({
         type: "boolean",
         describe: "auto-approve permissions that are not explicitly denied (dangerous!)",
         default: false,
+      })
+      // norm: see src/norm/run-wait.ts
+      .option("wait", {
+        type: "boolean",
+        describe:
+          "keep running while a scheduled wakeup, monitor or background command is pending (--no-wait exits when the turn ends)",
+        default: true,
       })
       // norm: answer the question tool from the command line, so scripts and
       // coding agents can drive conversations that ask (see the norm-test skill).
@@ -750,6 +758,16 @@ export const RunCommand = effectCmd({
         async function loop(client: OpencodeClient, events: Awaited<ReturnType<typeof sdk.event.subscribe>>) {
           const toggles = new Map<string, boolean>()
           let error: string | undefined
+          const wait = NormRunWait.tracker({
+            check: () => NormRunWait.pending(client, sessionID),
+            onWait: (pending) => {
+              if (emit("waiting", { pending })) return
+              UI.println(
+                UI.Style.TEXT_DIM + `Waiting for ${NormRunWait.describe(pending)} (ctrl+c to exit)`,
+                UI.Style.TEXT_NORMAL,
+              )
+            },
+          })
 
           for await (const event of events.stream) {
             if (
@@ -838,13 +856,19 @@ export const RunCommand = effectCmd({
               UI.error(err)
             }
 
-            if (
-              event.type === "session.status" &&
-              event.properties.sessionID === sessionID &&
-              event.properties.status.type === "idle"
-            ) {
-              break
+            // norm: idle ends the run only when nothing is left that will
+            // start another turn.
+            if (event.type === "session.status" && event.properties.sessionID === sessionID) {
+              if (event.properties.status.type !== "idle") {
+                await wait.next({ type: "busy" })
+                continue
+              }
+              if (!args.wait || (await wait.next({ type: "idle" })) === "done") break
+              continue
             }
+            // The server sends these every 10 s; the SDK's event union omits them.
+            const type: string = event.type
+            if (type === "server.heartbeat" && (await wait.next({ type: "heartbeat" })) === "done") break
 
             // norm: answer from --answer when enough are queued; otherwise
             // print it and stop. Attached, the question stays pending on the
@@ -1145,6 +1169,7 @@ export async function runMini(input: MiniCommandInput) {
     "replay-limit": input.replayLimit,
     replayLimit: input.replayLimit,
     auto: false,
+    wait: true,
     ask: false,
     answer: undefined,
     yolo: false,

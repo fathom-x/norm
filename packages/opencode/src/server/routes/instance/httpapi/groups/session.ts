@@ -91,6 +91,8 @@ export const SessionPaths = {
   abort: `${root}/:sessionID/abort`,
   // norm: interrupt and answer the queued messages now
   sendQueued: `${root}/:sessionID/send_queued`,
+  // norm: what will still start a turn (wakeups, monitors, background commands)
+  pending: `${root}/:sessionID/pending`,
   share: `${root}/:sessionID/share`,
   init: `${root}/:sessionID/init`,
   summarize: `${root}/:sessionID/summarize`,
@@ -275,6 +277,27 @@ export const SessionApi = HttpApi.make("session")
             summary: "Send queued messages now",
             description:
               "norm: interrupt the reply in progress and start a new one that answers the messages queued behind it, returning immediately.",
+          }),
+        ),
+        HttpApiEndpoint.get("pending", SessionPaths.pending, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(
+            Schema.Struct({
+              wakeups: Schema.Array(Schema.Struct({ key: Schema.String, at: Schema.Number })),
+              tasks: Schema.Array(
+                Schema.Struct({ id: Schema.String, type: Schema.String, description: Schema.String }),
+              ),
+            }),
+            "Pending wakeups and background tasks",
+          ),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.pending",
+            summary: "List pending wakeups and background tasks",
+            description:
+              "norm: what will still start a turn in this session: scheduled wakeups, monitors and background commands.",
           }),
         ),
         HttpApiEndpoint.post("init", SessionPaths.init, {

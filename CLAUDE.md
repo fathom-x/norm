@@ -157,8 +157,7 @@ syncs stay cheap:
   nothing). `NORM_DISABLE_WAKE=1` (`SessionWake.disabled()`) leaves the tools and `/loop` out; unset
   they follow `NORM_DISABLE`; `=0` keeps them regardless (the test
   preload sets `NORM_DISABLE=1`, so their tests opt back in this way).
-  `norm run` still exits when the turn ends, so a wakeup only fires in
-  the TUI or under `norm serve`. Tests: `test/norm/schedule-wakeup.test.ts`.
+  Tests: `test/norm/schedule-wakeup.test.ts`.
 
 - **Monitor and TaskStop** (`src/norm/tool/monitor.ts`, `task-stop.ts`,
   engine in `src/norm/background.ts`, `BackgroundTask`): `Monitor` runs a
@@ -198,6 +197,22 @@ syncs stay cheap:
   `timeout`, when given, kills the command with a notice; without it the
   command runs until it exits or is stopped. Tests:
   `test/norm/background-shell.test.ts`.
+
+- **Pending work** (`GET /session/:id/pending`, norm's own route beside
+  `send_queued`: `{wakeups, tasks}`). Two readers. `norm run`
+  (`src/norm/run-wait.ts`, hooked into `cli/cmd/run.ts`'s event loop)
+  no longer exits at the first idle while a wakeup, monitor or
+  background command is pending: it prints "Waiting for ..." (a
+  `waiting` event with `--format json`) and goes on until a turn ends
+  with nothing left; `--no-wait` restores exit-at-idle. Work that ends
+  without a turn is caught on the server's 10 s heartbeats (two quiet
+  ones in a row). A background command with no timeout that never exits
+  therefore keeps `norm run` open: ctrl+c, or `--no-wait`. The TUI's
+  prompt hints row shows "wake 4m · 2 bg" (`tui/src/util/norm-pending.ts`,
+  re-read on status changes and every 15 s); idle with a wakeup
+  scheduled, esc cancels it through the abort route (upstream's esc does
+  nothing in an idle session). Tests: `test/norm/run-wait.test.ts`,
+  `packages/tui/test/util/norm-notification.test.ts`.
 
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
