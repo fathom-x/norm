@@ -161,6 +161,7 @@ const context = createContext<{
   sessionID: string
   conceal: () => boolean
   editsExpanded: () => boolean
+  expandHint: (partID: string) => boolean
   thinkingMode: () => ThinkingMode
   showThinking: () => boolean
   showTimestamps: () => boolean
@@ -262,6 +263,31 @@ export function Session() {
   const [conceal, setConceal] = createSignal(true)
   // norm: edit/write/patch diffs are collapsed to one line by default
   const [editsExpanded, setEditsExpanded] = kv.signal("edit_display_expanded", false)
+  // norm: "ctrl+x d to expand" shows once, under the last of a run of
+  // collapsed tool results — a run can span several steps (each its own
+  // assistant message), and ends at any other visible part or a user message.
+  const expandHints = createMemo(() => {
+    const hints = new Set<string>()
+    let pending: string | undefined
+    const close = () => {
+      if (pending) hints.add(pending)
+      pending = undefined
+    }
+    for (const message of messages()) {
+      if (message.role === "user") {
+        close()
+        continue
+      }
+      for (const part of sync.data.part[message.id] ?? []) {
+        const kind = collapsedKind(part, editsExpanded())
+        if (kind === "skip") continue
+        if (kind === "collapsed") pending = part.id
+        else close()
+      }
+    }
+    close()
+    return hints
+  })
   const thinking = useThinkingMode()
   const thinkingMode = thinking.mode
   const showThinking = createMemo(() => true)
@@ -693,7 +719,7 @@ export function Session() {
       },
     },
     {
-      title: `Toggle edit displays (${editsExpanded() ? "Enabled" : "Disabled"})`,
+      title: `Toggle edit and shell displays (${editsExpanded() ? "Enabled" : "Disabled"})`,
       value: "session.toggle.edits",
       category: "Session",
       run: () => {
@@ -1191,6 +1217,7 @@ export function Session() {
           sessionID: route.sessionID,
           conceal,
           editsExpanded,
+          expandHint: (partID: string) => expandHints().has(partID),
           thinkingMode,
           showThinking,
           showTimestamps,
@@ -2139,6 +2166,14 @@ function Shell(props: ToolProps) {
 
   return (
     <Switch>
+      <Match when={stringValue(props.metadata.output) !== undefined && !isRunning() && !ctx.editsExpanded()}>
+        <CollapsedEdit
+          part={props.part}
+          icon="$"
+          label={stringValue(props.input.command) ?? ""}
+          counts={output() ? `${output().split("\n").length} lines` : undefined}
+        />
+      </Match>
       <Match when={stringValue(props.metadata.output) !== undefined}>
         <BlockTool
           title={title()}
@@ -2471,24 +2506,44 @@ function Execute(props: ToolProps) {
 // norm: an edit/write/patch result as one line — what changed and how much
 // — with the key that shows the diffs (session.toggle.edits). LSP problems
 // stay visible: they're short, and they're what needs attention.
+/** How a part counts for the "to expand" hint: a tool result shown
+ * collapsed, another visible part (ends a run), or nothing on screen. Mirrors
+ * the collapsed conditions in Edit, Write, ApplyPatch and Shell. */
+function collapsedKind(part: Part, expanded: boolean): "collapsed" | "visible" | "skip" {
+  if (part.type === "tool") {
+    if (expanded || part.state.status !== "completed") return "visible"
+    const metadata = (part.state.metadata ?? {}) as Record<string, unknown>
+    if (part.tool === "edit" && typeof metadata.diff === "string") return "collapsed"
+    if (part.tool === "write" && metadata.diagnostics !== undefined) return "collapsed"
+    if (part.tool === "apply_patch" && parseApplyPatchFiles(metadata.files).length > 0) return "collapsed"
+    if (part.tool === "bash" && typeof metadata.output === "string") return "collapsed"
+    return "visible"
+  }
+  if ((part.type === "text" || part.type === "reasoning") && part.text.trim()) return "visible"
+  if (part.type === "file") return "visible"
+  return "skip"
+}
+
 function CollapsedEdit(props: {
   part: ToolPart
   label: string
   counts?: string
+  icon?: string
   diagnostics?: unknown
   filePath?: string
 }) {
   const { theme } = useTheme()
+  const ctx = use()
   const shortcut = useCommandShortcut("session.toggle.edits")
   return (
     <box>
-      <InlineTool icon="←" pending="" complete={true} part={props.part}>
+      <InlineTool icon={props.icon ?? "←"} pending="" complete={true} part={props.part}>
         {props.label}
         <Show when={props.counts}>
           <span style={{ fg: theme.textMuted }}> ({props.counts})</span>
         </Show>
       </InlineTool>
-      <Show when={shortcut()}>
+      <Show when={shortcut() && ctx.expandHint(props.part.id)}>
         <box paddingLeft={3}>
           <text fg={theme.textMuted}>{shortcut()} to expand</text>
         </box>
