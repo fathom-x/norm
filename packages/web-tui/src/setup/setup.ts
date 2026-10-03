@@ -62,7 +62,11 @@ export class OwalletError extends Error {
   }
 }
 
-const POPUP_FEATURES = "popup,width=520,height=720"
+// `noopener`: the Overpay page in the popup gets no handle on this tab (no
+// reverse tabnabbing). The code comes back over a same-origin BroadcastChannel
+// from public/oauth/callback.html instead of window.opener.
+const POPUP_FEATURES = "popup,width=520,height=720,noopener,noreferrer"
+export const OAUTH_CHANNEL = "norm-overpay-oauth"
 
 export async function runSetup(root: HTMLElement, deps: SetupDeps): Promise<SetupResult> {
   const ui = new SetupView(root)
@@ -299,10 +303,13 @@ async function linkExisting(ui: SetupView, api: Client, deps: SetupDeps): Promis
   const listen =
     deps.listen ??
     ((handler) => {
-      window.addEventListener("message", handler)
-      return () => window.removeEventListener("message", handler)
+      const channel = new BroadcastChannel(OAUTH_CHANNEL)
+      channel.addEventListener("message", handler)
+      return () => channel.close()
     })
-  const open = deps.openPopup ?? ((target: string) => window.open(target, "overpay-login", POPUP_FEATURES))
+  // With noopener the browser returns null whether or not the window opened,
+  // so a blocked pop-up cannot be detected; the intro says what to do.
+  const open = deps.openPopup ?? ((target: string) => window.open(target, "_blank", POPUP_FEATURES))
 
   const code = await new Promise<string>((resolve, reject) => {
     const stop = listen((event) => {
@@ -318,10 +325,13 @@ async function linkExisting(ui: SetupView, api: Client, deps: SetupDeps): Promis
     // A popup must open from the click itself, or browsers block it.
     ui.action({
       title: "Log in to Overpay",
-      intro: ["A window opens on Overpay: log in, then approve this wallet. This page continues by itself afterwards."],
+      intro: [
+        "A window opens on Overpay: log in, then approve this wallet. This page continues by itself afterwards.",
+        "If no window opens, allow pop-ups for this page and try again.",
+      ],
       button: "Open Overpay login",
       onClick: () => {
-        if (!open(url)) ui.flash("The browser blocked the window. Allow pop-ups for this page and try again.")
+        open(url)
       },
       cancel: "Back",
       onCancel: () => {

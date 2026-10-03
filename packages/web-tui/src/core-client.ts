@@ -68,6 +68,8 @@ export function startCore(options: WorkerOptions = {}): Core {
 // cli/cmd/tui.ts's createWorkerFetch, with relative URLs resolved against the
 // core's private origin. `method` picks the RPC: the core server (`fetch`) or
 // the worker's private-origin router (`privateFetch`).
+const NULL_BODY_STATUSES = new Set([101, 204, 205, 304])
+
 export function createWorkerFetch(client: CoreClient, method: "fetch" | "privateFetch" = "fetch"): typeof fetch {
   const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = new Request(
@@ -81,7 +83,9 @@ export function createWorkerFetch(client: CoreClient, method: "fetch" | "private
       headers: Object.fromEntries(request.headers.entries()),
       body,
     })
-    return new Response(result.body, {
+    // A body on a null-body status (204 No Content and friends) is a
+    // TypeError in browsers.
+    return new Response(NULL_BODY_STATUSES.has(result.status) ? null : result.body, {
       status: result.status,
       headers: result.headers,
     })

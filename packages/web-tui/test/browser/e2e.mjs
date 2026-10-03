@@ -6,6 +6,7 @@
 //   → TUI home → prompt → the marketplace reply streams into the session
 //   → reload → unlock (a wrong password first) → TUI → session list
 //   → a second tab waits until the first closes
+//   → (mock only) another visitor links an existing account via the popup
 //
 // Needs the page built with owallet-web in it: `bun run build:owallet` (Rust,
 // clang, wasm-bindgen), then `vite build`. `bun run test:e2e` does both.
@@ -262,6 +263,63 @@ try {
     await page.close()
     await second.getByRole("heading", { name: "Unlock your wallet", exact: true }).waitFor({ timeout: 60_000 })
   })
+
+  if (!REAL_OVERPAY) {
+    await step("another visitor links an existing account through the Overpay login popup", async () => {
+      // A fresh profile (its own OPFS). The mock's /oauth/authorize approves
+      // at once and redirects to public/oauth/callback.html, which hands the
+      // code back over a BroadcastChannel (the popup has no opener).
+      const visitor = await browser.newContext({ viewport: { width: 1400, height: 860 } })
+      const tab = await visitor.newPage()
+      tab.on("pageerror", (error) => errors.push(`pageerror (visitor): ${error.stack ?? error.message}`))
+      await tab.goto(url)
+      const visitorHeading = (text) =>
+        tab.getByRole("heading", { name: text, exact: true }).waitFor({ timeout: 120_000 })
+      await visitorHeading("Set up your wallet")
+      await tab.getByLabel("Admin password").fill(PASSWORD)
+      await tab.getByLabel("Confirm password").fill(PASSWORD)
+      await tab.getByRole("button", { name: "Create wallet" }).click()
+      await visitorHeading("Create or import a wallet")
+      await tab.getByRole("button", { name: "Create a new wallet" }).click()
+      await visitorHeading("Connect to Overpay")
+      await tab.getByRole("button", { name: "Use my existing Overpay account" }).click()
+      await visitorHeading("Log in to Overpay")
+      const [popup] = await Promise.all([
+        visitor.waitForEvent("page"),
+        tab.getByRole("button", { name: "Open Overpay login" }).click(),
+      ])
+      assert.equal(await popup.evaluate(() => window.opener), null, "the login popup has no handle on the norm tab")
+      // Linked: past the setup screen (the credits step may come first).
+      const credits = tab.getByRole("button", { name: /demo credits|Start norm/ })
+      const tui = async () => {
+        const deadline = Date.now() + 120_000
+        while (Date.now() < deadline) {
+          if (
+            await credits
+              .first()
+              .isVisible()
+              .catch(() => false)
+          )
+            await credits.first().click()
+          const text = await tab.evaluate(() => {
+            const buffer = globalThis.__norm?.term?.buffer.active
+            return buffer
+              ? Array.from(
+                  { length: buffer.length },
+                  (_, row) => buffer.getLine(row)?.translateToString(true) ?? "",
+                ).join("\n")
+              : ""
+          })
+          if (/Ask anything/.test(text)) return
+          await tab.waitForTimeout(250)
+        }
+        throw new Error("the TUI did not start after linking")
+      }
+      await tui()
+      await tab.screenshot({ path: path.join(shots, "e2e-08-oauth-linked.png") })
+      await visitor.close()
+    })
+  }
 
   assert.deepEqual(errors, [], "no page or console errors")
 } finally {

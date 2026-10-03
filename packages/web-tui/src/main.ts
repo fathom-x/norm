@@ -4,12 +4,13 @@
 // URL flags: ?mock-owallet (scripted owallet, see mock-owallet.ts), ?debug
 // (core logs + norm diagnostics in the console), ?debug-panel (the plain-DOM
 // debug panel instead of the TUI), ?overpay=<url> (the Overpay owallet-web
-// talks to), ?session=<id>, ?prompt=<text>.
+// talks to), ?session=<id>.
 import wasmUrl from "../../opentui-wasm/dist/opentui.wasm?url"
 import { startCore } from "./core-client"
 import { ENV } from "./env"
 import { OWALLET_ORIGIN } from "./fetch-router"
 import { claimTab, renderOtherTab } from "./single-tab"
+import { allowedOverpay } from "./overpay-target"
 
 // The build points `process.env` at `globalThis.process.env`, and some
 // modules read it as they load. Until opentui-wasm installs the page's real
@@ -18,6 +19,7 @@ import { claimTab, renderOtherTab } from "./single-tab"
 ;(globalThis as { process?: unknown }).process ??= { env: { ...ENV } }
 
 const params = new URLSearchParams(location.search)
+const overpayOverride = allowedOverpay(params.get("overpay"))
 const root = document.querySelector<HTMLElement>("#app")!
 // One tab at a time: the stores are exclusive (single-tab.ts). A second tab
 // waits here, saying so, and carries on when the first one closes.
@@ -30,7 +32,9 @@ const vfsChannel = `norm-vfs-${crypto.randomUUID()}`
 const core = startCore({
   mockOwallet: params.has("mock-owallet"),
   env: params.has("debug") ? { OPENCODE_PRINT_LOGS: "1", NORM_DEBUG: "1" } : {},
-  overpay: params.get("overpay") ? { railsUrl: params.get("overpay")! } : undefined,
+  // Only known Overpay deployments (overpay-target.ts): a link must not be
+  // able to point this tab's wallet at an arbitrary marketplace.
+  overpay: overpayOverride ? { railsUrl: overpayOverride } : undefined,
   vfsChannel,
 })
 
@@ -56,7 +60,9 @@ if (params.has("debug-panel")) {
       vfsChannel,
       wasm,
       sessionID: params.get("session") ?? undefined,
-      prompt: params.get("prompt") ?? undefined,
+      // No `?prompt=`: the TUI submits a startup prompt as the user's own
+      // message, so a link could spend the visitor's wallet on the
+      // attacker's behalf the moment they unlock it.
     })
     root.dataset.state = "exited"
   } catch (error) {

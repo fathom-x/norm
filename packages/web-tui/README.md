@@ -47,7 +47,7 @@ Serving from a sub-path (e.g. GitHub Pages, `https://<owner>.github.io/norm/`):
 build with `NORM_WEB_BASE=/norm/ bun run build`; assets, workers and the OAuth
 callback page resolve against it. `.github/workflows/norm-web-pages.yml`
 (manual dispatch) builds and deploys exactly that; its header lists what the
-target Overpay must allow (`API_CORS_ORIGINS`, `OAUTH_ALLOWED_REDIRECT_ORIGINS`,
+target Overpay must allow (`API_CORS_ORIGINS`, `OAUTH_ALLOWED_REDIRECT_URIS`,
 optionally `DEMO_CREDITS_CENTS`).
 
 CI: `.github/workflows/norm-web-ci.yml` runs all of the above (plus the
@@ -76,8 +76,8 @@ Page URL flags:
 | `?mock-owallet` | `owallet.internal` is the scripted stand-in in `src/mock-owallet.ts` (no wallet needed; its "model" drives the file tools by keyword; `/v1/status` and an empty `/mcp` for the sidebar) |
 | `?debug` | the core's logs and norm's bootstrap diagnostics in the devtools console |
 | `?debug-panel` | the plain-DOM debug panel instead of the TUI (`norm.api("/session")` in the console) |
-| `?overpay=<url>` | the Overpay owallet-web talks to |
-| `?session=<id>`, `?prompt=<text>` | open a session / start with a prompt (the CLI's `--session` / `--prompt`) |
+| `?overpay=<url>` | the Overpay owallet-web talks to — only a known deployment (`src/overpay-target.ts`: overpay.com, the staging Overpay, `NORM_WEB_OVERPAY_URLS` at build time), or a loopback Overpay from a loopback page; anything else is ignored, so a link cannot point the tab's wallet at a look-alike marketplace |
+| `?session=<id>` | open a session (the CLI's `--session`). There is deliberately no `?prompt=`: the TUI submits a startup prompt as the user's own message, so a link could spend the visitor's wallet |
 
 `window.__norm = { term, core, host }` is there for tests and the console.
 
@@ -279,3 +279,28 @@ streaming the mock seller's reply with the turn's cost = `charged_cents`; the
 owallet MCP server connected with its tools; and after a reload the wallet
 persisted but locked, then unlocked. Screenshots: `04-owallet-web-chat.png`,
 `05-owallet-web-unlocked.png`.
+
+## Security notes
+
+- **owallet's management API is gated.** Every HTTP client in the core worker
+  reaches `http://owallet.internal` through the fetch router — including the
+  model's `webfetch` and any provider or MCP URL the model could write into a
+  config file. `/_mgmt` (create/unlock the wallet, mint keys, link Overpay)
+  therefore needs a per-boot capability header (`src/mgmt-gate.ts`) that only
+  the page (`worker-rpc.ts` `privateFetch`) and norm's wasm host
+  (`packages/opencode/src/norm/host.ts` `mgmtHeaders`) present; `/mcp` and `/v1`
+  need a provider key (no anonymous `/mcp` in the browser), and `/_mgmt`
+  bodies with unknown fields are refused.
+- **No `?prompt=`**: the TUI submits a startup prompt as the user's own
+  message, so a link could spend the visitor's wallet.
+- **Overpay login popup**: opened with `noopener`; the callback page
+  (`public/oauth/callback.html`) hands the code back over a same-origin
+  `BroadcastChannel` and the setup screen checks `state`. Overpay must list the
+  callback's exact URL in `OAUTH_ALLOWED_REDIRECT_URIS`.
+- **Origin**: everything the page keeps (OPFS: wallet, `auth.json`, sessions)
+  is per origin. Serve it from an origin of its own — not a shared
+  `https://<owner>.github.io` that other sites of the same owner also use.
+- **Aborts**: a request's signal reaches owallet-web (`src/abort.ts`): a
+  cancelled streamed reply drops the Rust stream, as a closed connection does
+  natively.
+

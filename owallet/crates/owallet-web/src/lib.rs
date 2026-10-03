@@ -197,8 +197,17 @@ impl App {
     fn bind(&self, db: Database) -> Opened {
         let db = Arc::new(Mutex::new(db));
         let mcp = self.mcp_state(db.clone());
-        // Provider keys only: there is no local OAuth AS in the browser.
-        let auth = provider_key_bearer_auth(db.clone(), |_| AuthResult::Invalid);
+        // Provider keys only: there is no local OAuth AS in the browser, and
+        // no anonymous access either. Natively a missing bearer is the
+        // localhost owner; here anything in the core worker can reach
+        // owallet.internal (a model-written MCP config included), and
+        // anonymous calls would skip the key's spend scope and daily budget.
+        let keys = provider_key_bearer_auth(db.clone(), |_| AuthResult::Invalid);
+        let auth: owallet_mcp::transport::BearerAuthCheck =
+            Arc::new(move |bearer: Option<&str>| match bearer {
+                None => AuthResult::Invalid,
+                some => keys(some),
+            });
         let api = Router::new()
             .nest("/v1", owallet_mcp::openai_compat::router(mcp.clone()))
             .nest("/mcp", mcp_router_with_auth(mcp, auth));

@@ -13,7 +13,7 @@ import fs from "fs/promises"
 const authFile = () => path.join(Global.Path.data, "auth.json")
 const markerFile = () => path.join(Global.Path.data, "overpay-key.json")
 
-type Call = { method: string; url: string; body?: any }
+type Call = { method: string; url: string; body?: any; headers: Record<string, string> }
 
 describe("norm in the browser", () => {
   let saved: Record<string, string | undefined>
@@ -21,24 +21,53 @@ describe("norm in the browser", () => {
   let calls: Call[]
   let status: NormHost.WasmStatus
   let savedAuth: string | undefined
+  // Keys owallet-web knows; empty = accept any.
+  let knownKeys: Set<string>
 
   beforeEach(async () => {
-    saved = { NORM_RUNTIME: process.env.NORM_RUNTIME, NORM_HOME: process.env.NORM_HOME, NORM_DISABLE: process.env.NORM_DISABLE }
+    saved = {
+      NORM_RUNTIME: process.env.NORM_RUNTIME,
+      NORM_HOME: process.env.NORM_HOME,
+      NORM_DISABLE: process.env.NORM_DISABLE,
+    }
     process.env.NORM_RUNTIME = "browser"
     delete process.env.NORM_DISABLE
     realFetch = globalThis.fetch
     calls = []
-    status = { version: "0.1.10", initialized: true, unlocked: true, wallet: { npub: "npub1test" }, overpay_linked: true }
+    status = {
+      version: "0.1.10",
+      initialized: true,
+      unlocked: true,
+      wallet: { npub: "npub1test" },
+      overpay_linked: true,
+    }
+    knownKeys = new Set()
     globalThis.fetch = (async (input: any, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.url
       const method = init?.method ?? "GET"
-      calls.push({ method, url, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+      calls.push({
+        method,
+        url,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        headers: Object.fromEntries(new Headers(init?.headers).entries()),
+      })
       if (!url.startsWith(NormHost.BROWSER_OWALLET_URL)) return new Response("not routed", { status: 599 })
       const route = url.slice(NormHost.BROWSER_OWALLET_URL.length)
       if (route === "/_mgmt/status") return Response.json(status)
       if (route === "/_mgmt/provider-key/create")
-        return Response.json({ key: "owk_wasm_minted_key_0001", id: 1, npub: "npub1test", label: "norm", scopes: "chat spend" })
-      if (route === "/v1/status") return Response.json({ key_can_spend: true })
+        return Response.json({
+          key: "owk_wasm_minted_key_0001",
+          id: 1,
+          npub: "npub1test",
+          label: "norm",
+          scopes: "chat spend",
+        })
+      if (route === "/v1/status") {
+        const key = new Headers(init?.headers).get("authorization")?.replace(/^Bearer /, "")
+        if (key && knownKeys.size && !knownKeys.has(key))
+          return Response.json({ error: "unknown key" }, { status: 401 })
+        return Response.json({ key_can_spend: true })
+      }
       return new Response("nope", { status: 404 })
     }) as unknown as typeof fetch
     savedAuth = await fs.readFile(authFile(), "utf8").catch(() => undefined)
@@ -48,6 +77,7 @@ describe("norm in the browser", () => {
 
   afterEach(async () => {
     globalThis.fetch = realFetch
+    delete (globalThis as Record<string, unknown>).__normOwalletMgmt
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k]
       else process.env[k] = v
@@ -84,6 +114,23 @@ describe("norm in the browser", () => {
     // A second launch keeps the key (it can spend).
     await Norm.bootstrap()
     expect(mints()).toHaveLength(1)
+  })
+
+  test("/_mgmt calls carry the capability the worker published", async () => {
+    ;(globalThis as Record<string, unknown>).__normOwalletMgmt = { "x-norm-mgmt": "boot-token" }
+    await Norm.bootstrap()
+    const mgmt = calls.filter((c) => c.url.includes("/_mgmt/"))
+    expect(mgmt.length).toBeGreaterThan(0)
+    for (const call of mgmt) expect(call.headers["x-norm-mgmt"]).toBe("boot-token")
+  })
+
+  test("a key the wallet no longer knows (401) is minted again", async () => {
+    await Norm.bootstrap()
+    expect(await storedKey()).toBe("owk_wasm_minted_key_0001")
+    // The wallet database was reset; norm's files survived.
+    knownKeys = new Set(["owk_wasm_minted_key_0001_new"])
+    await Norm.bootstrap()
+    expect(mints()).toHaveLength(2)
   })
 
   test("a locked wallet mints nothing — the setup screen unlocks it first", async () => {

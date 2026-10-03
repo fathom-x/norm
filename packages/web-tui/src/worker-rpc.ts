@@ -2,6 +2,7 @@
 // Rpc.listen looks up per call, so extending the object is enough — the
 // opencode-side twin of worker.ts stays the same shape as the native one).
 import { OWALLET_ORIGIN } from "./fetch-router"
+import { MGMT_GLOBAL } from "./mgmt-gate"
 
 export type SerializedRequest = { url: string; method: string; headers: Record<string, string>; body?: string }
 export type SerializedResponse = { status: number; headers: Record<string, string>; body: string }
@@ -20,15 +21,28 @@ export const workerRpc = {
     const origin = new URL(input.url).origin
     if (!PRIVATE_ORIGINS.has(origin))
       return { status: 403, headers: { "content-type": "text/plain" }, body: `${origin} is not a private origin` }
-    const response = await fetch(input.url, {
-      method: input.method,
-      headers: input.headers,
-      body: input.body || undefined,
-    })
-    return {
-      status: response.status,
-      headers: Object.fromEntries(response.headers.entries()),
-      body: await response.text(),
+    try {
+      const response = await fetch(input.url, {
+        method: input.method,
+        // The page is trusted with owallet's /_mgmt (mgmt-gate.ts).
+        headers: { ...input.headers, ...((globalThis as Record<string, unknown>)[MGMT_GLOBAL] as object) },
+        body: input.body || undefined,
+      })
+      return {
+        status: response.status,
+        headers: Object.fromEntries(response.headers.entries()),
+        body: await response.text(),
+      }
+    } catch (error) {
+      // Rpc.listen never answers a method that throws, which would leave the
+      // page waiting forever; answer with the failure instead.
+      return {
+        status: 502,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          error: { code: "private_fetch_failed", message: error instanceof Error ? error.message : String(error) },
+        }),
+      }
     }
   },
 }

@@ -41,6 +41,8 @@ export default defineConfig(({ command }) => ({
     // process shim. (The dev server leaves `process.env` alone, and its own
     // client reads the define before any shim could run.)
     global: "globalThis",
+    // Extra Overpay deployments a `?overpay=` link may name (overpay-target.ts).
+    __NORM_WEB_OVERPAY_URLS__: JSON.stringify(process.env.NORM_WEB_OVERPAY_URLS ?? ""),
     ...(command === "build" && {
       "process.env": "globalThis.process.env",
       "global.process.env": "globalThis.process.env",

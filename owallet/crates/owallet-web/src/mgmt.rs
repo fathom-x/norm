@@ -111,6 +111,7 @@ fn status_value(app: &App) -> Result<Value, MgmtError> {
 // ---- init / unlock ----
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PasswordBody {
     password: String,
 }
@@ -156,6 +157,7 @@ async fn unlock(State(app): State<App>, raw: Bytes) -> MgmtResult {
 // ---- generate / import ----
 
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct GenerateBody {
     /// Per-wallet (dashboard) password; optional in the browser.
     #[serde(default)]
@@ -185,6 +187,7 @@ async fn generate(State(app): State<App>, raw: Bytes) -> MgmtResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ImportBody {
     /// A BIP-39 phrase, or a hex private key.
     mnemonic: String,
@@ -228,6 +231,7 @@ fn store_and_select(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SelectBody {
     npub: String,
 }
@@ -256,6 +260,7 @@ async fn select(State(app): State<App>, raw: Bytes) -> MgmtResult {
 // ---- provider keys ----
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProviderKeyBody {
     #[serde(default = "default_label")]
     label: String,
@@ -359,6 +364,7 @@ async fn overpay_register(State(app): State<App>, raw: Bytes) -> MgmtResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PkceStartBody {
     redirect_uri: String,
 }
@@ -382,6 +388,7 @@ async fn pkce_start(State(app): State<App>, raw: Bytes) -> MgmtResult {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PkceFinishBody {
     code: String,
     state: String,

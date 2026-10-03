@@ -17,6 +17,7 @@
 // `{type: "owallet.configure", id, overpay}` to the worker
 // (`configureOwallet(worker, overpay)`); the wallet database is kept and the
 // router rebuilt for the next request.
+import { abortable, followAbort } from "./abort"
 import type { WorkerOptions } from "./core-client"
 import type { Route } from "./fetch-router"
 
@@ -115,11 +116,14 @@ export function owallet(options: WorkerOptions, scope: any = globalThis): Owalle
     } catch (error) {
       return unavailable(error)
     }
+    let response: Response
     try {
-      return await mod.handle(request)
+      response = await abortable(mod.handle(request), request.signal)
     } catch (error) {
+      if (request.signal.aborted) throw request.signal.reason ?? error
       return unavailable(error, "owallet_error")
     }
+    return followAbort(response, request.signal)
   }
 
   const configure = (next: OverpayTarget) => {

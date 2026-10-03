@@ -11,7 +11,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsgo --noEmit",
-    "test": "bun test --conditions=browser --preload ./happydom.ts ./src ./test/unit",
+    "test": "bun test --conditions=browser --preload ./happydom.ts ./src ./test/unit && bun test --conditions=browser ./test/streams",
     "test:browser": "bun run build && node ./test/browser/smoke.mjs",
     "build:owallet": "./scripts/build-owallet-web.sh",
     "test:owallet": "bun run build:owallet && bun run build && node ./test/browser/owallet.mjs",

@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
     <title>Connecting to Overpay</title>
     <style>
       :root { color-scheme: light dark; --bg: #fafafa; --fg: #1d1d1f; }
@@ -14,24 +15,25 @@
   <body>
     <p id="msg">Finishing the Overpay connection…</p>
     <script>
-      // Overpay's PKCE redirect lands here (an OAUTH_ALLOWED_REDIRECT_ORIGINS
-      // origin). Hand the code back to the norm page that opened this popup —
-      // same origin only — and close. owallet-web exchanges it for the token.
+      // Overpay's PKCE redirect lands here (an OAUTH_ALLOWED_REDIRECT_URIS
+      // entry). Hand the code to the norm page that started the login over a
+      // BroadcastChannel — same origin only, and without window.opener: the
+      // popup is opened with noopener so the Overpay page never gets a handle
+      // on the norm tab. owallet-web exchanges the code for the token; the
+      // page also checks `state`.
       const params = new URLSearchParams(location.search)
-      const message = {
+      const channel = new BroadcastChannel("norm-overpay-oauth")
+      channel.postMessage({
         type: "overpay-oauth",
         code: params.get("code"),
         state: params.get("state"),
         error: params.get("error"),
-      }
-      const msg = document.getElementById("msg")
-      if (window.opener && !window.opener.closed) {
-        window.opener.postMessage(message, location.origin)
-        msg.textContent = "Connected. You can close this window."
-        setTimeout(() => window.close(), 300)
-      } else {
-        msg.textContent = "This window was opened outside norm. Close it and start the connection from norm again."
-      }
+      })
+      channel.close()
+      // Keep the code out of history and the address bar.
+      history.replaceState(null, "", location.pathname)
+      document.getElementById("msg").textContent = "Connected. You can close this window."
+      setTimeout(() => window.close(), 300)
     </script>
   </body>
 </html>

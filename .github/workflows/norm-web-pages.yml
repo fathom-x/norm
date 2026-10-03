@@ -2,11 +2,15 @@
 #
 # Before the first run:
 #   - Settings → Pages → Source: "GitHub Actions".
-#   - The Overpay the page talks to (staging by default; `?overpay=<url>`
-#     overrides per visit) must allow the Pages origin
-#     (https://<owner>.github.io): API_CORS_ORIGINS for the API, and
-#     OAUTH_ALLOWED_REDIRECT_ORIGINS for "Use my existing Overpay account".
-#     Set DEMO_CREDITS_CENTS there too if new visitors should get demo credits.
+#   - Prefer a custom domain for Pages: https://<owner>.github.io is one
+#     origin shared by every Pages site of that owner, and the page keeps the
+#     visitor's wallet and keys in that origin's storage.
+#   - The Overpay the page talks to (staging by default; `?overpay=` may only
+#     name a known deployment) must allow the page: API_CORS_ORIGINS gets its
+#     origin, and OAUTH_ALLOWED_REDIRECT_URIS the exact callback URL,
+#     https://<host>/<repo>/oauth/callback.html, for "Use my existing Overpay
+#     account". Set DEMO_CREDITS_CENTS there too if new visitors should get
+#     demo credits.
 name: norm-web-pages
 
 on:

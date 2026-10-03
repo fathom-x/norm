@@ -151,6 +151,10 @@ the full map; the rules for core and TUI code:
 - `process.env.NORM_RUNTIME === "browser"` marks the build (seeded by
   `packages/web-tui/src/env.ts`); norm talks to owallet at
   `http://owallet.internal`, answered in-process by the worker's fetch router.
+  Anything in the worker can reach that origin (the model's `webfetch`
+  included), so owallet-web's `/_mgmt` needs the per-boot capability from
+  `packages/web-tui/src/mgmt-gate.ts` (norm's host sends it via
+  `NormHost.mgmtHeaders()`), and `/mcp` needs a provider key.
 
 ## Rebrand
 

@@ -401,12 +401,23 @@ async fn mcp_tools_list_and_call() {
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
 
+    // No anonymous /mcp in the browser: a missing bearer is refused.
+    let (s, v) = json_call(
+        &app,
+        "POST",
+        "/mcp",
+        None,
+        Some(rpc(3, "tools/list", json!({}))),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "{v}");
+
     // An on-chain tool answers unavailable_in_browser instead of failing.
     let (s, text) = call(
         &app,
         "POST",
         "/mcp",
-        None,
+        Some(&key),
         Some(rpc(
             3,
             "tools/call",
@@ -416,4 +427,35 @@ async fn mcp_tools_list_and_call() {
     .await;
     assert_eq!(s, StatusCode::OK, "{text}");
     assert!(text.contains("unavailable_in_browser"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mgmt_refuses_bodies_with_unknown_fields() {
+    // A JSON-RPC or chat-completion body aimed at a /_mgmt route (say through
+    // a model-written MCP or provider URL) must not be read as a valid call
+    // that happens to ignore the extras.
+    let mock = start_mock();
+    let dir = tempfile::tempdir().unwrap();
+    let app = app(&mock, &dir);
+    let (s, v) = json_call(
+        &app,
+        "POST",
+        "/_mgmt/init",
+        None,
+        Some(json!({"password": "pw", "jsonrpc": "2.0", "method": "tools/list"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{v}");
+    let (_, v) = json_call(&app, "GET", "/_mgmt/status", None, None).await;
+    assert_eq!(v["initialized"], false, "{v}");
+
+    let (s, v) = json_call(
+        &app,
+        "POST",
+        "/_mgmt/generate",
+        None,
+        Some(json!({"model": "default", "messages": []})),
+    )
+    .await;
+    assert!(s.is_client_error(), "{s} {v}");
 }

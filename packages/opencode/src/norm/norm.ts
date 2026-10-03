@@ -1343,6 +1343,10 @@ async function keyCanSpend(key: string): Promise<boolean | undefined> {
       headers: { authorization: `Bearer ${key}` },
       signal: AbortSignal.timeout(5000),
     })
+    // In the browser a 401 means the wallet no longer knows this key (its
+    // database was reset while norm's files survived): mint a new one.
+    // Natively a 401 may be a key the user revoked on purpose — leave it.
+    if (res.status === 401 && NormHost.isBrowser()) return false
     if (!res.ok) return undefined
     const body: any = await res.json()
     return typeof body?.key_can_spend === "boolean" ? body.key_can_spend : undefined

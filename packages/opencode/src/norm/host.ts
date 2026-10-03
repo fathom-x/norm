@@ -30,7 +30,20 @@ export const BROWSER_OWALLET_URL = "http://owallet.internal"
  * `process.env` polyfill it gives both the worker and the main thread.
  */
 export function isBrowser(): boolean {
+  // A stray NORM_RUNTIME=browser in a native process is harmless: it points
+  // norm at http://owallet.internal, which does not resolve outside the page
+  // (`.internal` is a reserved TLD), so no wallet is reached at all.
   return typeof process !== "undefined" && process.env?.NORM_RUNTIME === "browser"
+}
+
+/**
+ * The capability owallet-web's /_mgmt routes require in the browser build
+ * (packages/web-tui/src/mgmt-gate.ts publishes it in the core worker); empty
+ * anywhere else.
+ */
+export function mgmtHeaders(): Record<string, string> {
+  const published = (globalThis as Record<string, unknown>).__normOwalletMgmt
+  return published && typeof published === "object" ? { ...(published as Record<string, string>) } : {}
 }
 
 /** What `GET /_mgmt/status` reports (owallet-web). */
@@ -51,7 +64,7 @@ export type WasmStatus = {
 export function wasmHost(debug: (...args: unknown[]) => void, base = BROWSER_OWALLET_URL): OwalletHost {
   const status = async (): Promise<WasmStatus | undefined> => {
     try {
-      const res = await fetch(`${base}/_mgmt/status`, { signal: AbortSignal.timeout(5000) })
+      const res = await fetch(`${base}/_mgmt/status`, { headers: mgmtHeaders(), signal: AbortSignal.timeout(5000) })
       if (!res.ok) {
         debug(`owallet-web status responded ${res.status}`)
         return undefined
@@ -82,7 +95,7 @@ export function wasmHost(debug: (...args: unknown[]) => void, base = BROWSER_OWA
       try {
         const res = await fetch(`${base}/_mgmt/provider-key/create`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...mgmtHeaders() },
           body: JSON.stringify({ label: input.label, spend: input.spend, budget_usd: input.budgetUsd }),
           signal: AbortSignal.timeout(30_000),
         })

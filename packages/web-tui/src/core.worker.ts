@@ -6,6 +6,7 @@ import "./shims/globals"
 import type { WorkerOptions } from "./core-client"
 import { installFetchRouter, OWALLET_ORIGIN } from "./fetch-router"
 import { mockOwallet } from "./mock-owallet"
+import { createMgmtGate, publishMgmtHeaders } from "./mgmt-gate"
 import { owallet } from "./owallet"
 import { serveVfs } from "./main-vfs"
 import { mountVfs } from "./vfs"
@@ -25,8 +26,11 @@ Object.assign(process.env, options.env)
 // owallet.internal: owallet-web (the WebAssembly owallet, src/owallet.ts —
 // 503 until `bun run build:owallet` has built it), or the scripted mock when
 // asked for.
+// /_mgmt answers only the page and norm's host (mgmt-gate.ts).
+const mgmt = createMgmtGate()
+publishMgmtHeaders(mgmt)
 export const router = installFetchRouter({
-  [OWALLET_ORIGIN]: options.mockOwallet ? mockOwallet : owallet(options).route,
+  [OWALLET_ORIGIN]: mgmt.wrap(options.mockOwallet ? mockOwallet : owallet(options).route),
 })
 
 const boot = (data: object) => postMessage(JSON.stringify({ type: "rpc.event", event: "boot", data }))
