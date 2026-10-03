@@ -5,6 +5,7 @@
 //   setup: password → new wallet → new Overpay account (NIP-98 register)
 //   → TUI home → prompt → the marketplace reply streams into the session
 //   → reload → unlock (a wrong password first) → TUI → session list
+//   → a second tab waits until the first closes
 //
 // Needs the page built with owallet-web in it: `bun run build:owallet` (Rust,
 // clang, wasm-bindgen), then `vite build`. `bun run test:e2e` does both.
@@ -186,6 +187,16 @@ try {
     const text = await waitFor(/Sessions/, 15_000)
     assert.match(text, /hello/i)
     await shot("e2e-06-session-list.png")
+  })
+
+  await step("a second tab waits for the first, then takes over when it closes", async () => {
+    const second = await context.newPage()
+    second.on("pageerror", (error) => errors.push(`pageerror (second tab): ${error.stack ?? error.message}`))
+    await second.goto(url)
+    await second.getByText("norm is open in another tab").waitFor({ timeout: 30_000 })
+    await second.screenshot({ path: path.join(shots, "e2e-07-second-tab.png") })
+    await page.close()
+    await second.getByRole("heading", { name: "Unlock your wallet", exact: true }).waitFor({ timeout: 60_000 })
   })
 
   assert.deepEqual(errors, [], "no page or console errors")

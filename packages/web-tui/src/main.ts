@@ -9,6 +9,7 @@ import wasmUrl from "../../opentui-wasm/dist/opentui.wasm?url"
 import { startCore } from "./core-client"
 import { ENV } from "./env"
 import { OWALLET_ORIGIN } from "./fetch-router"
+import { claimTab, renderOtherTab } from "./single-tab"
 
 // The build points `process.env` at `globalThis.process.env`, and some
 // modules read it as they load. Until opentui-wasm installs the page's real
@@ -18,6 +19,11 @@ import { OWALLET_ORIGIN } from "./fetch-router"
 
 const params = new URLSearchParams(location.search)
 const root = document.querySelector<HTMLElement>("#app")!
+// One tab at a time: the stores are exclusive (single-tab.ts). A second tab
+// waits here, saying so, and carries on when the first one closes.
+await claimTab(() => renderOtherTab(root))
+root.replaceChildren()
+
 // The worker serves its file tree to the page on this channel (main-vfs.ts);
 // per page, so two tabs never answer each other.
 const vfsChannel = `norm-vfs-${crypto.randomUUID()}`
