@@ -1,10 +1,10 @@
 export * as NormPricing from "./norm-pricing"
 
 // What overpay models cost, as owallet's `GET /v1/models` reports it (each
-// entry's optional `pricing`, `context_length`, `active`; older owallets
-// send ids only). Shared by the server-side norm layer (which turns it into
-// opencode's model `cost`/`limit`) and the TUI (picker prices, next-message
-// estimates, the sidebar).
+// entry's optional `pricing`, `context_length`, `active`, `reasoning`; older
+// owallets send ids only). Shared by the server-side norm layer (which turns
+// it into opencode's model `cost`/`limit`/`variants`) and the TUI (picker
+// prices, next-message estimates, the sidebar).
 //
 // Prices are USD per million tokens with the seller's markup already in.
 // They're *list* prices — the priciest provider the seller admitted at its
@@ -27,12 +27,29 @@ export type Pricing = {
   as_of?: string
 }
 
+/**
+ * How a model reasons, as the seller publishes it (OpenRouter's catalog
+ * object, on the variant's `metadata.reasoning`, which owallet passes
+ * through as the entry's `reasoning`).
+ */
+export type Reasoning = {
+  /** The `reasoning_effort` values the model takes, in the seller's order. */
+  supportedEfforts: string[]
+  defaultEffort?: string
+  /** The model always reasons; an effort only sizes it. */
+  mandatory?: boolean
+  /** The model reasons unless asked not to. */
+  defaultEnabled?: boolean
+}
+
 export type Model = {
   id: string
   name?: string
   contextLength?: number
   active?: boolean
   pricing?: Pricing
+  /** Absent when the model takes no effort (or an older owallet omits it). */
+  reasoning?: Reasoning
 }
 
 /** A reply's assumed length when nothing better is known. */
@@ -68,6 +85,20 @@ function parsePricing(raw: any): Pricing | undefined {
   }
 }
 
+function parseReasoning(raw: any): Reasoning | undefined {
+  if (!raw || typeof raw !== "object") return undefined
+  const efforts = Array.isArray(raw.supported_efforts)
+    ? raw.supported_efforts.filter((effort: unknown): effort is string => typeof effort === "string" && effort.length > 0)
+    : []
+  if (!efforts.length) return undefined
+  return {
+    supportedEfforts: efforts,
+    defaultEffort: typeof raw.default_effort === "string" ? raw.default_effort : undefined,
+    mandatory: typeof raw.mandatory === "boolean" ? raw.mandatory : undefined,
+    defaultEnabled: typeof raw.default_enabled === "boolean" ? raw.default_enabled : undefined,
+  }
+}
+
 /** A `GET /v1/models` body as models; undefined when it lists none. */
 export function parseModels(body: unknown): Model[] | undefined {
   const data = (body as any)?.data
@@ -80,6 +111,7 @@ export function parseModels(body: unknown): Model[] | undefined {
         contextLength: finite(entry.context_length) && entry.context_length > 0 ? entry.context_length : undefined,
         active: typeof entry.active === "boolean" ? entry.active : undefined,
         pricing: parsePricing(entry.pricing),
+        reasoning: parseReasoning(entry.reasoning),
       }),
     )
   return models.length ? models : undefined

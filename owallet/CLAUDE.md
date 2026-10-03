@@ -247,10 +247,15 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   (`MODEL_OPTIONS`, `buyer_note_schema`) needs no Rust change to match,
   and any general router should preserve that property. `/v1/models`
   also passes each metered variant's title, `metadata.context_length`,
-  `active` and `rate_card` through (`model_entries`/`model_pricing`;
-  pricing as USD per Mtok with markup in) — norm turns them into model
-  cost and context limits, so a rate-card shape change on the Ruby side
-  must keep those keys or update both.
+  `active`, `rate_card` and `metadata.reasoning` through
+  (`model_entries`/`model_pricing`/`ModelReasoning`; pricing as USD per
+  Mtok with markup in) — norm turns them into model cost, context limits
+  and reasoning-effort variants, so a rate-card shape change on the Ruby
+  side must keep those keys or update both. A request's `reasoning_effort`
+  (OpenAI's flat field, or OpenRouter's `reasoning.effort`) is forwarded
+  as `buyer_note.reasoning_effort` on every OpenRouter turn
+  (`with_session_id`), unvalidated: the seller decides whether the model
+  takes it (`default` has no variant to check against).
   `partial_output`/`new_output_since`/`WAIT_TERMINAL_STATUSES` in
   `tools.rs` are `pub(crate)` specifically so this module can reuse
   `wait_for_order`'s streaming-diff logic rather than reimplementing it.

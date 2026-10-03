@@ -236,6 +236,10 @@ struct Ctx {
     /// This request's opaque OpenRouter `session_id`, when one applies.
     /// Set per request; `None` at construction.
     session_id: Option<String>,
+    /// This request's reasoning effort, if the client sent one
+    /// ([`ChatCompletionRequest::reasoning_effort`]). Set per request;
+    /// `None` at construction.
+    reasoning_effort: Option<String>,
     /// This request's client-supplied limit ([`SPEND_LIMIT_HEADER`]), if any.
     /// Set per request; `None` at construction.
     request_spend_limit_usd: Option<f64>,
@@ -292,6 +296,7 @@ fn router_with_flags(
         spend_cap_usd: cap,
         send_session_id,
         session_id: None,
+        reasoning_effort: None,
         request_spend_limit_usd: None,
         request_max_usd: None,
         listing_tools: Arc::new(OnceCell::new()),
@@ -531,6 +536,28 @@ struct ModelObject {
     /// What the model costs to run here; see [`ModelPricing`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pricing: Option<ModelPricing>,
+    /// How the model reasons, and which efforts it takes; see
+    /// [`ModelReasoning`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ModelReasoning>,
+}
+
+/// A model's reasoning controls, as the seller publishes them on its
+/// variant (`metadata.reasoning`, OpenRouter's own catalog object and
+/// vocabulary). `supported_efforts` are the values a request's
+/// `reasoning_effort` may take — norm offers them as the model's variants.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct ModelReasoning {
+    #[serde(default)]
+    supported_efforts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_effort: Option<String>,
+    /// The model always reasons (an effort only sizes it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mandatory: Option<bool>,
+    /// The model reasons unless asked not to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_enabled: Option<bool>,
 }
 
 /// A model's list price, read off its variant's `rate_card` and turned into
@@ -605,6 +632,7 @@ fn model_object(id: String) -> ModelObject {
         context_length: None,
         active: None,
         pricing: None,
+        reasoning: None,
     }
 }
 
@@ -658,6 +686,9 @@ fn model_entries(listing: &Value) -> Vec<ModelObject> {
                 .pointer("/metadata/context_length")
                 .and_then(Value::as_u64);
             model.active = variant.get("active").and_then(Value::as_bool);
+            model.reasoning = variant
+                .pointer("/metadata/reasoning")
+                .and_then(|v| serde_json::from_value::<ModelReasoning>(v.clone()).ok());
             model.pricing = variant.get("rate_card").and_then(model_pricing);
             if let Some(pricing) = model.pricing.as_mut() {
                 pricing.min_authorization = variant
@@ -2029,9 +2060,34 @@ struct ChatCompletionRequest {
     /// what the AI SDK emits when a provider enables cache keys).
     #[serde(default, alias = "promptCacheKey")]
     prompt_cache_key: Option<Value>,
+    /// OpenAI's reasoning effort (`reasoning_effort: "high"`), what an
+    /// OpenAI-compatible client such as norm sends for a model variant.
+    /// Forwarded to the listing as `buyer_note.reasoning_effort`; the
+    /// seller decides whether the model takes it (its variant's
+    /// `metadata.reasoning.supported_efforts` says which do) — this
+    /// endpoint can't: `default` has no variant to check against.
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    /// OpenRouter's spelling of the same, `reasoning: {effort: "high"}`,
+    /// for clients built against OpenRouter's API. Only `effort` is read.
+    #[serde(default)]
+    reasoning: Option<Value>,
     /// Set from [`TOOLS_HEADER`]: no server-side roster for this request.
     #[serde(skip)]
     plain: bool,
+}
+
+impl ChatCompletionRequest {
+    /// The requested reasoning effort, from either spelling; `None` when
+    /// absent or blank.
+    fn reasoning_effort(&self) -> Option<String> {
+        self.reasoning_effort
+            .as_deref()
+            .or_else(|| self.reasoning.as_ref()?.get("effort")?.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    }
 }
 
 impl ChatCompletionRequest {
@@ -2227,12 +2283,18 @@ fn request_session_id(ctx: &Ctx, client_key: Option<&str>, passthrough: bool) ->
     }
 }
 
-/// Add this request's `session_id` to an OpenRouter buyer note. OpenRouter
-/// listing orders only — `run_python` and listing tools still reject
-/// unknown buyer-note keys.
+/// Add this request's per-request fields — its `session_id` and the
+/// client's `reasoning_effort` — to an OpenRouter buyer note. Every
+/// OpenRouter turn of the request (agentic, passthrough, landing) builds
+/// its note through here, so the fields can't go missing on one path.
+/// OpenRouter listing orders only — `run_python` and listing tools still
+/// reject unknown buyer-note keys.
 fn with_session_id(mut buyer_note: Value, ctx: &Ctx) -> Value {
     if let Some(id) = &ctx.session_id {
         buyer_note["session_id"] = json!(id);
+    }
+    if let Some(effort) = &ctx.reasoning_effort {
+        buyer_note["reasoning_effort"] = json!(effort);
     }
     buyer_note
 }
@@ -2268,6 +2330,7 @@ async fn chat_completions(
     };
     let client_key = client_conversation_key(&req, &headers);
     ctx.session_id = request_session_id(&ctx, client_key.as_deref(), req.client_tools().is_some());
+    ctx.reasoning_effort = req.reasoning_effort();
     // The client says this request may spend nothing (e.g. a conversation
     // whose budget is used up): refuse before any order — each chat turn is
     // itself a paid order.
@@ -4362,6 +4425,34 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_effort_is_read_from_either_spelling() {
+        let req = |body: Value| serde_json::from_value::<ChatCompletionRequest>(body).unwrap();
+        let flat = req(json!({"model": "m", "messages": [], "reasoning_effort": "high"}));
+        assert_eq!(flat.reasoning_effort().as_deref(), Some("high"));
+        let openrouter = req(json!({"model": "m", "messages": [], "reasoning": {"effort": "low"}}));
+        assert_eq!(openrouter.reasoning_effort().as_deref(), Some("low"));
+        let both = req(
+            json!({"model": "m", "messages": [], "reasoning_effort": "xhigh",
+                              "reasoning": {"effort": "low"}}),
+        );
+        assert_eq!(
+            both.reasoning_effort().as_deref(),
+            Some("xhigh"),
+            "OpenAI's flat field wins"
+        );
+        let blank = req(json!({"model": "m", "messages": [], "reasoning_effort": "  "}));
+        assert_eq!(blank.reasoning_effort(), None);
+        let budget = req(json!({"model": "m", "messages": [], "reasoning": {"max_tokens": 2000}}));
+        assert_eq!(
+            budget.reasoning_effort(),
+            None,
+            "only the effort is forwarded; budgets are the seller's guard's to set"
+        );
+        let none = req(json!({"model": "m", "messages": []}));
+        assert_eq!(none.reasoning_effort(), None);
+    }
+
+    #[test]
     fn conversation_key_precedence_is_body_then_header_then_cache_key() {
         let req = |body: Value| serde_json::from_value::<ChatCompletionRequest>(body).unwrap();
         let mut headers = HeaderMap::new();
@@ -4456,6 +4547,55 @@ mod tests {
             .await
             .pop()
             .expect("an OpenRouter order")
+    }
+
+    /// The last OpenRouter buyer note a request with this body produced
+    /// (the server-side loop when it has no `tools`, passthrough when it
+    /// does).
+    async fn note_for(body: Value) -> Value {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "id": "OR-0", "fulfillment_status": "delivered",
+                "delivered_content": delivered_content("ok", "openai/gpt-5-mini", false),
+            }})))
+            .mount(&overpay)
+            .await;
+        let tmp = TempDir::new().unwrap();
+        let s = server_with_session_ids(seeded_state(&overpay.uri(), &tmp), false);
+        s.post("/chat/completions")
+            .json(&body)
+            .await
+            .assert_status_ok();
+        openrouter_notes(&overpay)
+            .await
+            .pop()
+            .expect("an OpenRouter order")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reasoning_effort_rides_every_openrouter_buyer_note() {
+        let messages = json!([{"role": "user", "content": "hi"}]);
+        // The server-side loop, from OpenAI's flat field.
+        let agentic = note_for(json!({
+            "model": "openai/gpt-5-mini", "messages": messages.clone(), "reasoning_effort": "high",
+        }))
+        .await;
+        assert_eq!(agentic["reasoning_effort"], "high", "{agentic}");
+        // A passthrough turn (the caller's own tools), from OpenRouter's object.
+        let tools = json!([{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}]);
+        let passthrough = note_for(json!({
+            "model": "openai/gpt-5-mini", "messages": messages.clone(), "tools": tools,
+            "reasoning": {"effort": "low"},
+        }))
+        .await;
+        assert_eq!(passthrough["reasoning_effort"], "low", "{passthrough}");
+        // Nothing asked, nothing sent: an older seller logs any unknown key.
+        let bare = note_for(json!({"model": "openai/gpt-5-mini", "messages": messages})).await;
+        assert!(bare.get("reasoning_effort").is_none(), "{bare}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4986,7 +5126,12 @@ mod tests {
         listing["data"]["variants"] = json!([
             {
                 "key": "openai/gpt-5-mini", "title": "OpenAI: GPT-5 Mini", "active": true,
-                "metadata": {"context_length": 400000}, "min_authorization_cents": 3,
+                "metadata": {
+                    "context_length": 400000,
+                    "reasoning": {"mandatory": false, "default_enabled": true,
+                                  "supported_efforts": ["low", "medium", "high"], "default_effort": "medium"},
+                },
+                "min_authorization_cents": 3,
                 "rate_card": {
                     "input_cents_per_mtok": 25.0, "output_cents_per_mtok": 200.0,
                     "cache_read_cents_per_mtok": 2.5, "markup": 0.2,
@@ -5028,9 +5173,19 @@ mod tests {
             }),
             "USD per Mtok with the 20% markup in"
         );
+        assert_eq!(
+            mini["reasoning"],
+            json!({"supported_efforts": ["low", "medium", "high"], "default_effort": "medium",
+                   "mandatory": false, "default_enabled": true}),
+            "the variant's reasoning object rides through as published"
+        );
 
         let haiku = &data[2];
         assert_eq!(haiku["active"], false);
+        assert!(
+            haiku.get("reasoning").is_none(),
+            "no reasoning metadata, no reasoning field"
+        );
         assert!(
             haiku.get("name").is_none(),
             "a title equal to the id adds nothing"
@@ -5077,6 +5232,8 @@ mod tests {
             tool_choice: None,
             session_id: None,
             prompt_cache_key: None,
+            reasoning_effort: None,
+            reasoning: None,
             plain: false,
         };
         assert!(validate_request(&state, &req).await.is_ok());
@@ -6245,6 +6402,8 @@ mod tests {
             tool_choice: None,
             session_id: None,
             prompt_cache_key: None,
+            reasoning_effort: None,
+            reasoning: None,
             plain: true,
         };
         assert_eq!(req.client_tools(), Some(&tools[..]));

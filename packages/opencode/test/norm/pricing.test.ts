@@ -22,10 +22,20 @@ const body = {
         min_authorization: 0.11,
         basis: "list",
       },
+      reasoning: { supported_efforts: ["low", "medium", "high", "max"], default_effort: "medium", mandatory: false },
     },
     { id: "gone/model", active: false, pricing: { input: 1, output: 1, min_charge: 0.01 } },
     { id: "unpriced/model" },
+    // Reasoning info without efforts offers nothing to pick.
+    { id: "mandatory/model", reasoning: { mandatory: true, supported_efforts: [] } },
   ],
+}
+
+const sonnetVariants = {
+  low: { reasoningEffort: "low" },
+  medium: { reasoningEffort: "medium" },
+  high: { reasoningEffort: "high" },
+  max: { reasoningEffort: "max" },
 }
 
 const sonnet = () => NormPricing.parseModels(body)![1].pricing!
@@ -33,12 +43,30 @@ const sonnet = () => NormPricing.parseModels(body)![1].pricing!
 describe("NormPricing.parseModels", () => {
   test("reads price, context and availability, and tolerates bare ids", () => {
     const models = NormPricing.parseModels(body)!
-    expect(models.map((m) => m.id)).toEqual(["default", "anthropic/claude-sonnet-5", "gone/model", "unpriced/model"])
+    expect(models.map((m) => m.id)).toEqual([
+      "default",
+      "anthropic/claude-sonnet-5",
+      "gone/model",
+      "unpriced/model",
+      "mandatory/model",
+    ])
     expect(models[0].pricing).toBeUndefined()
     expect(models[1]).toMatchObject({ name: "Anthropic: Claude Sonnet 5", contextLength: 200_000, active: true })
     expect(models[1].pricing).toMatchObject({ input: 3.6, output: 18, cache_read: 0.36, min_authorization: 0.11 })
     expect(models[2].active).toBe(false)
     expect(models[3].pricing).toBeUndefined()
+  })
+
+  test("reads the efforts a model takes, in the seller's order", () => {
+    const models = NormPricing.parseModels(body)!
+    expect(models[1].reasoning).toEqual({
+      supportedEfforts: ["low", "medium", "high", "max"],
+      defaultEffort: "medium",
+      mandatory: false,
+      defaultEnabled: undefined,
+    })
+    expect(models[0].reasoning).toBeUndefined()
+    expect(models[4].reasoning).toBeUndefined()
   })
 
   test("an older owallet's id-only list still parses; an empty one is undefined", () => {
@@ -109,7 +137,31 @@ describe("Norm.modelConfig", () => {
       name: "Anthropic: Claude Sonnet 5",
       cost: { input: 3.6, output: 18, cache_read: 0.36 },
       limit: { context: 200_000, output: 32_000 },
+      variants: sonnetVariants,
     })
+  })
+
+  // The efforts become opencode variants (ctrl+t / `/variant`), each sending
+  // `reasoning_effort` — and only those: `reasoning: true` would have
+  // opencode guess efforts from the model id instead of the seller's list.
+  test("the efforts a model takes are its variants, and nothing else sets reasoning", () => {
+    const models = NormPricing.parseModels(body)!
+    expect(Norm.modelConfig(models[1])).not.toHaveProperty("reasoning")
+    expect(Norm.modelConfig(models[3])).not.toHaveProperty("variants")
+    expect(Norm.modelConfig(models[4])).not.toHaveProperty("variants")
+    expect(Norm.modelConfig({ id: "m", reasoning: { supportedEfforts: ["xhigh"] } })).toEqual({
+      name: "m",
+      variants: { xhigh: { reasoningEffort: "xhigh" } },
+    })
+  })
+
+  // opencode's housekeeping calls (titles, compaction) run with the first
+  // variant's options, so the cheapest effort has to come first whatever
+  // order OpenRouter's catalog listed them in.
+  test("variants are ordered cheapest first", () => {
+    const kimi = Norm.modelConfig({ id: "k", reasoning: { supportedEfforts: ["max", "high", "low"] } })
+    expect(Object.keys(kimi.variants!)).toEqual(["low", "high", "max"])
+    expect(Norm.sortEfforts(["custom", "xhigh", "none", "minimal"])).toEqual(["none", "minimal", "xhigh", "custom"])
   })
 
   test("bare ids get a name only; default keeps its label", () => {
@@ -120,13 +172,25 @@ describe("Norm.modelConfig", () => {
   test("mergeModels skips retired models and never overrides the user's entry", () => {
     const configured: Record<string, object> = {
       "anthropic/claude-sonnet-5": { name: "My Sonnet", limit: { context: 100_000, output: 8_000 } },
+      "mandatory/model": { variants: { mine: { reasoningEffort: "high" } } },
     }
     const merged = Norm.mergeModels(configured, NormPricing.parseModels(body)!)
-    expect(Object.keys(merged).sort()).toEqual(["anthropic/claude-sonnet-5", "default", "unpriced/model"])
+    expect(Object.keys(merged).sort()).toEqual([
+      "anthropic/claude-sonnet-5",
+      "default",
+      "mandatory/model",
+      "unpriced/model",
+    ])
     expect(merged["anthropic/claude-sonnet-5"]).toEqual({
       name: "My Sonnet",
       limit: { context: 100_000, output: 8_000 },
       cost: { input: 3.6, output: 18, cache_read: 0.36 },
+      variants: sonnetVariants,
+    })
+    // The user's own variants stand, like any other field they set.
+    expect(merged["mandatory/model"]).toEqual({
+      name: "mandatory/model",
+      variants: { mine: { reasoningEffort: "high" } },
     })
   })
 

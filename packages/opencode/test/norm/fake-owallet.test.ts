@@ -98,3 +98,23 @@ test("a turn's cost is owallet's charge, and an exhausted budget refuses before 
   expect(fake.requests.at(-1)?.headers["x-owallet-spend-limit-usd"]).toBe("0.00")
   expect(fake.spentCents).toBe(spent)
 }, 180_000)
+
+// The efforts a model's /v1/models entry lists are its variants: picking one
+// sends owallet `reasoning_effort`; picking none sends nothing.
+test("a model variant sends its reasoning effort to owallet", async () => {
+  fake.reply({ text: "thought hard" })
+  const high = await norm(["run", "--format", "json", "-m", "overpay/fake/cheap", "--variant", "high", "think"])
+  expect(high.code, high.stderr).toBe(0)
+  expect(events(high.stdout).find((e) => e.type === "text")?.part.text).toBe("thought hard")
+  const turn = fake.requests.find((r) => !r.housekeeping)!
+  expect(turn.model).toBe("fake/cheap")
+  expect(turn.reasoning_effort).toBe("high")
+  // Housekeeping (titles) ignores the picked variant and runs on the
+  // cheapest effort, the first variant (opencode's smallOptions).
+  for (const call of fake.requests.filter((r) => r.housekeeping)) expect(call.reasoning_effort).toBe("low")
+
+  fake.reply({ text: "plain" })
+  const plain = await norm(["run", "--format", "json", "-m", "overpay/fake/cheap", "think again"])
+  expect(plain.code, plain.stderr).toBe(0)
+  expect(fake.requests.filter((r) => !r.housekeeping).at(-1)?.reasoning_effort).toBeUndefined()
+}, 180_000)

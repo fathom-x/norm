@@ -38,7 +38,14 @@ syncs stay cheap:
   Where owallet reports them (each `/v1/models` entry's `pricing`,
   `context_length`, `active`), `Norm.modelConfig` turns them into the
   model's `cost` and `limit` — without a context limit opencode never
-  auto-compacts — and retired models are left out.
+  auto-compacts — and retired models are left out. An entry's `reasoning`
+  (the seller's `metadata.reasoning`: `supported_efforts`, …) becomes the
+  model's `variants` — one per effort, each `{reasoningEffort}`, cheapest
+  first (`Norm.sortEfforts`; opencode's housekeeping calls run on the
+  *first* variant), so ctrl+t / `/variant` / `--variant` work on the
+  overpay provider and the request carries `reasoning_effort`, which
+  owallet forwards to the seller. Never `reasoning: true`: opencode would
+  then guess efforts from the model id.
 - **What models cost** (`packages/core/src/norm-pricing.ts`): parsing,
   list-price estimates (per-turn minimum charge, cache reads,
   long-context tiers) and owallet's refusal floor for the per-message

@@ -14,7 +14,7 @@
 //   POST /_fake/replies   [{ text?, tool?: {name, args}, charged_cents?,
 //                           wallet_spent_cents?, error?: {status?, code, message} }]
 //                         queued, one per chat request
-//   GET  /_fake/requests  chat requests seen (headers norm sent, model, last message)
+//   GET  /_fake/requests  chat requests seen (headers norm sent, model, variant effort, last message)
 //   GET  /_fake/state     spend so far, queue length
 //   POST /_fake/reset     clear queue, log and spend
 // Housekeeping requests (norm's title/compaction/summary calls) skip the
@@ -44,6 +44,8 @@ export type FakeRequest = {
   tools: string[]
   /** norm's title/compaction/summary calls (`x-owallet-tools: none`). */
   housekeeping: boolean
+  /** The model variant's effort, when the request carried one. */
+  reasoning_effort?: string
 }
 
 export type FakeOwalletOptions = {
@@ -143,6 +145,7 @@ export function startFakeOwallet(options: FakeOwalletOptions) {
       last: last ? { role: last.role, content: textOf(last.content).slice(0, 500) } : undefined,
       tools: (body.tools ?? []).map((t: any) => t?.function?.name).filter(Boolean),
       housekeeping,
+      reasoning_effort: typeof body.reasoning_effort === "string" ? body.reasoning_effort : undefined,
     })
 
     const reply = (housekeeping ? undefined : (queue.shift() ?? directive(last))) ?? fallback(last)
@@ -250,6 +253,9 @@ const MODELS = [
     name: "Fake cheap model",
     context_length: 32000,
     pricing: { input: 0.1, output: 0.2 },
+    // As owallet reports a seller's `metadata.reasoning`: norm offers these
+    // efforts as the model's variants.
+    reasoning: { supported_efforts: ["low", "high"], default_effort: "low", mandatory: false, default_enabled: true },
   },
 ]
 

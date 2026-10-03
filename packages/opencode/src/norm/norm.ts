@@ -941,12 +941,21 @@ export function marketplaceModels(): Promise<NormPricing.Model[] | undefined> {
 /**
  * A marketplace model as an opencode config model: its name, list price as
  * `cost` (USD per Mtok; the long-context tiers don't fit opencode's schema
- * and stay with NormPricing's estimates) and its context window as `limit`.
+ * and stay with NormPricing's estimates), its context window as `limit`,
+ * and the reasoning efforts it takes as `variants` — one per effort, each
+ * setting `reasoningEffort`, which `@ai-sdk/openai-compatible` sends
+ * owallet as `reasoning_effort`. Cheapest first (`sortEfforts`): opencode
+ * runs its housekeeping calls (titles, compaction) with the *first*
+ * variant's options (`ProviderTransform.smallOptions`), and ctrl+t cycles
+ * from it. Deliberately *not* `reasoning: true`: that would make opencode
+ * guess efforts from the model id (`ProviderTransform.variants`), and the
+ * seller's list is the authority.
  * Without a known window opencode reads 0 and never auto-compacts, so a long
  * conversation re-sends — and pays for — its whole history every turn.
  */
 export function modelConfig(model: NormPricing.Model) {
   const pricing = model.pricing
+  const efforts = sortEfforts(model.reasoning?.supportedEfforts ?? [])
   return {
     name: model.id === "default" ? "Overpay marketplace (default)" : (model.name ?? model.id),
     ...(pricing && {
@@ -957,7 +966,26 @@ export function modelConfig(model: NormPricing.Model) {
       },
     }),
     ...(model.contextLength && { limit: NormPricing.limit(model.contextLength) }),
+    ...(efforts.length && {
+      variants: Object.fromEntries(efforts.map((effort) => [effort, { reasoningEffort: effort }])),
+    }),
   }
+}
+
+/** OpenRouter's efforts, cheapest first. */
+const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+/**
+ * A model's efforts cheapest first — OpenRouter's catalog lists them in no
+ * fixed order (Kimi: max, high, low) — with any effort this doesn't know
+ * after the known ones, in the seller's order.
+ */
+export function sortEfforts(efforts: string[]) {
+  const rank = (effort: string) => {
+    const i = EFFORT_ORDER.indexOf(effort)
+    return i === -1 ? EFFORT_ORDER.length : i
+  }
+  return [...efforts].sort((a, b) => rank(a) - rank(b))
 }
 
 /**
