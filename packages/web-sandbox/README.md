@@ -45,6 +45,7 @@ Run from `packages/web-sandbox`.
 | Unit tests | `bun run test` |
 | Browser test (build, then headless Chromium) | `bun run test:browser` |
 | The real norm through the broker (local provider, mock Overpay) | `bun run test:norm` |
+| The same on real E2B + staging Overpay (needs `E2B_API_KEY`) | `bun run test:e2b` |
 | Build the E2B template | `bun run template:build` (see `template/README.md`) |
 | Typecheck | `bun run typecheck` |
 
@@ -97,8 +98,15 @@ credits → the TUI → a prompt answered by the mock seller through owallet,
 with its real charge in the sidebar → a reload resumes the same norm process.
 Screenshots: `test/screenshots/norm-*.png`.
 
-Not yet: the same flow on real E2B against staging Overpay — it needs
-`E2B_API_KEY` and a built template.
+### The live E2B test
+
+`test/browser/e2b-live.mjs` (`bun run test:e2b`) runs the same flow on real
+E2B (the `e2b` provider and the built `norm-demo` template) against the real
+Overpay in `OVERPAY_HOSTS` (staging by default): sandbox created → first run
+→ new account → demo credits when offered → a finished turn → a reload
+resumes the same sandbox → the sandbox is deleted. It prints the step
+timings (create/resume latency). Skips without `E2B_API_KEY`; spends a few
+cents of the new account's credits, so the Overpay should offer demo credits.
 
 ## Deploy (one demo service)
 
