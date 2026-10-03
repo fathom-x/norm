@@ -1387,7 +1387,10 @@ export function Prompt(props: PromptProps) {
           <text flexShrink={0} fg={borderHighlight()}>
             {"> "}
           </text>
-          <box flexShrink={0} flexGrow={1}>
+          {/* norm: shrinkable with no minimum width, so in this row the
+              textarea keeps the row's width and wraps long lines instead of
+              widening off-screen. */}
+          <box flexShrink={1} flexGrow={1} minWidth={0}>
             <textarea
               width="100%"
               placeholder={placeholderText()}
