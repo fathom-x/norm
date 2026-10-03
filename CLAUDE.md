@@ -159,8 +159,11 @@ opencode: the binary is `norm` (`packages/opencode/package.json` bin →
 `bin/norm`, yargs `scriptName`), and the app identity in
 `packages/core/src/global.ts` is `norm`, so all XDG state is norm's
 own (`~/.config/norm`, `~/.local/share/norm` incl. `auth.json`, cache,
-state). The wordmark/TUI logo spell "norm" (`packages/tui/src/logo.ts`,
-`util/presentation.ts`, `cli/ui.ts`); the terminal window title is
+state). There is no ASCII-art logo: the banner is "Norm <version>"
+(`cli/ui.ts` `logo()`, also printed by `norm`/`norm tui` ahead of the
+first-run wallet prompts in `cli/cmd/tui.ts`), the TUI home logo is the
+word "Norm" (`tui/src/component/logo.tsx`), and the exit summary is just
+the session lines (`tui/src/util/presentation.ts`); the terminal window title is
 "Norm" / "Norm | <session title>" (`tui/src/app.tsx`).
 
 Deliberately *kept* from upstream for compatibility and cheap merges:

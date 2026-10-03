@@ -4,6 +4,7 @@ import { type rpc } from "../tui/worker"
 import path from "path"
 import { fileURLToPath } from "url"
 import { UI } from "@/cli/ui"
+import { EOL } from "os"
 import { errorMessage } from "@opencode-ai/tui/util/error"
 import { withTimeout } from "@/util/timeout"
 import { withNetworkOptions, resolveNetworkOptionsNoConfig, hasArg } from "@/cli/network"
@@ -156,6 +157,8 @@ export const TuiThreadCommand = cmd({
     // interactively for a pre-existing install. Never blocks startup on
     // failure.
     {
+      // norm: "Norm <version>" ahead of any prompts (no ASCII art).
+      if (process.stdin.isTTY && process.stderr.isTTY) process.stderr.write(UI.logo() + EOL)
       const { Norm } = await import("@/norm/norm")
       await Norm.firstRunOwalletChoice(UI.input).catch(() => {})
       await Norm.firstRunWalletSetup(UI.input, UI.inputSecret).catch(() => {})
