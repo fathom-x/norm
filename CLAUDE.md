@@ -107,7 +107,10 @@ syncs stay cheap:
   sidebar (session route and home). The hints row shows "$spent / $core" — the
   conversation's spend over the wallet's core credits — from one
   `/v1/status` poller the owallet plugin runs for the whole app
-  (`component/norm-balance.ts`), re-read when a turn ends.
+  (`component/norm-balance.ts`), re-read when a turn ends. ctrl+c on an empty
+  prompt exits only on a second press within 2 s ("ctrl+c again to exit"
+  in the hints row; `component/norm-exit.ts`, bound in `app.tsx`, and
+  dropped from `app_exit`'s defaults in `config/keybind.ts`).
   Edits: `routes/home.tsx`, `tui/src/component/prompt/index.tsx` (`Meta`),
   `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
   `feature-plugins/sidebar/footer.tsx` — expect conflicts there on syncs.

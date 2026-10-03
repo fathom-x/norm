@@ -60,6 +60,7 @@ import { DialogAlert } from "./ui/dialog-alert"
 import { DialogConfirm } from "./ui/dialog-confirm"
 import { ToastProvider, useToast } from "./ui/toast"
 import { isDefaultTitle } from "./util/session"
+import { NormExit } from "./component/norm-exit"
 import { KVProvider, useKV } from "./context/kv"
 import * as Model from "./util/model"
 import { ArgsProvider, useArgs, type Args } from "./context/args"
@@ -981,6 +982,28 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       return current.current.input === ""
     },
     bindings: tuiConfig.keybinds.gather("app_exit", ["app.exit"]),
+  }))
+
+  // norm: ctrl+c on an empty prompt exits only when pressed twice within
+  // 2 s; the first press shows "ctrl+c again to exit" in the hints row.
+  // With text in the prompt, ctrl+c clears it (prompt.clear) as upstream.
+  useBindings(() => ({
+    mode: OPENCODE_BASE_MODE,
+    enabled: () => {
+      const current = promptRef.current
+      if (!current?.focused) return true
+      return current.current.input === ""
+    },
+    bindings: [
+      {
+        key: "ctrl+c",
+        desc: "Exit (press twice)",
+        group: "System",
+        cmd: () => {
+          if (NormExit.press()) void exit()
+        },
+      },
+    ],
   }))
 
   event.on("tui.command.execute", (evt, { workspace }) => {

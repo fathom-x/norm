@@ -55,6 +55,7 @@ import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { NormBalance } from "../norm-balance"
+import { NormExit } from "../norm-exit"
 import { isDefaultTitle } from "../../util/session"
 
 registerOpencodeSpinner()
@@ -1654,6 +1655,11 @@ export function Prompt(props: PromptProps) {
               <Switch>
                 <Match when={store.mode === "normal"}>
                   <Switch>
+                    <Match when={NormExit.armed()}>
+                      <text fg={theme.primary} wrapMode="none">
+                        ctrl+c again to exit
+                      </text>
+                    </Match>
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
