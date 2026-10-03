@@ -7,23 +7,34 @@ body {
   overflow: hidden;
   background: var(--term-bg);
 }
-#terminal {
-  position: fixed;
-  inset: 0;
-  padding: 6px 0 0 8px;
-  background: var(--term-bg);
-}
+/* A slim bar of its own above the terminal: a floating control would cover
+   the TUI's top-right corner (its sidebar title). */
 #toolbar {
   position: fixed;
-  top: 6px;
-  right: 10px;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 26px;
   z-index: 5;
   display: flex;
   gap: 10px;
   align-items: center;
+  justify-content: flex-end;
+  padding: 0 10px;
   font-size: 12px;
-  opacity: 0.55;
+  background: var(--term-bg);
+  border-bottom: 1px solid #292524;
+  opacity: 0.7;
   transition: opacity 120ms;
+}
+#toolbar a {
+  margin-right: auto;
+}
+#terminal {
+  position: fixed;
+  inset: 26px 0 0 0;
+  padding: 4px 0 0 8px;
+  background: var(--term-bg);
 }
 #toolbar:hover,
 #toolbar:focus-within {

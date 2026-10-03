@@ -12,7 +12,9 @@
     "start": "bun server/main.ts",
     "typecheck": "tsgo --noEmit",
     "test": "bun test ./test/unit",
-    "test:browser": "bun run build && node ./test/browser/local.mjs"
+    "test:browser": "bun run build && node ./test/browser/local.mjs",
+    "test:norm": "bun run build && node ./test/browser/norm.mjs",
+    "template:build": "bun template/build.ts"
   },
   "dependencies": {
     "bun-pty": "0.4.8",
