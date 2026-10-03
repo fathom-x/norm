@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@opencode-ai/web-tui",
+  "version": "1.18.18",
+  "description": "norm in the browser: the opencode core in a Web Worker",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsgo --noEmit",
+    "test": "bun test --conditions=browser --preload ./happydom.ts ./src ./test/unit",
+    "test:browser": "bun run build && node ./test/browser/smoke.mjs"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "20.0.11",
+    "@tsconfig/bun": "catalog:",
+    "@types/bun": "catalog:",
+    "@types/path-browserify": "1.0.3",
+    "@typescript/native-preview": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-solid": "catalog:"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.2.0",
+    "@opencode-ai/core": "workspace:*",
+    "@opencode-ai/effect-drizzle-sqlite": "workspace:*",
+    "@opencode-ai/schema": "workspace:*",
+    "@sqlite.org/sqlite-wasm": "3.53.4-build1",
+    "@zenfs/core": "2.7.6",
+    "@zenfs/dom": "1.2.14",
+    "buffer": "6.0.3",
+    "drizzle-orm": "catalog:",
+    "effect": "catalog:",
+    "events": "3.3.0",
+    "kerium": "1.5.0",
+    "opencode": "workspace:*",
+    "path-browserify": "1.0.1",
+    "readable-stream": "4.7.0",
+    "solid-js": "catalog:",
+    "utilium": "3.9.0"
+  }
+}

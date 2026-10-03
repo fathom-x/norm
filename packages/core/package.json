@@ -26,16 +26,19 @@
     "#sqlite": {
       "bun": "./src/database/sqlite.bun.ts",
       "node": "./src/database/sqlite.node.ts",
+      "browser": "./src/database/sqlite.browser.ts",
       "default": "./src/database/sqlite.bun.ts"
     },
     "#pty": {
       "bun": "./src/pty/pty.bun.ts",
       "node": "./src/pty/pty.node.ts",
+      "browser": "./src/pty/pty.browser.ts",
       "default": "./src/pty/pty.bun.ts"
     },
     "#fff": {
       "bun": "./src/filesystem/fff.bun.ts",
       "node": "./src/filesystem/fff.node.ts",
+      "browser": "./src/filesystem/fff.browser.ts",
       "default": "./src/filesystem/fff.bun.ts"
     }
   },
@@ -100,6 +103,7 @@
     "@opentelemetry/sdk-trace-base": "2.6.1",
     "@parcel/watcher": "2.5.1",
     "@silvia-odwyer/photon-node": "0.3.4",
+    "@sqlite.org/sqlite-wasm": "3.53.4-build1",
     "@openrouter/ai-sdk-provider": "2.9.0",
     "ai-gateway-provider": "3.1.2",
     "bun-pty": "0.4.8",
@@ -124,6 +128,7 @@
     "venice-ai-sdk-provider": "2.1.1",
     "which": "6.0.1",
     "xdg-basedir": "5.1.0",
+    "@zenfs/core": "2.7.6",
     "zod": "catalog:"
   },
   "overrides": {
