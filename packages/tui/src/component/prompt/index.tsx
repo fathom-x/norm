@@ -16,10 +16,9 @@ import { fileURLToPath } from "url"
 import { useLocal } from "../../context/local"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { tint, useTheme } from "../../context/theme"
-import { EmptyBorder, SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { useClipboard } from "../../context/clipboard"
-import { Spinner } from "../spinner"
+import { Spinner, SPINNER_FRAMES } from "../spinner"
 import { useSDK } from "../../context/sdk"
 import { useRoute } from "../../context/route"
 import { useProject } from "../../context/project"
@@ -41,7 +40,6 @@ import type { AssistantMessage, FilePart, UserMessage } from "@opencode-ai/sdk/v
 import { Locale } from "../../util/locale"
 import { errorMessage } from "../../util/error"
 import { formatDuration } from "../../util/format"
-import { createColors, createFrames } from "../../ui/spinner"
 import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
@@ -56,7 +54,7 @@ import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
-import { useLocation } from "../../context/location"
+import { NormBalance } from "../norm-balance"
 
 registerOpencodeSpinner()
 
@@ -149,7 +147,6 @@ export function Prompt(props: PromptProps) {
   const local = useLocal()
   const args = useArgs()
   const paths = useTuiPaths()
-  const location = useLocation()
   const terminalEnvironment = useTuiTerminalEnvironment()
   const clipboard = useClipboard()
   const sdk = useSDK()
@@ -249,8 +246,8 @@ export function Prompt(props: PromptProps) {
 
   createEffect(() => {
     if (!input || input.isDestroyed) return
-    if (props.disabled) input.cursorColor = theme.backgroundElement
-    if (!props.disabled) input.cursorColor = theme.text
+    if (props.disabled) input.cursorColor = theme.background
+    if (!props.disabled) input.cursorColor = theme.textMuted
     if (tuiConfig.cursor) input.cursorStyle = tuiConfig.cursor
   })
 
@@ -274,11 +271,19 @@ export function Prompt(props: PromptProps) {
 
     const model = sync.data.provider.find((item) => item.id === last.providerID)?.models[last.modelID]
     const pct = model?.limit.context ? `${Math.round((tokens / model.limit.context) * 100)}%` : undefined
-    const cost = session?.cost ?? 0
     return {
       context: pct ? `${Locale.number(tokens)} (${pct})` : Locale.number(tokens),
-      cost: cost > 0 ? money.format(cost) : undefined,
     }
+  })
+
+  // norm: "$spent / $core" — this conversation's spend over the wallet's
+  // Overpay core-credit balance (NormBalance, read by the owallet plugin);
+  // just the spend when the balance isn't known.
+  const spend = createMemo(() => {
+    const cost = props.sessionID ? (sync.session.get(props.sessionID)?.cost ?? 0) : 0
+    const core = NormBalance.coreCents()
+    if (core === undefined) return cost > 0 ? money.format(cost) : undefined
+    return `${money.format(cost)} / ${money.format(core / 100)}`
   })
 
   const [store, setStore] = createStore<{
@@ -1319,56 +1324,89 @@ export function Prompt(props: PromptProps) {
     return `Ask anything... "${list()[store.placeholder % list().length]}"`
   })
 
-  const spinnerDef = createMemo(() => {
+  // norm: the working indicator is one braille character in the working
+  // mode's color (upstream: an 8-cell block sweep).
+  const spinnerColor = createMemo(() => {
     const agent =
       status().type !== "idle"
         ? (local.agent.list().find((a) => a.name === lastUserMessage()?.agent) ?? local.agent.current())
         : local.agent.current()
-    const color = agent ? local.agent.color(agent.name) : theme.border
-    return {
-      frames: createFrames({
-        color,
-        style: "blocks",
-        inactiveFactor: 0.6,
-        // enableFading: false,
-        minAlpha: 0.3,
-      }),
-      color: createColors({
-        color,
-        style: "blocks",
-        inactiveFactor: 0.6,
-        // enableFading: false,
-        minAlpha: 0.3,
-      }),
-    }
+    return agent ? local.agent.color(agent.name) : theme.border
   })
   const maxHeight = createMemo(() => tuiConfig.prompt?.max_height ?? Math.max(6, Math.floor(dimensions().height / 3)))
   const moveLabelWidth = createMemo(() => Math.max(12, Math.min(44, dimensions().width - 48)))
 
+  // norm: agent · model · provider lives in the hints row under the input
+  // (upstream gives it a row of its own inside the input panel), so the
+  // textarea sits on the third row from the bottom.
+  const Meta = () => (
+    <box flexDirection="row" gap={1} flexShrink={1} height={1} overflow="hidden">
+      <Show when={local.agent.current()} fallback={<box height={1} />}>
+        {(agent) => (
+          <>
+            <text flexShrink={0} wrapMode="none" fg={fadeColor(highlight(), agentMetaAlpha())}>
+              {store.mode === "shell" ? "Shell" : Locale.titlecase(agent().name)}
+            </text>
+            <Show when={store.mode === "normal" && local.permission.mode === "auto"}>
+              <text fg={fadeColor(theme.textMuted, agentMetaAlpha())}>auto</text>
+            </Show>
+            <Show when={store.mode === "normal"}>
+              <box flexDirection="row" gap={1} flexShrink={1} overflow="hidden">
+                <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
+                <text
+                  flexShrink={0}
+                  wrapMode="none"
+                  fg={fadeColor(leader() ? theme.textMuted : theme.text, modelMetaAlpha())}
+                >
+                  {local.model.parsed().model}
+                </text>
+                <text wrapMode="none" fg={fadeColor(theme.textMuted, modelMetaAlpha())}>
+                  {currentProviderLabel()}
+                </text>
+                <Show when={showVariant()}>
+                  <text fg={fadeColor(theme.textMuted, variantMetaAlpha())}>·</text>
+                  <text>
+                    <span style={{ fg: fadeColor(theme.warning, variantMetaAlpha()), bold: true }}>
+                      {local.model.variant.current()}
+                    </span>
+                  </text>
+                </Show>
+              </box>
+            </Show>
+          </>
+        )}
+      </Show>
+    </box>
+  )
+
   return (
     <>
       <box ref={(r: BoxRenderable) => (anchor = r)} visible={props.visible !== false} width="100%">
+        {/* norm: a plain "> " in the agent's color between two muted rules,
+            instead of upstream's shaded panel (left bar, padding row,
+            half-block bottom edge). */}
         <box
           width="100%"
-          border={["left"]}
-          borderColor={borderHighlight()}
-          customBorderChars={{
-            ...SplitBorder.customBorderChars,
-            bottomLeft: "╹",
-          }}
+          flexDirection="row"
+          paddingLeft={1}
+          paddingRight={2}
+          border={["top", "bottom"]}
+          borderColor={theme.border}
         >
-          <box
-            paddingLeft={2}
-            paddingRight={2}
-            paddingTop={1}
-            flexShrink={0}
-            backgroundColor={theme.backgroundElement}
-            flexGrow={1}
-            width="100%"
-          >
+          <text flexShrink={0} fg={borderHighlight()}>
+            {"> "}
+          </text>
+          {/* norm: shrinkable with no minimum width, so in this row the
+              textarea keeps the row's width and wraps long lines instead of
+              widening off-screen. */}
+          <box flexShrink={1} flexGrow={1} minWidth={0}>
             <textarea
               width="100%"
               placeholder={placeholderText()}
+              // norm: no cursor over the placeholder's first letter; it
+              // appears with the first character typed. Only the new-chat
+              // prompt has a placeholder, so conversations keep theirs.
+              showCursor={!placeholderText() || store.prompt.input !== ""}
               placeholderColor={theme.textMuted}
               textColor={leader() ? theme.textMuted : theme.text}
               focusedTextColor={leader() ? theme.textMuted : theme.text}
@@ -1431,86 +1469,19 @@ export function Prompt(props: PromptProps) {
                 setTimeout(() => {
                   // setTimeout is a workaround and needs to be addressed properly
                   if (!input || input.isDestroyed) return
-                  input.cursorColor = theme.text
+                  input.cursorColor = theme.textMuted
                   if (tuiConfig.cursor) input.cursorStyle = tuiConfig.cursor
                 }, 0)
               }}
               onMouseDown={(r: MouseEvent) => r.target?.focus()}
-              focusedBackgroundColor={theme.backgroundElement}
-              cursorColor={props.disabled ? theme.backgroundElement : theme.text}
+              focusedBackgroundColor={theme.background}
+              cursorColor={props.disabled ? theme.background : theme.textMuted}
               cursorStyle={tuiConfig.cursor}
               syntaxStyle={syntax()}
             />
-            <box flexDirection="row" flexShrink={0} paddingTop={1} gap={1} justifyContent="space-between">
-              <box flexDirection="row" gap={1}>
-                <Show when={local.agent.current()} fallback={<box height={1} />}>
-                  {(agent) => (
-                    <>
-                      <text fg={fadeColor(highlight(), agentMetaAlpha())}>
-                        {store.mode === "shell" ? "Shell" : Locale.titlecase(agent().name)}
-                      </text>
-                      <Show when={store.mode === "normal" && local.permission.mode === "auto"}>
-                        <text fg={fadeColor(theme.textMuted, agentMetaAlpha())}>auto</text>
-                      </Show>
-                      <Show when={store.mode === "normal"}>
-                        <box flexDirection="row" gap={1}>
-                          <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
-                          <text
-                            flexShrink={0}
-                            fg={fadeColor(leader() ? theme.textMuted : theme.text, modelMetaAlpha())}
-                          >
-                            {local.model.parsed().model}
-                          </text>
-                          <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>{currentProviderLabel()}</text>
-                          <Show when={showVariant()}>
-                            <text fg={fadeColor(theme.textMuted, variantMetaAlpha())}>·</text>
-                            <text>
-                              <span style={{ fg: fadeColor(theme.warning, variantMetaAlpha()), bold: true }}>
-                                {local.model.variant.current()}
-                              </span>
-                            </text>
-                          </Show>
-                        </box>
-                      </Show>
-                    </>
-                  )}
-                </Show>
-              </box>
-              <Show when={hasRightContent()}>
-                <box flexDirection="row" gap={1} alignItems="center">
-                  {props.right}
-                </box>
-              </Show>
-            </box>
           </box>
         </box>
-        <box
-          height={1}
-          border={["left"]}
-          borderColor={borderHighlight()}
-          customBorderChars={{
-            ...EmptyBorder,
-            vertical: theme.backgroundElement.a !== 0 ? "╹" : " ",
-          }}
-        >
-          <box
-            height={1}
-            border={["bottom"]}
-            borderColor={theme.backgroundElement}
-            customBorderChars={
-              theme.backgroundElement.a !== 0
-                ? {
-                    ...EmptyBorder,
-                    horizontal: "▀",
-                  }
-                : {
-                    ...EmptyBorder,
-                    horizontal: " ",
-                  }
-            }
-          />
-        </box>
-        <box width="100%" flexDirection="row" justifyContent="space-between">
+        <box width="100%" flexDirection="row" justifyContent="space-between" gap={2} paddingRight={1}>
           <Switch>
             <Match when={status().type !== "idle"}>
               <box
@@ -1520,9 +1491,12 @@ export function Prompt(props: PromptProps) {
                 justifyContent={status().type === "retry" ? "space-between" : "flex-start"}
               >
                 <box flexShrink={0} flexDirection="row" gap={1}>
-                  <box marginLeft={1}>
-                    <Show when={kv.get("animations_enabled", true)} fallback={<text fg={theme.textMuted}>[⋯]</text>}>
-                      <spinner color={spinnerDef().color} frames={spinnerDef().frames} interval={40} />
+                  {/* norm: one column at 1, a space, then Meta at column 3 —
+                      where typed text starts and where it sits when idle, so
+                      "Build" doesn't move while working. */}
+                  <box marginLeft={1} width={1} flexShrink={0}>
+                    <Show when={kv.get("animations_enabled", true)} fallback={<text fg={spinnerColor()}>⋯</text>}>
+                      <spinner color={spinnerColor()} frames={SPINNER_FRAMES} interval={80} />
                     </Show>
                   </box>
                   <box flexDirection="row" gap={1} flexShrink={0}>
@@ -1575,7 +1549,7 @@ export function Prompt(props: PromptProps) {
                       }
 
                       return (
-                        <Show when={retry()}>
+                        <Show when={retry()} fallback={<Meta />}>
                           <box onMouseUp={handleMessageClick}>
                             <text fg={theme.error}>{retryText()}</text>
                           </box>
@@ -1644,16 +1618,19 @@ export function Prompt(props: PromptProps) {
             </Match>
             <Match when={true}>
               {props.hint ?? (
-                <Show when={props.sessionID}>
-                  <box marginLeft={1}>
-                    <text fg={theme.textMuted}>{location()?.directory ?? paths.cwd}</text>
-                  </box>
-                </Show>
+                <box marginLeft={3} flexShrink={1}>
+                  <Meta />
+                </box>
               )}
             </Match>
           </Switch>
           <Show when={status().type !== "retry"}>
-            <box gap={2} flexDirection="row">
+            <box gap={2} flexDirection="row" flexShrink={0}>
+              <Show when={hasRightContent()}>
+                <box flexDirection="row" gap={1} alignItems="center">
+                  {props.right}
+                </box>
+              </Show>
               <Show when={editorContextLabelState() !== "none" ? editorFileLabelDisplay() : undefined}>
                 {(file) => (
                   <text fg={editorContextLabelState() === "pending" ? theme.secondary : theme.textMuted}>{file()}</text>
@@ -1665,7 +1642,14 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
-                          {[item().context, item().cost].filter(Boolean).join(" · ")}
+                          {[item().context, spend()].filter(Boolean).join(" · ")}
+                        </text>
+                      )}
+                    </Match>
+                    <Match when={spend()}>
+                      {(value) => (
+                        <text fg={theme.textMuted} wrapMode="none">
+                          {value()}
                         </text>
                       )}
                     </Match>

@@ -18,6 +18,9 @@ export function useNormModelPrice() {
   const route = useRoute()
   const sync = useSync()
   const toast = useToast()
+  // In a conversation: what the next message would cost on each model, or
+  // (toggled) the list price.
+  const [listPrice, setListPrice] = createSignal(false)
   const [requestMax, setRequestMax] = createSignal<number | null>(NormBudget.DEFAULT_REQUEST_MAX_USD)
   void NormBudget.getRequestMax().then(setRequestMax, () => {})
 
@@ -45,10 +48,14 @@ export function useNormModelPrice() {
   }
 
   return {
+    /** Whether there's a "next message" price to toggle away from. */
+    toggleable: () => route.data.type === "session",
+    listPrice,
+    togglePricing: () => setListPrice((value) => !value),
     footer(providerID: string, modelID: string, cost: Cost): string | undefined {
       const result = next(providerID, modelID, cost)
       if (!result) return undefined
-      if (!result.step) return NormPricing.perMillion(result.price)
+      if (!result.step || listPrice()) return NormPricing.perMillion(result.price)
       const max = requestMax()
       if (max !== null && result.step.least > max) return `over your ${NormBudget.format(max)} limit`
       return `next ≈ ${NormPricing.money(result.step.usd)}`
