@@ -16,6 +16,7 @@
     "solid-js": "1.9.12"
   },
   "devDependencies": {
+    "playwright": "1.56.1",
     "vite": "7.1.4",
     "vite-plugin-solid": "2.11.10"
   }

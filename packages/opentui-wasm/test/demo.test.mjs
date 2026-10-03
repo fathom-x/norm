@@ -8,8 +8,21 @@ import http from "node:http"
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import pkg from "/opt/node22/lib/node_modules/playwright/index.js"
-const { chromium } = pkg
+import { createRequire } from "node:module"
+
+// Playwright comes from demo/'s devDependencies (CI installs it there and runs
+// `npx playwright install chromium`); the Claude Code container's global copy
+// is the fallback. CHROMIUM_PATH pins a browser binary explicitly.
+function loadPlaywright() {
+  const fromDemo = createRequire(new URL("../demo/package.json", import.meta.url))
+  for (const load of [() => fromDemo("playwright"), () => fromDemo("/opt/node22/lib/node_modules/playwright")]) {
+    try {
+      return load()
+    } catch {}
+  }
+  throw new Error("playwright is not installed — run `npm install` in demo/")
+}
+const { chromium } = loadPlaywright()
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const distDir = path.resolve(here, "../demo/dist")
