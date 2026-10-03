@@ -160,6 +160,29 @@ syncs stay cheap:
   `norm run` still exits when the turn ends, so a wakeup only fires in
   the TUI or under `norm serve`. Tests: `test/norm/schedule-wakeup.test.ts`.
 
+- **Monitor and TaskStop** (`src/norm/tool/monitor.ts`, `task-stop.ts`,
+  engine in `src/norm/background.ts`, `BackgroundTask`): `Monitor` runs a
+  shell command outside any turn; stdout lines (batched over 200 ms)
+  reach the session as `<task-notification>` messages through
+  `SessionWake.deliver`, stderr only reaches the output file (in the
+  tool-output dir, so the read tool can open it). It ends with one
+  notice on exit (exit code), at `timeout_ms` (default 5 min, max 30),
+  or when it floods (more than 30 notifications a minute). Monitor does
+  not spawn anything itself: it calls the shell tool with a `normDetach`
+  handler in the tool context, so `tool/shell.ts` does its usual
+  permission ask (`bash` rules), cwd and env resolution and then hands
+  the prepared command over instead of running it (the one hook-in
+  there). Tasks are `BackgroundJob`s filed under
+  `metadata.ownerSessionId`, deliberately not `sessionId`: Esc cancels
+  jobs filed under `sessionId`, and a monitor must survive Esc. They die
+  on `TaskStop`, session delete (`session/session.ts` matcher), and
+  instance dispose (so also a TUI config reload). Claude Code's
+  WebSocket source (`ws`) is not implemented. In the TUI a notification
+  message renders as one muted line and does not count as a queued
+  message (`tui/src/util/norm-notification.ts`, `norm-queue.ts`), so esc
+  still interrupts while one waits. Tests: `test/norm/monitor.test.ts`,
+  `packages/tui/test/util/norm-notification.test.ts`.
+
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until

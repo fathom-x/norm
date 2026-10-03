@@ -56,6 +56,7 @@ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { McpCatalog } from "@/mcp/catalog"
 import { NormTools } from "@/norm/tools"
 import { SessionWake } from "@/norm/wake"
+import { BackgroundTask } from "@/norm/background"
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return providerID === ProviderV2.ID.opencode || flags.exa || flags.parallel
@@ -439,6 +440,7 @@ export const node = LayerNode.make({
     Session.node,
     BackgroundJob.node,
     SessionWake.node,
+    BackgroundTask.node,
     Provider.node,
     LSP.node,
     Instruction.node,

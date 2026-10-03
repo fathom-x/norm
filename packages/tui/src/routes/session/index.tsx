@@ -55,6 +55,7 @@ import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
 import { queuedCount } from "../../util/norm-queue"
+import { notice } from "../../util/norm-notification"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
@@ -1349,7 +1350,7 @@ export function Session() {
                   )}
                 </For>
                 {/* norm: once, under the queued messages */}
-                <Show when={queuedCount(messages()) > 0}>
+                <Show when={queuedCount(messages(), sync.data.part) > 0}>
                   <box paddingLeft={3} marginTop={1} flexShrink={0}>
                     <text fg={theme.textMuted}>
                       press <span style={{ fg: theme.text }}>esc</span> to send immediately
@@ -1453,9 +1454,16 @@ function UserMessage(props: {
   const queuedFg = createMemo(() => selectedForeground(theme, color()))
 
   const compaction = createMemo(() => props.parts.find((x) => x.type === "compaction"))
+  // norm: a background notification has no visible text of its own.
+  const notification = createMemo(() => (text() ? undefined : notice(props.parts)))
 
   return (
     <>
+      <Show when={notification()}>
+        <box id={props.message.id} paddingLeft={3} marginTop={props.index === 0 ? 0 : 1} flexShrink={0}>
+          <text fg={theme.textMuted}>{notification()}</text>
+        </box>
+      </Show>
       <Show when={text()}>
         <box
           id={props.message.id}
