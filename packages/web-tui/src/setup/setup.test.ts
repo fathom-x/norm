@@ -1,14 +1,15 @@
 import { describe, expect, test, beforeEach } from "bun:test"
-import { runSetup, type Status } from "./setup"
+import { coreBalanceCents, runSetup, type Status } from "./setup"
 
 // A fake owallet-web /_mgmt: just enough state to walk the setup flow.
-function fakeOwallet(initial: Partial<Status> & { password?: string } = {}) {
+function fakeOwallet(initial: Partial<Status> & { password?: string; credits?: number } = {}) {
   const state = {
     initialized: false,
     unlocked: false,
     wallet: null as { npub: string } | null,
     overpay_linked: false,
     password: undefined as string | undefined,
+    credits: 500,
     ...initial,
   }
   const calls: { path: string; body?: any }[] = []
@@ -45,6 +46,13 @@ function fakeOwallet(initial: Partial<Status> & { password?: string } = {}) {
         return ok({ account_number: "1234567890123456", formatted_account_number: "1234 5678 9012 3456" })
       case "/_mgmt/overpay/pkce/start":
         return ok({ authorize_url: "https://overpay.example/oauth/authorize?x=1", state: "st-1" })
+      case "/_mgmt/credits":
+        return ok({
+          data: [
+            { holder_type: "organization", organization_slug: "core", core: true, balance_cents: state.credits },
+            { holder_type: "seller", seller_slug: "someone", balance_cents: 900 },
+          ],
+        })
       case "/_mgmt/overpay/pkce/finish":
         if (body.code !== "the-code" || body.state !== "st-1") return fail(400, "bad_code")
         state.overpay_linked = true
@@ -117,7 +125,12 @@ describe("browser setup screen", () => {
   })
 
   test("a later launch only asks for the password, and retries a wrong one", async () => {
-    const fake = fakeOwallet({ initialized: true, wallet: { npub: "npub1me" }, overpay_linked: true, password: "right" })
+    const fake = fakeOwallet({
+      initialized: true,
+      wallet: { npub: "npub1me" },
+      overpay_linked: true,
+      password: "right",
+    })
     const done = runSetup(root, { owallet: fake.owallet, origin: "https://norm.example" })
 
     await screen(root, "Unlock your wallet")
@@ -127,7 +140,11 @@ describe("browser setup screen", () => {
     fill(root, { password: "right" })
 
     expect(await done).toEqual({ npub: "npub1me", linked: true })
-    expect(fake.calls.map((c) => c.path).filter((p) => p !== "/_mgmt/status")).toEqual(["/_mgmt/unlock", "/_mgmt/unlock"])
+    expect(fake.calls.map((c) => c.path).filter((p) => p !== "/_mgmt/status")).toEqual([
+      "/_mgmt/unlock",
+      "/_mgmt/unlock",
+      "/_mgmt/credits",
+    ])
   })
 
   test("importing a seed phrase normalizes whitespace", async () => {
@@ -168,13 +185,105 @@ describe("browser setup screen", () => {
     expect(opened).toEqual(["https://overpay.example/oauth/authorize?x=1"])
 
     // Messages from another origin, of another type, or for another flow are ignored.
-    handler!({ origin: "https://evil.example", data: { type: "overpay-oauth", code: "x", state: "st-1" } } as MessageEvent)
+    handler!({
+      origin: "https://evil.example",
+      data: { type: "overpay-oauth", code: "x", state: "st-1" },
+    } as MessageEvent)
     handler!({ origin: "https://norm.example", data: { type: "other", code: "x", state: "st-1" } } as MessageEvent)
-    handler!({ origin: "https://norm.example", data: { type: "overpay-oauth", code: "x", state: "stale" } } as MessageEvent)
+    handler!({
+      origin: "https://norm.example",
+      data: { type: "overpay-oauth", code: "x", state: "stale" },
+    } as MessageEvent)
     expect(fake.calls.some((c) => c.path === "/_mgmt/overpay/pkce/finish")).toBe(false)
 
-    handler!({ origin: "https://norm.example", data: { type: "overpay-oauth", code: "the-code", state: "st-1" } } as MessageEvent)
+    handler!({
+      origin: "https://norm.example",
+      data: { type: "overpay-oauth", code: "the-code", state: "st-1" },
+    } as MessageEvent)
     expect(await done).toEqual({ npub: "npub1me", linked: true })
+  })
+
+  test("an empty credit balance gets a top-up hint before norm starts", async () => {
+    const fake = fakeOwallet({
+      initialized: true,
+      unlocked: true,
+      wallet: { npub: "npub1me" },
+      overpay_linked: true,
+      credits: 0,
+    })
+    const done = runSetup(root, { owallet: fake.owallet, origin: "https://norm.example" })
+    await screen(root, "Add marketplace credits")
+    expect(root.textContent).toContain("Lightning invoice")
+    click(root, "Start norm")
+    expect(await done).toEqual({ npub: "npub1me", linked: true })
+  })
+
+  test("a funded account starts without the hint, and only core credits count", async () => {
+    const fake = fakeOwallet({
+      initialized: true,
+      unlocked: true,
+      wallet: { npub: "npub1me" },
+      overpay_linked: true,
+      credits: 0,
+    })
+    // Seller-specific credits (900¢ in the fake) cannot pay for inference.
+    expect(coreBalanceCents({ data: [{ core: false, balance_cents: 900 }] })).toBe(0)
+    expect(
+      coreBalanceCents({
+        data: [
+          { core: true, balance_cents: 250 },
+          { core: true, balance_cents: 50 },
+        ],
+      }),
+    ).toBe(300)
+    fake.state.credits = 300
+    expect(await runSetup(root, { owallet: fake.owallet, origin: "https://norm.example" })).toEqual({
+      npub: "npub1me",
+      linked: true,
+    })
+  })
+
+  test("a forgotten password can start over, and Back returns to a working unlock form", async () => {
+    const fake = fakeOwallet({
+      initialized: true,
+      wallet: { npub: "npub1me" },
+      overpay_linked: true,
+      password: "right",
+    })
+    let resets = 0
+    const done = runSetup(root, {
+      owallet: fake.owallet,
+      origin: "https://norm.example",
+      reset: async () => {
+        resets++
+      },
+    })
+    await screen(root, "Unlock your wallet")
+    click(root, "Forgot the password?")
+    await screen(root, "Start over?")
+    click(root, "Back")
+    await screen(root, "Unlock your wallet")
+    click(root, "Forgot the password?")
+    await screen(root, "Start over?")
+    click(root, "Delete and start over")
+    await tick()
+    expect(resets).toBe(1)
+    click(root, "Back")
+    await screen(root, "Unlock your wallet")
+    fill(root, { password: "right" })
+    expect(await done).toEqual({ npub: "npub1me", linked: true })
+  })
+
+  test("without a reset hook the unlock screen offers no start-over", async () => {
+    const fake = fakeOwallet({
+      initialized: true,
+      wallet: { npub: "npub1me" },
+      overpay_linked: true,
+      password: "right",
+    })
+    void runSetup(root, { owallet: fake.owallet, origin: "https://norm.example" })
+    await screen(root, "Unlock your wallet")
+    expect(root.textContent).not.toContain("Forgot the password?")
   })
 
   test("Overpay can be skipped; norm still starts", async () => {

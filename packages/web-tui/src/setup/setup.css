@@ -17,7 +17,12 @@
   padding: 24px 16px;
   background: var(--setup-bg);
   color: var(--setup-fg);
-  font: 15px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font:
+    15px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .norm-setup {
@@ -96,9 +101,13 @@
   color: inherit;
   cursor: pointer;
 }
-.norm-setup-form button {
+.norm-setup-form .norm-setup-actions {
   margin-top: 14px;
-  justify-self: start;
+}
+.norm-setup button.link {
+  border-color: transparent;
+  color: var(--setup-muted);
+  text-decoration: underline;
 }
 .norm-setup button.primary {
   background: var(--setup-accent);
