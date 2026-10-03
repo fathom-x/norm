@@ -12,6 +12,15 @@
 // Mock Overpay: owallet/crates/owallet-web/tests/mock-overpay/server.mjs.
 //
 // Env: CHROME, PLAYWRIGHT, PORT (default 4320), DIST — as in tui.mjs.
+//
+// Against a real Overpay instead of the mock (the staging smoke test in
+// norm-web-ci.yml): E2E_OVERPAY_URL=<rails url> and E2E_MNEMONIC=<seed phrase
+// of a wallet whose Overpay account holds core credits>. The wallet is
+// imported instead of generated, and "Create a new Overpay account" finds
+// that account again (NIP-98 sign-up is find-or-create by the wallet's key).
+// That Overpay must list this page's origin (http://127.0.0.1:<PORT>) in
+// API_CORS_ORIGINS. Mock-only assertions (exact reply, account number) are
+// skipped there.
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { mkdirSync } from "node:fs"
@@ -30,6 +39,9 @@ const playwright = createRequire(import.meta.url)(
 const executablePath = process.env.CHROME ?? "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
 const dist = process.env.DIST ?? path.join(root, "dist")
 const PASSWORD = "correct horse battery staple"
+const REAL_OVERPAY = process.env.E2E_OVERPAY_URL
+const MNEMONIC = process.env.E2E_MNEMONIC
+if (REAL_OVERPAY && !MNEMONIC) throw new Error("E2E_OVERPAY_URL needs E2E_MNEMONIC (a funded wallet)")
 
 // Console errors that are expected and harmless. Keep each one explained.
 const ALLOWED_ERRORS = [
@@ -55,19 +67,21 @@ function start(command, args, options, ready) {
   return { child, line }
 }
 
-const mock = start(
-  process.execPath,
-  [path.join(repo, "owallet/crates/owallet-web/tests/mock-overpay/server.mjs")],
-  { env: { ...process.env, PORT: "0", MOCK_STREAM_POLLS: "3" } },
-  /listening on (http:\/\/\S+)/,
-)
+const mock = REAL_OVERPAY
+  ? undefined
+  : start(
+      process.execPath,
+      [path.join(repo, "owallet/crates/owallet-web/tests/mock-overpay/server.mjs")],
+      { env: { ...process.env, PORT: "0", MOCK_STREAM_POLLS: "3" } },
+      /listening on (http:\/\/\S+)/,
+    )
 const preview = start(
   path.join(root, "node_modules/.bin/vite"),
   ["preview", "--port", String(port), "--strictPort", "--outDir", dist],
   { cwd: root },
   new RegExp(String(port)),
 )
-const overpay = (await mock.line)[1]
+const overpay = REAL_OVERPAY ?? (await mock.line)[1]
 await preview.line
 
 const browser = await playwright.chromium.launch({ executablePath, args: ["--no-sandbox"] })
@@ -127,19 +141,33 @@ try {
     await page.getByRole("button", { name: "Create wallet" }).click()
   })
 
-  await step("create a new wallet (no seed phrase shown)", async () => {
-    await heading("Create or import a wallet")
-    await page.getByRole("button", { name: "Create a new wallet" }).click()
-  })
+  await step(
+    MNEMONIC ? "import the funded wallet's seed phrase" : "create a new wallet (no seed phrase shown)",
+    async () => {
+      await heading("Create or import a wallet")
+      if (!MNEMONIC) {
+        await page.getByRole("button", { name: "Create a new wallet" }).click()
+        return
+      }
+      await page.getByRole("button", { name: "Import a seed phrase" }).click()
+      await heading("Import a seed phrase")
+      await page.getByLabel("Seed phrase").fill(MNEMONIC)
+      await page.getByRole("button", { name: "Import" }).click()
+    },
+  )
 
   await step("create an Overpay account and see its account number once", async () => {
     await heading("Connect to Overpay")
-    assert.match(await page.textContent("main"), /127\.0\.0\.1/)
+    assert.match(await page.textContent("main"), new RegExp(new URL(overpay).hostname.replaceAll(".", "\\.")))
     await page.getByRole("button", { name: "Create a new Overpay account" }).click()
     await heading("Your Overpay account")
-    assert.match(await page.textContent("main"), /1234567890123456/)
+    assert.match(await page.textContent("main"), REAL_OVERPAY ? /Account number: [\d ]{16,}/ : /1234567890123456/)
     await shot("e2e-02-setup-account.png")
     await page.getByRole("button", { name: "Continue" }).click()
+    // An empty balance gets a top-up hint first (the mock and a funded
+    // staging wallet both have credits, so this is only a safety net).
+    const hint = page.getByRole("heading", { name: "Add marketplace credits", exact: true })
+    if (await hint.isVisible().catch(() => false)) await page.getByRole("button", { name: "Start norm" }).click()
   })
 
   await step("the TUI starts once the wallet is ready", async () => {
@@ -151,8 +179,11 @@ try {
   await step("a prompt is answered by the marketplace through owallet-web", async () => {
     await page.keyboard.type("say hello")
     await page.keyboard.press("Enter")
-    const text = await waitFor(/Hello from the mock seller\./, 120_000)
+    // The mock's exact reply; a real model's is unknown, so wait for the
+    // turn's footer (agent · model · duration) instead.
+    const text = await waitFor(REAL_OVERPAY ? /Build · .+ · \d+(\.\d+)?m?s/ : /Hello from the mock seller\./, 180_000)
     assert.match(text, /say hello/)
+    assert.doesNotMatch(text, /\[owallet error\]/)
     await shot("e2e-03-chat.png")
   })
 
@@ -205,5 +236,5 @@ try {
   if (errors.length) console.log(errors.join("\n"))
   await browser.close()
   preview.child.kill()
-  mock.child.kill()
+  mock?.child.kill()
 }

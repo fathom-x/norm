@@ -34,7 +34,22 @@ Run from `packages/web-tui` (never from the repo root).
 | Unit tests (bun + happy-dom, `--conditions=browser`) | `bun run test` |
 | TUI browser test (build, then headless Chromium) | `bun run test:tui` |
 | Core smoke test through the debug panel | `bun run test:browser` |
+| owallet-web in the worker, against the mock Overpay | `bun run test:owallet` |
+| End to end: setup screen → TUI → owallet-web → mock Overpay, then unlock and a second tab | `bun run test:e2e` |
 | Typecheck | `bun run typecheck` |
+
+`test:owallet` and `test:e2e` build owallet-web first (`bun run build:owallet`:
+Rust with the wasm32 target, clang + llvm-ar, and the matching
+wasm-bindgen-cli). The mock Overpay is
+`owallet/crates/owallet-web/tests/mock-overpay/server.mjs`.
+
+CI: `.github/workflows/norm-web-ci.yml` runs all of the above (plus the
+opentui wasm build and norm's TUI suite on the wasm core). Its
+`staging-smoke` job runs `e2e.mjs` against a real Overpay nightly and on
+demand when `E2E_OVERPAY_URL` (repository variable
+`NORM_WEB_E2E_OVERPAY_URL`) and `E2E_MNEMONIC` (secret
+`NORM_WEB_E2E_MNEMONIC`, a wallet whose account holds core credits) are set;
+that Overpay's `API_CORS_ORIGINS` must include `http://127.0.0.1:4320`.
 
 The page needs opentui's wasm build: `bash ../opentui-wasm/scripts/build.sh`
 once (it writes `packages/opentui-wasm/dist/`: `opentui.wasm`, `core/`,

@@ -4,6 +4,9 @@
 name: norm-web-ci
 
 on:
+  # Nightly: the staging smoke test (it skips itself unless configured).
+  schedule:
+    - cron: "17 6 * * *"
   push:
     branches: [main]
     paths:
@@ -72,4 +75,148 @@ jobs:
         with:
           name: opentui-wasm-screenshots
           path: packages/opentui-wasm/test/screenshots
+          if-no-files-found: ignore
+
+      # The web build imports the wasm core and the patched packages from here.
+      - name: Publish the opentui wasm build
+        uses: actions/upload-artifact@v4
+        with:
+          name: opentui-wasm-dist
+          path: packages/opentui-wasm/dist
+          if-no-files-found: error
+
+  web-tui:
+    name: norm in the browser (unit + headless Chromium)
+    needs: opentui-wasm
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: packages/web-tui
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: opentui-wasm-dist
+          path: packages/opentui-wasm/dist
+
+      # owallet-web: Rust → wasm32, C deps (secp256k1, SQLite) via clang.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: owallet/crates/owallet-web
+      - name: clang + llvm-ar
+        run: command -v clang && command -v llvm-ar || { sudo apt-get update && sudo apt-get install -y clang llvm; }
+      - name: wasm-bindgen-cli (the version in owallet-web's Cargo.lock)
+        run: |
+          v=$(grep -A1 '^name = "wasm-bindgen"$' ../../owallet/crates/owallet-web/Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          cargo install wasm-bindgen-cli --version "$v" --locked
+      - name: Build owallet-web into the page
+        run: bun run build:owallet
+
+      - name: Playwright + Chromium
+        run: |
+          npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/pw" playwright@1.56.1
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+          echo "PLAYWRIGHT=$RUNNER_TEMP/pw/node_modules/playwright/index.js" >> "$GITHUB_ENV"
+          echo "CHROME=$(node -e "console.log(require('$RUNNER_TEMP/pw/node_modules/playwright').chromium.executablePath())")" >> "$GITHUB_ENV"
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests (bun + happy-dom, browser conditions)
+        run: bun run test
+
+      - name: Build the page
+        run: bun run build
+
+      - name: Core in a worker (debug panel)
+        run: node test/browser/smoke.mjs
+
+      - name: The TUI (scripted owallet)
+        run: node test/browser/tui.mjs
+
+      - name: owallet-web against the mock Overpay
+        run: node test/browser/owallet.mjs
+
+      - name: End to end (setup screen → TUI → owallet-web → mock Overpay)
+        run: node test/browser/e2e.mjs
+
+      - name: Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-tui-screenshots
+          path: packages/web-tui/test/screenshots
+          if-no-files-found: ignore
+
+  # The same end-to-end test against the real staging Overpay, nightly and on
+  # demand. Configure both, or it skips itself:
+  #   secret NORM_WEB_E2E_MNEMONIC — seed phrase of a wallet whose staging
+  #     account holds core credits (each run spends a few cents);
+  #   variable NORM_WEB_E2E_OVERPAY_URL — the staging rails URL, whose
+  #     API_CORS_ORIGINS must include http://127.0.0.1:4320 (the test's page).
+  staging-smoke:
+    name: end to end against staging Overpay
+    needs: opentui-wasm
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      E2E_OVERPAY_URL: ${{ vars.NORM_WEB_E2E_OVERPAY_URL }}
+      E2E_MNEMONIC: ${{ secrets.NORM_WEB_E2E_MNEMONIC }}
+    defaults:
+      run:
+        working-directory: packages/web-tui
+    steps:
+      - name: Configured?
+        id: configured
+        working-directory: .
+        run: |
+          if [ -n "$E2E_OVERPAY_URL" ] && [ -n "$E2E_MNEMONIC" ]; then echo "run=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice::staging smoke test not configured (NORM_WEB_E2E_OVERPAY_URL / NORM_WEB_E2E_MNEMONIC); skipping"; fi
+
+      - uses: actions/checkout@v4
+        if: steps.configured.outputs.run == 'true'
+      - uses: ./.github/actions/setup-bun
+        if: steps.configured.outputs.run == 'true'
+      - uses: actions/download-artifact@v4
+        if: steps.configured.outputs.run == 'true'
+        with:
+          name: opentui-wasm-dist
+          path: packages/opentui-wasm/dist
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.configured.outputs.run == 'true'
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        if: steps.configured.outputs.run == 'true'
+        with:
+          workspaces: owallet/crates/owallet-web
+      - name: Toolchain, owallet-web, Playwright
+        if: steps.configured.outputs.run == 'true'
+        run: |
+          command -v clang && command -v llvm-ar || { sudo apt-get update && sudo apt-get install -y clang llvm; }
+          v=$(grep -A1 '^name = "wasm-bindgen"$' ../../owallet/crates/owallet-web/Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          cargo install wasm-bindgen-cli --version "$v" --locked
+          bun run build:owallet
+          bun run build
+          npm install --no-save --no-audit --no-fund --prefix "$RUNNER_TEMP/pw" playwright@1.56.1
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+          echo "PLAYWRIGHT=$RUNNER_TEMP/pw/node_modules/playwright/index.js" >> "$GITHUB_ENV"
+          echo "CHROME=$(node -e "console.log(require('$RUNNER_TEMP/pw/node_modules/playwright').chromium.executablePath())")" >> "$GITHUB_ENV"
+      - name: End to end against staging
+        if: steps.configured.outputs.run == 'true'
+        run: node test/browser/e2e.mjs
+      - name: Screenshots
+        if: always() && steps.configured.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-smoke-screenshots
+          path: packages/web-tui/test/screenshots
           if-no-files-found: ignore
