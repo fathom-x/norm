@@ -235,9 +235,14 @@ describe("ScheduleWakeup", () => {
       expect(yield* NormTools.infos).toEqual([])
       expect(NormTools.primaryOnly()).toEqual([])
 
-      // Unset, they follow NORM_DISABLE, which the test preload sets.
+      // Unset, they follow NORM_DISABLE.
       delete process.env.NORM_DISABLE_WAKE
+      const layer = process.env.NORM_DISABLE
+      process.env.NORM_DISABLE = "1"
       expect(NormTools.disabled()).toBe(true)
+      delete process.env.NORM_DISABLE
+      expect(NormTools.disabled()).toBe(false)
+      if (layer !== undefined) process.env.NORM_DISABLE = layer
     }),
   )
 

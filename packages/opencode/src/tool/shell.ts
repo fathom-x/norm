@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect"
+import { Duration, Effect, Option, Schema, Stream } from "effect"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -22,6 +22,8 @@ import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
 import { BackgroundTask } from "@/norm/background"
+import { SessionWake } from "@/norm/wake"
+import { ToolJsonSchema } from "./json-schema"
 
 export { Parameters } from "./shell/prompt"
 
@@ -345,6 +347,9 @@ export const ShellTool = Tool.define(
     const trunc = yield* Truncate.Service
     const plugin = yield* Plugin.Service
     const flags = yield* RuntimeFlags.Service
+    // norm: optional so layers built without the background engine (most of
+    // upstream's tests) still get a working shell tool, minus run_in_background.
+    const background = Option.getOrUndefined(yield* Effect.serviceOption(BackgroundTask.Service))
     const defaultTimeoutMs = flags.bashDefaultTimeoutMs ?? 2 * 60 * 1000
 
     const cygpath = Effect.fn("ShellTool.cygpath")(function* (shell: string, text: string) {
@@ -604,10 +609,16 @@ export const ShellTool = Tool.define(
         const prompt = ShellPrompt.render(name, process.platform, limits, defaultTimeoutMs)
         yield* Effect.logInfo("shell tool using shell", { shell })
 
+        // norm: run_in_background is always accepted by the schema, and shown
+        // to the model only when it works (as task.ts does for `background`).
+        const backgroundable = background && !SessionWake.disabled() ? background : undefined
+        const parameters = Schema.Struct({ ...prompt.parameters.fields, ...BackgroundTask.ShellFields })
+
         return {
-          description: prompt.description,
-          parameters: prompt.parameters,
-          execute: (params: Parameters, ctx: Tool.Context) =>
+          description: backgroundable ? prompt.description + BackgroundTask.SHELL_NOTE : prompt.description,
+          parameters,
+          jsonSchema: backgroundable ? undefined : ToolJsonSchema.fromSchema(prompt.parameters),
+          execute: (params: Schema.Schema.Type<typeof parameters>, ctx: Tool.Context) =>
             Effect.gen(function* () {
               const instanceCtx = yield* InstanceState.context
               const cwd = params.workdir
@@ -636,6 +647,24 @@ export const ShellTool = Tool.define(
               if (detach) {
                 yield* detach({ command: params.command, process: cmd(shell, params.command, cwd, env) })
                 return { title: params.command, metadata: { output: "", exit: null, truncated: false }, output: "" }
+              }
+              if (params.run_in_background && backgroundable) {
+                const task = yield* backgroundable
+                  .shell({
+                    command: params.command,
+                    process: cmd(shell, params.command, cwd, env),
+                    sessionID: ctx.sessionID,
+                    timeout: params.timeout === undefined ? undefined : Duration.millis(params.timeout),
+                  })
+                  .pipe(Effect.orDie)
+                return {
+                  title: params.command,
+                  metadata: { output: `Running in the background (task ${task.id})`, exit: null, truncated: false },
+                  output: [
+                    `Command running in background with ID: ${task.id}. Output is being written to: ${task.outputFile}`,
+                    "You will be notified when it exits. Do not sleep or poll for it; use TaskStop to stop it.",
+                  ].join("\n"),
+                }
               }
 
               return yield* run(

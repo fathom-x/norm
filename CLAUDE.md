@@ -154,7 +154,7 @@ syncs stay cheap:
   `tool/registry.ts` appends `NormTools.infos` to the built-in list, and
   `tool/task.ts` denies `NormTools.primaryOnly()` in subagent sessions
   (a subagent that schedules a wakeup and ends its turn hands its parent
-  nothing). `NORM_DISABLE_WAKE=1` leaves the tools and `/loop` out; unset
+  nothing). `NORM_DISABLE_WAKE=1` (`SessionWake.disabled()`) leaves the tools and `/loop` out; unset
   they follow `NORM_DISABLE`; `=0` keeps them regardless (the test
   preload sets `NORM_DISABLE=1`, so their tests opt back in this way).
   `norm run` still exits when the turn ends, so a wakeup only fires in
@@ -182,6 +182,22 @@ syncs stay cheap:
   message (`tui/src/util/norm-notification.ts`, `norm-queue.ts`), so esc
   still interrupts while one waits. Tests: `test/norm/monitor.test.ts`,
   `packages/tui/test/util/norm-notification.test.ts`.
+
+- **Background commands** (`run_in_background` on the bash tool, as in
+  Claude Code): the call returns at once with a task id and an output
+  file; the command runs outside the turn (`BackgroundTask.shell`, same
+  ownership and lifetime rules as a monitor) and the session gets one
+  `<task-notification>` when it exits. `tool/shell.ts` always accepts the
+  parameter in its schema but shows it to the model (and appends
+  `BackgroundTask.SHELL_NOTE` to the description) only when it works:
+  when the `BackgroundTask` service is in the layer and the wake tools
+  are on. Otherwise it passes upstream's JSON schema, as `task.ts` does
+  for `background`, so upstream's parameter snapshot is untouched and a
+  stray `run_in_background` just runs in the foreground. Refused in
+  subagent sessions (the notification would start a turn nobody reads).
+  `timeout`, when given, kills the command with a notice; without it the
+  command runs until it exits or is stopped. Tests:
+  `test/norm/background-shell.test.ts`.
 
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the

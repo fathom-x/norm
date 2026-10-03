@@ -7,11 +7,25 @@ import { MessageV2 } from "@/session/message-v2"
 import { SessionRunState } from "@/session/run-state"
 import type { SessionPrompt } from "@/session/prompt"
 import { SessionID } from "@/session/schema"
+import { Norm } from "./norm"
 
 // How many extra runs `drive` starts when a delivered message is still
 // unanswered after the run it joined. One covers the end-of-run race; the
 // second is slack for a run that ended for an unrelated reason.
 const RETRIES = 2
+
+/**
+ * `NORM_DISABLE_WAKE=1` leaves out everything built on this layer (the
+ * scheduling and background tools, `/loop`, bash's `run_in_background`).
+ * Unset, they follow the rest of the norm layer (`NORM_DISABLE`);
+ * `NORM_DISABLE_WAKE=0` keeps them regardless.
+ */
+export function disabled() {
+  const flag = process.env.NORM_DISABLE_WAKE
+  if (flag === "1" || flag === "true") return true
+  if (flag === "0" || flag === "false") return false
+  return Norm.disabled()
+}
 
 /** The two SessionPrompt entry points the wake layer needs. */
 export interface Ops {

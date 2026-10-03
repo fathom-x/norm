@@ -1,6 +1,6 @@
 import { Effect } from "effect"
 import * as Tool from "@/tool/tool"
-import { Norm } from "./norm"
+import { SessionWake } from "./wake"
 import { MonitorTool } from "./tool/monitor"
 import { ScheduleWakeupTool } from "./tool/schedule-wakeup"
 import { TaskStopTool } from "./tool/task-stop"
@@ -15,16 +15,7 @@ export function primaryOnly(): string[] {
   return [ScheduleWakeupTool.id, MonitorTool.id, TaskStopTool.id]
 }
 
-/**
- * `NORM_DISABLE_WAKE=1` leaves these tools out. Unset, they follow the rest
- * of the layer (`NORM_DISABLE`); `NORM_DISABLE_WAKE=0` keeps them regardless.
- */
-export function disabled() {
-  const flag = process.env.NORM_DISABLE_WAKE
-  if (flag === "1" || flag === "true") return true
-  if (flag === "0" || flag === "false") return false
-  return Norm.disabled()
-}
+export const disabled = SessionWake.disabled
 
 /** norm's own built-in tools, for the registry to initialise beside upstream's. */
 export const infos = Effect.gen(function* () {
