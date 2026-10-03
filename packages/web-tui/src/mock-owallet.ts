@@ -9,6 +9,7 @@
 //
 //   "search": grep TODO, then glob **/*.ts
 //   "bash":   bash `ls` (the browser build refuses it)
+//   "edit":   read src/format.ts, then edit its TODO comment
 //   anything else: write /workspace/notes/hello.md, then read it back
 //
 // Requests without tools (titles, summaries) get a short plain reply.
@@ -64,6 +65,17 @@ const SCRIPTS: Record<string, Call[]> = {
     { name: "glob", args: { pattern: "**/*.ts" } },
   ],
   bash: [{ name: "bash", args: { command: "ls" } }],
+  edit: [
+    { name: "read", args: { filePath: "/workspace/src/format.ts" } },
+    {
+      name: "edit",
+      args: {
+        filePath: "/workspace/src/format.ts",
+        oldString: "// TODO: support other currencies",
+        newString: "// Formats US dollars only.",
+      },
+    },
+  ],
 }
 
 function complete(body: ChatRequest) {

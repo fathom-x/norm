@@ -146,6 +146,20 @@ try {
     assert.match(tools[1].state.output, /src\/main\.ts/)
   })
 
+  await step("read + edit a workspace file", async () => {
+    const { tools } = await prompt("edit the formatter")
+    assert.deepEqual(
+      tools.map((part) => [part.tool, part.state.status]),
+      [
+        ["read", "completed"],
+        ["edit", "completed"],
+      ],
+    )
+    const file = await api("/file/content?path=src/format.ts")
+    assert.match(file.content, /Formats US dollars only/)
+    assert.doesNotMatch(file.content, /TODO/)
+  })
+
   await step("bash refuses with the browser-build message", async () => {
     const { tools } = await prompt("try bash")
     assert.equal(tools[0].tool, "bash")
