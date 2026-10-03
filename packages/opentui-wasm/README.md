@@ -99,6 +99,13 @@ bundle, or the in-tree Zig output) with fd 1/2 on `process.stdout/stderr`.
 cd .work/opentui/packages/core && OPENTUI_BACKEND=wasm bun test
 ```
 
+norm's own TUI suite runs on the wasm core with `scripts/test-norm-tui.sh`
+(after `scripts/build.sh` and a root `bun install`). It swaps the installed
+`@opentui/core` for `dist/core`, hides the native library so nothing can
+silently fall back to it, runs `packages/tui/test` file by file, and restores
+both on exit. Result at the pinned version: 193 pass, 0 fail — the same as the
+native core.
+
 ## How the wasm core differs from the native one
 
 * **Compiled out:** miniaudio (audio API reports no device), the
