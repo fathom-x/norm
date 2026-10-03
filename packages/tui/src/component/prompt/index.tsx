@@ -55,6 +55,7 @@ import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { NormBalance } from "../norm-balance"
+import { isDefaultTitle } from "../../util/session"
 
 registerOpencodeSpinner()
 
@@ -166,6 +167,18 @@ export function Prompt(props: PromptProps) {
   const renderer = useRenderer()
   const exit = useExit()
   const dimensions = useTerminalDimensions()
+  // norm: the conversation's title, right-aligned in the rule above the
+  // input ("──── Fix the login bug ─"). Not for the placeholder title a
+  // session has until one is generated, and not when it would take more
+  // than 60% of the screen's width.
+  const ruleTitle = createMemo(() => {
+    if (!props.sessionID) return undefined
+    const title = sync.session.get(props.sessionID)?.title
+    if (!title || isDefaultTitle(title)) return undefined
+    const text = ` ${title} `
+    if (text.length > dimensions().width * 0.6) return undefined
+    return text
+  })
   const { theme, syntax } = useTheme()
   const kv = useKV()
   const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
@@ -1392,6 +1405,8 @@ export function Prompt(props: PromptProps) {
           paddingRight={2}
           border={["top", "bottom"]}
           borderColor={theme.border}
+          title={ruleTitle()}
+          titleAlignment="right"
         >
           <text flexShrink={0} fg={borderHighlight()}>
             {"> "}
@@ -1662,6 +1677,14 @@ export function Prompt(props: PromptProps) {
                   <text fg={theme.text}>
                     {paletteShortcut()} <span style={{ fg: theme.textMuted }}>commands</span>
                   </text>
+                  {/* norm: → on an empty prompt toggles the sidebar (the hint
+                      gives way on narrow screens, where "Build · model"
+                      needs the room) */}
+                  <Show when={dimensions().width >= 70}>
+                    <text fg={theme.text}>
+                      → <span style={{ fg: theme.textMuted }}>sidebar</span>
+                    </text>
+                  </Show>
                 </Match>
                 <Match when={store.mode === "shell"}>
                   <text fg={theme.text}>
