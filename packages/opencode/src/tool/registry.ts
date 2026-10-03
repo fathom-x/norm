@@ -57,6 +57,7 @@ import { McpCatalog } from "@/mcp/catalog"
 import { NormTools } from "@/norm/tools"
 import { SessionWake } from "@/norm/wake"
 import { BackgroundTask } from "@/norm/background"
+import { SessionCron } from "@/norm/cron"
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return providerID === ProviderV2.ID.opencode || flags.exa || flags.parallel
@@ -441,6 +442,7 @@ export const node = LayerNode.make({
     BackgroundJob.node,
     SessionWake.node,
     BackgroundTask.node,
+    SessionCron.node,
     Provider.node,
     LSP.node,
     Instruction.node,
