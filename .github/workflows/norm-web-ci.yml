@@ -1,0 +1,75 @@
+# CI for norm in the browser: the opentui wasm core, the browser build
+# (packages/web-tui) and its end-to-end test against a mock Overpay. owallet's
+# wasm crate (owallet-web) is built and tested in owallet-ci.yml.
+name: norm-web-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/opentui-wasm/**"
+      - "packages/web-tui/**"
+      - "packages/tui/**"
+      - "packages/core/**"
+      - "packages/opencode/**"
+      - "owallet/**"
+      - ".github/workflows/norm-web-ci.yml"
+  pull_request:
+    paths:
+      - "packages/opentui-wasm/**"
+      - "packages/web-tui/**"
+      - "packages/tui/**"
+      - "packages/core/**"
+      - "packages/opencode/**"
+      - "owallet/**"
+      - ".github/workflows/norm-web-ci.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: norm-web-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  opentui-wasm:
+    name: opentui on a wasm core
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Cache the opentui checkout, Zig and its packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/opentui-wasm/.work
+            ~/.cache/zig
+          key: opentui-wasm-${{ hashFiles('packages/opentui-wasm/UPSTREAM', 'packages/opentui-wasm/patches/**') }}
+
+      - name: Build the wasm core and the patched packages
+        run: bash packages/opentui-wasm/scripts/build.sh
+
+      - name: Install Playwright's Chromium
+        working-directory: packages/opentui-wasm/demo
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Browser checks (xterm.js + wasm core, core and Solid scenes)
+        working-directory: packages/opentui-wasm
+        run: npm test
+
+      - name: norm's TUI suite on the wasm core
+        run: bash packages/opentui-wasm/scripts/test-norm-tui.sh
+
+      - name: Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: opentui-wasm-screenshots
+          path: packages/opentui-wasm/test/screenshots
+          if-no-files-found: ignore
