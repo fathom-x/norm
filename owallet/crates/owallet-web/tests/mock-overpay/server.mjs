@@ -4,6 +4,8 @@
 //
 //   PORT=4010 node server.mjs           # listens on 127.0.0.1:$PORT (default 4010)
 //   MOCK_STREAM_POLLS=3                 # in-flight polls before a chat order delivers
+//   MOCK_CREDIT_CENTS=10000             # the buyer's starting core-credit balance
+//   MOCK_DEMO_CREDITS_CENTS=0           # >0 offers one-time demo credits (/api/v1/demo_credits)
 //
 // Every response (OPTIONS preflights included) carries permissive CORS
 // headers, so a page on any origin can call it like the real Overpay with
@@ -17,6 +19,8 @@ import { randomUUID } from "node:crypto";
 const PORT = Number(process.env.PORT || process.env.MOCK_OVERPAY_PORT || 4010);
 const HOST = process.env.HOST || "127.0.0.1";
 const STREAM_POLLS = Number(process.env.MOCK_STREAM_POLLS || 3);
+const START_CREDIT_CENTS = Number(process.env.MOCK_CREDIT_CENTS ?? 10_000);
+const DEMO_CREDITS_CENTS = Number(process.env.MOCK_DEMO_CREDITS_CENTS || 0);
 
 export const MODELS = ["mock/chat-small", "mock/chat-large"];
 const OPENROUTER_ID = "L-OPENROUTER";
@@ -97,7 +101,7 @@ const LISTINGS = { [OPENROUTER_ID]: openrouterListing, [PYTHON_ID]: pythonListin
 
 let state;
 function reset() {
-  state = { orders: new Map(), seq: 0, requests: [], creditCents: 10_000 };
+  state = { orders: new Map(), seq: 0, requests: [], creditCents: START_CREDIT_CENTS, demoGranted: false };
 }
 reset();
 
@@ -284,6 +288,21 @@ async function handle(req, res) {
 
   if (p === "/api/v1/account" && req.method === "GET") {
     return send(res, 200, { data: { username: "mock-buyer", account_number: "1234567890123456" } });
+  }
+  if (p === "/api/v1/demo_credits" && req.method === "GET") {
+    const enabled = DEMO_CREDITS_CENTS > 0;
+    return send(res, 200, {
+      data: { enabled, amount_cents: enabled ? DEMO_CREDITS_CENTS : 0, granted: state.demoGranted },
+    });
+  }
+  if (p === "/api/v1/demo_credits" && req.method === "POST") {
+    if (DEMO_CREDITS_CENTS <= 0)
+      return send(res, 404, { error: "Demo credits are not offered here", code: "demo_credits_disabled" });
+    if (state.demoGranted)
+      return send(res, 409, { error: "This account already received its demo credits", code: "already_granted" });
+    state.demoGranted = true;
+    state.creditCents += DEMO_CREDITS_CENTS;
+    return send(res, 201, { data: { granted_cents: DEMO_CREDITS_CENTS, balance_cents: state.creditCents } });
   }
   if (p === "/api/v1/merchant_credits" && req.method === "GET") {
     return send(res, 200, {

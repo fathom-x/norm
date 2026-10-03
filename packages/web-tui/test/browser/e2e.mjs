@@ -72,7 +72,17 @@ const mock = REAL_OVERPAY
   : start(
       process.execPath,
       [path.join(repo, "owallet/crates/owallet-web/tests/mock-overpay/server.mjs")],
-      { env: { ...process.env, PORT: "0", MOCK_STREAM_POLLS: "3" } },
+      // A brand-new account starts at $0; this mock offers $1.00 of demo
+      // credits, like staging with DEMO_CREDITS_CENTS set.
+      {
+        env: {
+          ...process.env,
+          PORT: "0",
+          MOCK_STREAM_POLLS: "3",
+          MOCK_CREDIT_CENTS: "0",
+          MOCK_DEMO_CREDITS_CENTS: "100",
+        },
+      },
       /listening on (http:\/\/\S+)/,
     )
 const preview = start(
@@ -164,11 +174,34 @@ try {
     assert.match(await page.textContent("main"), REAL_OVERPAY ? /Account number: [\d ]{16,}/ : /1234567890123456/)
     await shot("e2e-02-setup-account.png")
     await page.getByRole("button", { name: "Continue" }).click()
-    // An empty balance gets a top-up hint first (the mock and a funded
-    // staging wallet both have credits, so this is only a safety net).
-    const hint = page.getByRole("heading", { name: "Add marketplace credits", exact: true })
-    if (await hint.isVisible().catch(() => false)) await page.getByRole("button", { name: "Start norm" }).click()
   })
+
+  await step(
+    REAL_OVERPAY ? "a funded account needs no credits step" : "a $0 account takes the one-time demo credits",
+    async () => {
+      const credits = page.getByRole("heading", { name: "Add marketplace credits", exact: true })
+      if (REAL_OVERPAY) {
+        // Safety net: the staging wallet should hold credits, but if it ran dry
+        // take demo credits when offered, else start anyway (the turn will say).
+        // Either the credits screen or the TUI comes next; wait for whichever.
+        const deadline = Date.now() + 120_000
+        while (Date.now() < deadline) {
+          if (await credits.isVisible().catch(() => false)) {
+            const demo = page.getByRole("button", { name: /demo credits/ })
+            await ((await demo.count()) ? demo : page.getByRole("button", { name: /Start norm/ })).first().click()
+            return
+          }
+          if (/Ask anything/.test(await screen())) return
+          await page.waitForTimeout(250)
+        }
+        throw new Error("neither the credits screen nor the TUI appeared")
+      }
+      await credits.waitFor({ timeout: 60_000 })
+      assert.match(await page.textContent("main"), /\$1\.00 of demo credits/)
+      await shot("e2e-02b-demo-credits.png")
+      await page.getByRole("button", { name: "Add $1.00 of demo credits" }).click()
+    },
+  )
 
   await step("the TUI starts once the wallet is ready", async () => {
     const text = await waitFor(/Ask anything/, 120_000)

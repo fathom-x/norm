@@ -58,6 +58,15 @@ async fn mgmt_bootstrap_then_v1_status_with_the_minted_key() {
     let (s, v) = json_call("GET", "/_mgmt/credits", None, None).await;
     assert_eq!(s, 200, "{v}");
     assert!(v["data"][0]["balance_cents"].is_number(), "{v}");
+
+    // Demo credits: the mock offers none unless MOCK_DEMO_CREDITS_CENTS is
+    // set, and Overpay's refusal keeps its status and code through /_mgmt.
+    let (s, v) = json_call("GET", "/_mgmt/demo-credits", None, None).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["data"]["enabled"], false, "{v}");
+    let (s, v) = json_call("POST", "/_mgmt/demo-credits", None, None).await;
+    assert_eq!(s, 404, "{v}");
+    assert_eq!(v["error"]["code"], "demo_credits_disabled", "{v}");
 }
 
 #[wasm_bindgen_test]

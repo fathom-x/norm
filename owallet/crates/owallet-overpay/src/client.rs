@@ -443,6 +443,22 @@ impl OverpayClient {
         self.get_json_value("/api/v1/merchant_credits", auth).await
     }
 
+    /// `GET /api/v1/demo_credits`: whether this Overpay offers one-time demo
+    /// credits (demo deployments such as staging) and whether this buyer got
+    /// them — `{data: {enabled, amount_cents, granted}}`, verbatim.
+    pub async fn demo_credits_value(&self, auth: Auth<'_>) -> Result<Value, OverpayError> {
+        self.get_json_value("/api/v1/demo_credits", auth).await
+    }
+
+    /// `POST /api/v1/demo_credits`: claim them (once per account) —
+    /// `{data: {granted_cents, balance_cents}}`. Refusals are HTTP errors whose
+    /// JSON body carries `code` (`demo_credits_disabled`, `already_granted`,
+    /// `demo_credits_exhausted`, `not_configured`).
+    pub async fn claim_demo_credits_value(&self, auth: Auth<'_>) -> Result<Value, OverpayError> {
+        self.post_json_value("/api/v1/demo_credits", auth, &serde_json::Map::new())
+            .await
+    }
+
     pub async fn get_merchant_credits(
         &self,
         seller_slug: &str,

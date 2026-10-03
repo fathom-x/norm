@@ -2,7 +2,13 @@ import { describe, expect, test, beforeEach } from "bun:test"
 import { coreBalanceCents, runSetup, type Status } from "./setup"
 
 // A fake owallet-web /_mgmt: just enough state to walk the setup flow.
-function fakeOwallet(initial: Partial<Status> & { password?: string; credits?: number } = {}) {
+function fakeOwallet(
+  initial: Partial<Status> & {
+    password?: string
+    credits?: number
+    demo?: { cents: number; granted?: boolean; refuse?: string }
+  } = {},
+) {
   const state = {
     initialized: false,
     unlocked: false,
@@ -53,6 +59,16 @@ function fakeOwallet(initial: Partial<Status> & { password?: string; credits?: n
             { holder_type: "seller", seller_slug: "someone", balance_cents: 900 },
           ],
         })
+      case "/_mgmt/demo-credits":
+        if (init?.method !== "POST")
+          return ok({
+            data: { enabled: !!state.demo, amount_cents: state.demo?.cents ?? 0, granted: !!state.demo?.granted },
+          })
+        if (!state.demo) return fail(404, "demo_credits_disabled")
+        if (state.demo.refuse) return fail(429, state.demo.refuse)
+        state.demo.granted = true
+        state.credits += state.demo.cents
+        return ok({ data: { granted_cents: state.demo.cents, balance_cents: state.credits } })
       case "/_mgmt/overpay/pkce/finish":
         if (body.code !== "the-code" || body.state !== "st-1") return fail(400, "bad_code")
         state.overpay_linked = true
@@ -218,6 +234,56 @@ describe("browser setup screen", () => {
     expect(await done).toEqual({ npub: "npub1me", linked: true })
   })
 
+  test("a demo deployment offers its one-time demo credits on an empty balance", async () => {
+    const fake = fakeOwallet({
+      initialized: true,
+      unlocked: true,
+      wallet: { npub: "npub1me" },
+      overpay_linked: true,
+      credits: 0,
+      demo: { cents: 100 },
+    })
+    const done = runSetup(root, { owallet: fake.owallet, origin: "https://norm.example" })
+    await screen(root, "Add marketplace credits")
+    expect(root.textContent).toContain("$1.00 of demo credits")
+    click(root, "Add $1.00 of demo credits")
+    expect(await done).toEqual({ npub: "npub1me", linked: true })
+    expect(fake.state.credits).toBe(100)
+  })
+
+  test("demo credits already used, or refused, fall back to the Lightning hint", async () => {
+    const used = fakeOwallet({
+      initialized: true,
+      unlocked: true,
+      wallet: { npub: "npub1me" },
+      overpay_linked: true,
+      credits: 0,
+      demo: { cents: 100, granted: true },
+    })
+    void runSetup(root, { owallet: used.owallet, origin: "https://norm.example" })
+    await screen(root, "Add marketplace credits")
+    expect(root.textContent).toContain("Lightning invoice")
+    expect(root.textContent).not.toContain("demo credits")
+
+    root.replaceChildren()
+    const refused = fakeOwallet({
+      initialized: true,
+      unlocked: true,
+      wallet: { npub: "npub1me" },
+      overpay_linked: true,
+      credits: 0,
+      demo: { cents: 100, refuse: "demo_credits_exhausted" },
+    })
+    const done = runSetup(root, { owallet: refused.owallet, origin: "https://norm.example" })
+    await screen(root, "Add marketplace credits")
+    click(root, "Add $1.00 of demo credits")
+    await screen(root, "No demo credits")
+    expect(root.textContent).toContain("demo_credits_exhausted")
+    expect(root.textContent).toContain("Lightning invoice")
+    click(root, "Start norm")
+    expect(await done).toEqual({ npub: "npub1me", linked: true })
+  })
+
   test("a funded account starts without the hint, and only core credits count", async () => {
     const fake = fakeOwallet({
       initialized: true,
@@ -289,7 +355,10 @@ describe("browser setup screen", () => {
   test("an owallet that cannot start is explained, and norm starts without it", async () => {
     const done = runSetup(root, {
       owallet: async () =>
-        Response.json({ error: { code: "owallet_unavailable", message: "owallet-web is not in this build" } }, { status: 503 }),
+        Response.json(
+          { error: { code: "owallet_unavailable", message: "owallet-web is not in this build" } },
+          { status: 503 },
+        ),
       origin: "https://norm.example",
     })
     await screen(root, "The wallet could not start")

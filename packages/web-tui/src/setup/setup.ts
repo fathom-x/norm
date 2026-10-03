@@ -11,8 +11,8 @@
 //   2. generate a wallet or import a seed phrase (the phrase is never shown)
 //   3. link Overpay: a fresh account (NIP-98 register), an existing one
 //      (PKCE in a popup → /oauth/callback.html), or later
-//   4. with an empty credit balance, say how to top up (a Lightning invoice
-//      from inside norm) before starting
+//   4. with an empty credit balance, offer a demo deployment's one-time demo
+//      credits, or say how to top up (a Lightning invoice from inside norm)
 // Resolves once the wallet is unlocked; linking is optional for launch. A
 // forgotten password can only be answered by starting over: `reset` (when the
 // page provides it) deletes this browser's wallet and reloads.
@@ -166,14 +166,49 @@ async function creditsHint(ui: SetupView, api: Client) {
     .then((body: any) => coreBalanceCents(body))
     .catch(() => undefined)
   if (cents === undefined || cents > 0) return
+
+  const lightning =
+    "To add some, ask norm once it starts — for example “load $5 of credits”. It answers with a Lightning invoice you can pay from any Lightning wallet; the credits arrive when it settles."
+  // A demo deployment (staging) grants each new account a little, once.
+  const demo: { enabled?: boolean; amount_cents?: number; granted?: boolean } | undefined = await api
+    .get("/_mgmt/demo-credits")
+    .then((body: any) => body?.data)
+    .catch(() => undefined)
+  if (demo?.enabled && !demo.granted && (demo.amount_cents ?? 0) > 0) {
+    const amount = usd(demo.amount_cents!)
+    const choice = await ui.choose({
+      title: "Add marketplace credits",
+      intro: [
+        "Your Overpay balance is $0.00. Every model turn and tool call is paid from it.",
+        `This Overpay offers new accounts ${amount} of demo credits, once.`,
+      ],
+      options: [
+        { value: "demo", label: `Add ${amount} of demo credits`, primary: true },
+        { value: "skip", label: "Start norm without" },
+      ],
+    })
+    if (choice === "skip") return
+    try {
+      await ui.busy("Adding demo credits…", () => api.post("/_mgmt/demo-credits", {}))
+      return
+    } catch (error) {
+      await ui.notice({
+        title: "No demo credits",
+        lines: [message(error), lightning],
+        button: "Start norm",
+      })
+      return
+    }
+  }
   await ui.notice({
     title: "Add marketplace credits",
-    lines: [
-      "Your Overpay balance is $0.00. Every model turn and tool call is paid from it.",
-      "To add some, ask norm once it starts — for example “load $5 of credits”. It answers with a Lightning invoice you can pay from any Lightning wallet; the credits arrive when it settles.",
-    ],
+    lines: ["Your Overpay balance is $0.00. Every model turn and tool call is paid from it.", lightning],
     button: "Start norm",
   })
+}
+
+function usd(cents: number) {
+  return `$${(cents / 100).toFixed(2)}`
 }
 
 /** The credits norm can spend anywhere: the core organisation's, summed. */

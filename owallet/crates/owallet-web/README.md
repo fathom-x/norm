@@ -98,4 +98,6 @@ Overpay). `bun run test:owallet` drives it end to end against
 `POST import {mnemonic, wallet_password?}`, `POST select {npub}`,
 `POST provider-key/create {label, spend, budget_usd}`, `POST overpay/register`,
 `POST overpay/pkce/start {redirect_uri}`, `POST overpay/pkce/finish {code, state}`,
-`GET credits`. See `src/mgmt.rs` for the response shapes.
+`GET credits`, `GET`/`POST demo-credits` (a demo deployment's one-time
+credits for a new account: Overpay's `/api/v1/demo_credits`, refusals keep
+their status and `code`). See `src/mgmt.rs` for the response shapes.

@@ -35,6 +35,7 @@ pub(crate) fn router(app: App) -> Router<App> {
         .route("/overpay/pkce/start", post(pkce_start))
         .route("/overpay/pkce/finish", post(pkce_finish))
         .route("/credits", get(credits))
+        .route("/demo-credits", get(demo_credits).post(claim_demo_credits))
 }
 
 /// Parse a JSON body; an empty body reads as `{}`.
@@ -425,4 +426,99 @@ async fn credits(State(app): State<App>) -> MgmtResult {
         .await
         .map_err(MgmtError::overpay)?;
     Ok(Json(value))
+}
+
+// ---- demo credits ----
+
+/// `GET /_mgmt/demo-credits` — whether this Overpay offers one-time demo
+/// credits and whether the wallet's account got them: Overpay's
+/// `{data: {enabled, amount_cents, granted}}` verbatim. An Overpay that
+/// predates the endpoint (404) reads as "not offered".
+async fn demo_credits(State(app): State<App>) -> MgmtResult {
+    let db = opened(&app)?;
+    selected_wallet(&*lock(&db)?)?;
+    let (_, auth) = app
+        .mcp_state(db)
+        .resolve_owned_auth()
+        .map_err(|e| MgmtError::internal(e.to_string()))?;
+    match app.overpay().demo_credits_value(auth.as_auth()).await {
+        Ok(value) => Ok(Json(value)),
+        Err(owallet_overpay::OverpayError::HttpStatus { status: 404, .. }) => Ok(Json(json!({
+            "data": { "enabled": false, "amount_cents": 0, "granted": false }
+        }))),
+        Err(e) => Err(MgmtError::overpay(e)),
+    }
+}
+
+/// `POST /_mgmt/demo-credits` — claim them: Overpay's
+/// `{data: {granted_cents, balance_cents}}` verbatim. Overpay's refusals keep
+/// their status and `code` (404 `demo_credits_disabled`, 409
+/// `already_granted`, 429 `demo_credits_exhausted`, 503 `not_configured`).
+async fn claim_demo_credits(State(app): State<App>) -> MgmtResult {
+    let db = opened(&app)?;
+    selected_wallet(&*lock(&db)?)?;
+    let (_, auth) = app
+        .mcp_state(db)
+        .resolve_owned_auth()
+        .map_err(|e| MgmtError::internal(e.to_string()))?;
+    match app.overpay().claim_demo_credits_value(auth.as_auth()).await {
+        Ok(value) => Ok(Json(value)),
+        Err(owallet_overpay::OverpayError::HttpStatus { status, body }) => {
+            Err(demo_credit_refusal(status, &body))
+        }
+        Err(e) => Err(MgmtError::overpay(e)),
+    }
+}
+
+/// Overpay's demo-credit refusal as a `/_mgmt` error with the same status and
+/// code; anything unrecognised stays a generic `overpay_error`.
+fn demo_credit_refusal(status: u16, body: &str) -> MgmtError {
+    let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let message = parsed
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("Overpay refused the demo credits")
+        .to_string();
+    let code = match parsed.get("code").and_then(Value::as_str) {
+        Some("demo_credits_disabled") => "demo_credits_disabled",
+        Some("already_granted") => "already_granted",
+        Some("demo_credits_exhausted") => "demo_credits_exhausted",
+        Some("not_configured") => "not_configured",
+        _ => {
+            return MgmtError::overpay(owallet_overpay::OverpayError::HttpStatus {
+                status,
+                body: body.to_string(),
+            })
+        }
+    };
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+    MgmtError::new(status, code, message)
+}
+
+#[cfg(test)]
+mod demo_credit_tests {
+    use super::*;
+
+    #[test]
+    fn refusals_keep_overpay_status_and_code() {
+        let e = demo_credit_refusal(
+            409,
+            r#"{"error":"already got them","code":"already_granted"}"#,
+        );
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        assert_eq!(e.code, "already_granted");
+        assert_eq!(e.message, "already got them");
+        let e = demo_credit_refusal(
+            429,
+            r#"{"error":"used up","code":"demo_credits_exhausted"}"#,
+        );
+        assert_eq!(e.status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[test]
+    fn unknown_refusals_are_generic_overpay_errors() {
+        let e = demo_credit_refusal(500, "<html>boom</html>");
+        assert_eq!(e.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(e.code, "overpay_error");
+    }
 }
