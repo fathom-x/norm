@@ -10,7 +10,9 @@ function View(props: { api: TuiPluginApi }) {
   const list = createMemo(() => props.api.state.lsp())
   const off = createMemo(() => !props.api.state.config.lsp)
 
+  // norm: no section at all when LSPs are turned off and none are running
   return (
+    <Show when={!(off() && list().length === 0)}>
     <box>
       <box flexDirection="row" gap={1} onMouseDown={() => list().length > 2 && setOpen((x) => !x)}>
         <Show when={list().length > 2}>
@@ -43,6 +45,7 @@ function View(props: { api: TuiPluginApi }) {
         </For>
       </Show>
     </box>
+    </Show>
   )
 }
 
