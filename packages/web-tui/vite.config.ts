@@ -9,7 +9,7 @@ const opencode = fileURLToPath(new URL("../opencode/src", import.meta.url))
 // One build path: `vite build` bundles the page and the core worker into
 // dist/ (`vite preview` serves it); `vite` serves the same graph for
 // development. See README.md.
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [browserBuild(), solidPlugin()],
   worker: {
     format: "es",
@@ -21,12 +21,16 @@ export default defineConfig({
     conditions: ["browser", "module", "import", "default"],
   },
   define: {
-    // Node's `global`. Vite would also inline `process.env` as `{}`; the core
-    // reads its flags from it at runtime, so point it at the process shim.
+    // Node's `global`. A production build would also inline `process.env` as
+    // `{}`; the core reads its flags from it at runtime, so point it at the
+    // process shim. (The dev server leaves `process.env` alone, and its own
+    // client reads the define before any shim could run.)
     global: "globalThis",
-    "process.env": "globalThis.process.env",
-    "global.process.env": "globalThis.process.env",
-    "globalThis.process.env": "globalThis.process.env",
+    ...(command === "build" && {
+      "process.env": "globalThis.process.env",
+      "global.process.env": "globalThis.process.env",
+      "globalThis.process.env": "globalThis.process.env",
+    }),
   },
   optimizeDeps: {
     // Ships its own .wasm next to the module; pre-bundling would lose it.
@@ -39,4 +43,4 @@ export default defineConfig({
     sourcemap: true,
     chunkSizeWarningLimit: 20_000,
   },
-})
+}))

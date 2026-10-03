@@ -122,6 +122,31 @@ fresh install (or anything else that would otherwise write to
 `~/.owallet`) without touching the real wallet database; read at process
 start, so export it before launching. `rm -rf` the directory to undo.
 
+## norm in the browser
+
+`packages/web-tui` runs the opencode core in a dedicated Web Worker
+(`packages/opencode/src/cli/tui/worker.browser.ts`: the `worker.ts` RPC
+surface minus `server`/`snapshot`/`checkUpgrade`, answered by
+`HttpApiApp.webHandler()` — never `server/server.ts`). Run everything from
+`packages/web-tui`: `bun run build` / `bun run preview`, `bun run test`
+(unit, bun + happy-dom), `bun run test:browser` (headless Chromium smoke
+test). Its README has the full map; the rules for core code:
+
+- **Browser variants are new files**, never edits to the native ones:
+  `#sqlite`/`#pty`/`#fff` have a `browser` condition (after `bun`/`node`, so
+  `bun dev --conditions=browser` is unaffected), and whole modules that are
+  platform seams get a twin listed in `TWINS` in
+  `packages/web-tui/build/browser-build.ts` (`app-node-platform` →
+  `app-browser-platform`, `cross-spawn-spawner`, `ripgrep`, `npm`,
+  `tool/shell`, …). A twin keeps the exact exports and Service keys.
+- Files are ZenFS (`core/src/effect/vfs-filesystem.ts`), persisted to OPFS;
+  SQLite is sqlite-wasm in the OPFS sahpool; there are no processes (every
+  spawn fails `NotFound`), so new code that shells out must already tolerate
+  a missing binary. Raw `node:*` imports resolve to `src/shims` or to stubs
+  that throw only when called.
+- `process.env.NORM_RUNTIME === "browser"` marks the build (seeded by
+  `packages/web-tui/src/env.ts`); norm talks to owallet at
+  `http://owallet.internal`, answered in-process by the worker's fetch router.
 
 ## Rebrand
 
