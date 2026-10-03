@@ -286,6 +286,18 @@ describe("browser setup screen", () => {
     expect(root.textContent).not.toContain("Forgot the password?")
   })
 
+  test("an owallet that cannot start is explained, and norm starts without it", async () => {
+    const done = runSetup(root, {
+      owallet: async () =>
+        Response.json({ error: { code: "owallet_unavailable", message: "owallet-web is not in this build" } }, { status: 503 }),
+      origin: "https://norm.example",
+    })
+    await screen(root, "The wallet could not start")
+    expect(root.textContent).toContain("owallet-web is not in this build")
+    click(root, "Continue without the wallet")
+    expect(await done).toEqual({ linked: false })
+  })
+
   test("Overpay can be skipped; norm still starts", async () => {
     const fake = fakeOwallet({ initialized: true, unlocked: true, wallet: { npub: "npub1me" } })
     const done = runSetup(root, { owallet: fake.owallet, origin: "https://norm.example" })

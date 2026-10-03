@@ -64,7 +64,20 @@ export async function runSetup(root: HTMLElement, deps: SetupDeps): Promise<Setu
   let password: string | undefined
 
   try {
-    let status = await ui.busy("Starting the wallet…", () => api.status())
+    let status: Status
+    try {
+      status = await ui.busy("Starting the wallet…", () => api.status())
+    } catch (error) {
+      // owallet-web did not start (not built into this page, another tab
+      // holds the wallet, …). norm still runs; the overpay provider will
+      // refuse until the wallet is back.
+      await ui.notice({
+        title: "The wallet could not start",
+        lines: [message(error), "norm can start without it, but cannot use the marketplace until it does."],
+        button: "Continue without the wallet",
+      })
+      return { linked: false }
+    }
 
     if (!status.initialized) {
       password = await ui.form({

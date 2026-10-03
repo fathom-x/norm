@@ -15,7 +15,8 @@
     "test:browser": "bun run build && node ./test/browser/smoke.mjs",
     "build:owallet": "./scripts/build-owallet-web.sh",
     "test:owallet": "bun run build:owallet && bun run build && node ./test/browser/owallet.mjs",
-    "test:tui": "bun run build && node ./test/browser/tui.mjs"
+    "test:tui": "bun run build && node ./test/browser/tui.mjs",
+    "test:e2e": "bun run build:owallet && bun run build && node ./test/browser/e2e.mjs"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "20.0.11",

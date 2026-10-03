@@ -54,10 +54,15 @@ function owalletEnvFlag() {
   return resolved === "prod" ? "" : `--${resolved} `
 }
 
+/** norm's browser build (packages/web-tui): no dashboard, no on-chain wallet. */
+function inBrowser() {
+  return process.env.NORM_RUNTIME === "browser"
+}
+
 function owalletUrl() {
   // The browser build: owallet is a wasm module behind the page's fetch
   // router (norm.ts's NormHost.BROWSER_OWALLET_URL), whatever NORM_HOME says.
-  if (process.env.NORM_RUNTIME === "browser") return "http://owallet.internal"
+  if (inBrowser()) return "http://owallet.internal"
   // A NORM_HOME sandbox is absolute: its own port, ambient NORM_OWALLET_URL
   // ignored (norm.ts prints the notice).
   const root = normHome()
@@ -549,7 +554,9 @@ function View(props: { api: TuiPluginApi }) {
       <Show when={status()?.zec_balance !== undefined}>
         <text fg={theme().textMuted}>{String(status()!.zec_balance)} ZEC</text>
       </Show>
-      <Show when={status()?.balance_error}>
+      {/* The browser build has no on-chain wallet by design
+          (owallet-web reports `unavailable_in_browser`): not a warning. */}
+      <Show when={status()?.balance_error && !status()!.balance_error!.startsWith("unavailable_in_browser")}>
         <text fg={theme().warning}>balance unavailable</text>
       </Show>
       <For each={credits()}>
@@ -594,10 +601,13 @@ function View(props: { api: TuiPluginApi }) {
         </text>
       </Show>
       {/* The dashboard link doubles as the headless port view
-          (fathom-x/norm#7): over ssh, this is the address to forward. */}
-      <text fg={theme().textMuted} onMouseDown={() => void open(dashboard).catch(() => {})}>
-        {dashboard}
-      </text>
+          (fathom-x/norm#7): over ssh, this is the address to forward. The
+          browser build has no dashboard to link to. */}
+      <Show when={!inBrowser()}>
+        <text fg={theme().textMuted} onMouseDown={() => void open(dashboard).catch(() => {})}>
+          {dashboard}
+        </text>
+      </Show>
     </box>
   )
 }

@@ -8,6 +8,7 @@
 import wasmUrl from "../../opentui-wasm/dist/opentui.wasm?url"
 import { startCore } from "./core-client"
 import { ENV } from "./env"
+import { OWALLET_ORIGIN } from "./fetch-router"
 
 // The build points `process.env` at `globalThis.process.env`, and some
 // modules read it as they load. Until opentui-wasm installs the page's real
@@ -37,7 +38,10 @@ if (params.has("debug-panel")) {
   root.dataset.state = "booting"
   try {
     await core.ready
-    // setup screen: wired by the lead
+    // The wallet before the TUI: create or unlock it, link Overpay (the
+    // browser twin of norm's TTY first-run prompts). The scripted mock has no
+    // wallet to set up.
+    if (!params.has("mock-owallet")) await setUpWallet()
     const { startTui } = await import("./tui")
     root.dataset.state = "ready"
     await startTui({
@@ -54,4 +58,28 @@ if (params.has("debug-panel")) {
     root.textContent = `norm failed to start: ${error instanceof Error ? error.message : String(error)}`
     console.error(error)
   }
+}
+
+async function setUpWallet() {
+  const [{ runSetup }, { resetBrowserState }] = await Promise.all([
+    import("./setup/setup"),
+    import("./reset"),
+    import("./setup/setup.css"),
+  ])
+  const screen = document.createElement("main")
+  document.body.prepend(screen)
+  root.hidden = true
+  try {
+    await runSetup(screen, {
+      owallet: (path, init) => core.privateFetch(`${OWALLET_ORIGIN}${path}`, init),
+      origin: location.origin,
+      reset: () => resetBrowserState({ stopCore: () => core.worker.terminate() }),
+    })
+  } finally {
+    screen.remove()
+    root.hidden = false
+  }
+  // norm's bootstrap ran when the core started, before the wallet was
+  // unlocked; run it again so it mints (or re-checks) norm's provider key.
+  await core.client.call("reload", undefined)
 }
