@@ -15,6 +15,8 @@ export type BootEvent =
 export interface WorkerOptions {
   /** Answer http://owallet.internal with the scripted mock (tests, demos without a wallet). */
   mockOwallet?: boolean
+  /** Extra environment for the core, over env.ts's ENV (e.g. OPENCODE_PRINT_LOGS). */
+  env?: Record<string, string>
 }
 
 export interface Core {

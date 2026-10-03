@@ -19,12 +19,15 @@ const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)))
 const packages = path.resolve(root, "..")
 const shim = (file: string) => path.join(root, "src/shims", file)
 
-/** core module → browser twin (absolute paths, both .ts). */
+/** module → browser twin with the same exports (absolute paths). */
 export const TWINS: Record<string, string> = Object.fromEntries(
   [
     ["core/src/effect/app-node-platform.ts", "core/src/effect/app-browser-platform.ts"],
     ["core/src/cross-spawn-spawner.ts", "core/src/cross-spawn-spawner.browser.ts"],
     ["core/src/ripgrep.ts", "core/src/ripgrep.browser.ts"],
+    ["core/src/npm.ts", "core/src/npm.browser.ts"],
+    ["opencode/src/tool/shell.ts", "opencode/src/tool/shell.browser.ts"],
+    ["opencode/src/tool/webfetch.txt", "opencode/src/tool/webfetch.browser.txt"],
   ].map(([from, to]) => [path.join(packages, from), path.join(packages, to)]),
 )
 
@@ -104,7 +107,7 @@ export function browserBuild(): Plugin {
       // Bun loads these as text (prompts, tool descriptions).
       if (/\.(md|txt)$/.test(source)) {
         const resolved = await this.resolve(source, importer, { ...options, skipSelf: true })
-        return resolved && `${resolved.id}?raw`
+        return resolved && `${TWINS[resolved.id] ?? resolved.id}?raw`
       }
       // Bun's `import x from "./a.wasm" with { type: "file" }` yields a path;
       // the closest browser equivalent is the asset's URL.

@@ -3,22 +3,33 @@
 // (packages/opencode/src/cli/tui/worker.browser.ts), so nothing in the core can
 // capture `fetch` or touch the file system before they exist.
 import "./shims/globals"
+import type { WorkerOptions } from "./core-client"
 import { installFetchRouter, OWALLET_ORIGIN, owalletUnavailable } from "./fetch-router"
+import { mockOwallet } from "./mock-owallet"
 import { mountVfs } from "./vfs"
 
-export const router = installFetchRouter({ [OWALLET_ORIGIN]: owalletUnavailable })
+// The page passes its options as the worker's name (core-client.ts).
+const options: WorkerOptions = (() => {
+  try {
+    return JSON.parse(self.name || "{}")
+  } catch {
+    return {}
+  }
+})()
+
+Object.assign(process.env, options.env)
+
+// owallet-web (the WebAssembly owallet) registers itself here once it is
+// built into the page; until then owallet.internal answers 503, or the
+// scripted mock when asked for.
+export const router = installFetchRouter({ [OWALLET_ORIGIN]: options.mockOwallet ? mockOwallet : owalletUnavailable })
+
+const boot = (data: object) => postMessage(JSON.stringify({ type: "rpc.event", event: "boot", data }))
 
 try {
-  const vfs = await mountVfs()
-  postMessage(JSON.stringify({ type: "rpc.event", event: "boot", data: { phase: "vfs", ...vfs } }))
+  boot({ phase: "vfs", ...(await mountVfs()) })
   await import("opencode/cli/tui/worker.browser")
 } catch (error) {
   console.error("[norm worker] failed to start", error)
-  postMessage(
-    JSON.stringify({
-      type: "rpc.event",
-      event: "boot",
-      data: { phase: "error", message: error instanceof Error ? `${error.message}\n${error.stack}` : String(error) },
-    }),
-  )
+  boot({ phase: "error", message: error instanceof Error ? `${error.message}\n${error.stack}` : String(error) })
 }

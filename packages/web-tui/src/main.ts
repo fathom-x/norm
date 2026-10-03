@@ -9,7 +9,12 @@ import { WORKSPACE } from "./env"
 type Session = { id: string; title: string; directory: string; time: { created: number; updated: number } }
 
 const params = new URLSearchParams(location.search)
-const core = startCore({ mockOwallet: params.has("mock-owallet") })
+// ?mock-owallet: scripted owallet (see mock-owallet.ts); ?debug: core logs
+// and norm's bootstrap diagnostics in the devtools console.
+const core = startCore({
+  mockOwallet: params.has("mock-owallet"),
+  env: params.has("debug") ? { OPENCODE_PRINT_LOGS: "1", NORM_DEBUG: "1" } : {},
+})
 const root = document.querySelector<HTMLElement>("#app")!
 
 // For Playwright and the devtools console.
