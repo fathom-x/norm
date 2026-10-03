@@ -45,7 +45,7 @@ core server and `norm.core` is the RPC client.
 to playwright's `index.js`) and `PORT` (default 4317); screenshots go to
 `test/screenshots/`. It checks: boot on OPFS with the demo workspace,
 `POST /session` + `GET /session` through `Rpc`, a file read, persistence
-across a reload, and scripted write → read, grep → glob and bash turns through
+across a reload, and scripted write → read, grep → glob, read → edit and bash turns through
 the real session loop (including owallet's `charged_cents` as the cost).
 
 ## How the core is made to bundle (`build/browser-build.ts`)
