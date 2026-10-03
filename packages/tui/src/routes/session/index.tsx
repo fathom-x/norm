@@ -125,6 +125,7 @@ const sessionBindingCommands = [
   "session.redo",
   "session.sidebar.toggle",
   "session.toggle.conceal",
+  "session.toggle.edits",
   "session.toggle.timestamps",
   "session.toggle.thinking",
   "session.toggle.actions",
@@ -159,6 +160,7 @@ const context = createContext<{
   width: number
   sessionID: string
   conceal: () => boolean
+  editsExpanded: () => boolean
   thinkingMode: () => ThinkingMode
   showThinking: () => boolean
   showTimestamps: () => boolean
@@ -258,6 +260,8 @@ export function Session() {
   const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
   const [conceal, setConceal] = createSignal(true)
+  // norm: edit/write/patch diffs are collapsed to one line by default
+  const [editsExpanded, setEditsExpanded] = kv.signal("edit_display_expanded", false)
   const thinking = useThinkingMode()
   const thinkingMode = thinking.mode
   const showThinking = createMemo(() => true)
@@ -685,6 +689,15 @@ export function Session() {
           setSidebar(() => (isVisible ? "hide" : "auto"))
           setSidebarOpen(!isVisible)
         })
+        dialog.clear()
+      },
+    },
+    {
+      title: `Toggle edit displays (${editsExpanded() ? "Enabled" : "Disabled"})`,
+      value: "session.toggle.edits",
+      category: "Session",
+      run: () => {
+        setEditsExpanded((prev) => !prev)
         dialog.clear()
       },
     },
@@ -1177,6 +1190,7 @@ export function Session() {
           },
           sessionID: route.sessionID,
           conceal,
+          editsExpanded,
           thinkingMode,
           showThinking,
           showTimestamps,
@@ -2160,8 +2174,19 @@ function Write(props: ToolProps) {
     return stringValue(props.input.content) ?? ""
   })
 
+  const ctx = use()
+
   return (
     <Switch>
+      <Match when={props.metadata.diagnostics !== undefined && !ctx.editsExpanded()}>
+        <CollapsedEdit
+          part={props.part}
+          label={`Wrote ${pathFormatter.format(stringValue(props.input.filePath))}`}
+          counts={`${code().split("\n").length} lines`}
+          diagnostics={props.metadata.diagnostics}
+          filePath={stringValue(props.input.filePath) ?? ""}
+        />
+      </Match>
       <Match when={props.metadata.diagnostics !== undefined}>
         <BlockTool title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))} part={props.part}>
           <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
@@ -2443,6 +2468,38 @@ function Execute(props: ToolProps) {
   )
 }
 
+// norm: an edit/write/patch result as one line — what changed and how much
+// — with the key that shows the diffs (session.toggle.edits). LSP problems
+// stay visible: they're short, and they're what needs attention.
+function CollapsedEdit(props: {
+  part: ToolPart
+  label: string
+  counts?: string
+  diagnostics?: unknown
+  filePath?: string
+}) {
+  const { theme } = useTheme()
+  const shortcut = useCommandShortcut("session.toggle.edits")
+  return (
+    <box>
+      <InlineTool icon="←" pending="" complete={true} part={props.part}>
+        {props.label}
+        <Show when={props.counts}>
+          <span style={{ fg: theme.textMuted }}> ({props.counts})</span>
+        </Show>
+      </InlineTool>
+      <Show when={shortcut()}>
+        <box paddingLeft={3}>
+          <text fg={theme.textMuted}>{shortcut()} to expand</text>
+        </box>
+      </Show>
+      <Show when={props.diagnostics !== undefined && props.filePath}>
+        <Diagnostics diagnostics={props.diagnostics as never} filePath={props.filePath!} />
+      </Show>
+    </box>
+  )
+}
+
 function Edit(props: ToolProps) {
   const ctx = use()
   const { theme, syntax } = useTheme()
@@ -2459,8 +2516,21 @@ function Edit(props: ToolProps) {
 
   const diffContent = createMemo(() => stringValue(props.metadata.diff) ?? "")
 
+  const filediff = createMemo(
+    () => props.metadata.filediff as { additions?: number; deletions?: number } | undefined,
+  )
+
   return (
     <Switch>
+      <Match when={stringValue(props.metadata.diff) !== undefined && !ctx.editsExpanded()}>
+        <CollapsedEdit
+          part={props.part}
+          label={`Edit ${pathFormatter.format(stringValue(props.input.filePath))}`}
+          counts={filediff() ? `+${filediff()!.additions ?? 0} −${filediff()!.deletions ?? 0}` : undefined}
+          diagnostics={props.metadata.diagnostics}
+          filePath={stringValue(props.input.filePath) ?? ""}
+        />
+      </Match>
       <Match when={stringValue(props.metadata.diff) !== undefined}>
         <BlockTool title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath))} part={props.part}>
           <box paddingLeft={1}>
@@ -2544,6 +2614,17 @@ function ApplyPatch(props: ToolProps) {
 
   return (
     <Switch>
+      <Match when={files().length > 0 && !ctx.editsExpanded()}>
+        <CollapsedEdit
+          part={props.part}
+          label={
+            files().length === 1
+              ? title(files()[0]).replace(/^[#←] /, "")
+              : `Patched ${files().length} files`
+          }
+          counts={`+${files().reduce((sum, file) => sum + (file.additions ?? 0), 0)} −${files().reduce((sum, file) => sum + (file.deletions ?? 0), 0)}`}
+        />
+      </Match>
       <Match when={files().length > 0}>
         <For each={files()}>
           {(file) => (
@@ -2722,7 +2803,17 @@ export function parseApplyPatchFiles(value: unknown) {
     const patch = stringValue(file.patch)
     const deletions = numberValue(file.deletions)
     if (!type || !relativePath || !filePath || patch === undefined || deletions === undefined) return []
-    return [{ type, relativePath, filePath, patch, deletions, movePath: stringValue(file.movePath) }]
+    return [
+      {
+        type,
+        relativePath,
+        filePath,
+        patch,
+        deletions,
+        additions: numberValue(file.additions),
+        movePath: stringValue(file.movePath),
+      },
+    ]
   })
 }
 
