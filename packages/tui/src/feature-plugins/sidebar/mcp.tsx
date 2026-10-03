@@ -26,8 +26,15 @@ function View(props: { api: TuiPluginApi }) {
     return theme().textMuted
   }
 
+  // norm: owallet is always there and always connected in a working
+  // install; the section only says something when another server is
+  // configured or owallet itself isn't connected.
+  const worthShowing = createMemo(() =>
+    list().some((item) => !(item.name === "owallet" && item.status === "connected")),
+  )
+
   return (
-    <Show when={list().length > 0}>
+    <Show when={worthShowing()}>
       <box>
         <box flexDirection="row" gap={1} onMouseDown={() => list().length > 2 && setOpen((x) => !x)}>
           <Show when={list().length > 2}>
