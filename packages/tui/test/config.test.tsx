@@ -63,7 +63,7 @@ test("resolves host-neutral defaults", () => {
   expect(config.mouse).toBe(true)
   expect(config.keybinds.has("terminal.suspend")).toBe(true)
   expect(config.keybinds.has("session.list")).toBe(true)
-  expect(config.cursor).toBeUndefined()
+  expect(config.cursor).toEqual({ style: "block", blinking: false })
 })
 
 test("resolves overrides without mutating input", () => {
