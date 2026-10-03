@@ -1574,12 +1574,18 @@ export function Prompt(props: PromptProps) {
                     })()}
                   </box>
                 </box>
-                <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
+                <text flexShrink={0} fg={store.interrupt > 0 ? theme.primary : theme.text}>
                   esc{" "}
                   <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
                     {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
                   </span>
                 </text>
+                {/* norm: where "esc again to interrupt" goes */}
+                <Show when={NormExit.armed()}>
+                  <text fg={theme.primary} flexShrink={0} wrapMode="none">
+                    ctrl+c again to exit
+                  </text>
+                </Show>
               </box>
             </Match>
             <Match when={workspace.notice()}>
@@ -1634,8 +1640,15 @@ export function Prompt(props: PromptProps) {
             </Match>
             <Match when={true}>
               {props.hint ?? (
-                <box marginLeft={3} flexShrink={1}>
-                  <Meta />
+                <box marginLeft={3} flexGrow={1} flexShrink={1} flexDirection="row" gap={2}>
+                  <box flexShrink={1}>
+                    <Meta />
+                  </box>
+                  <Show when={NormExit.armed()}>
+                    <text fg={theme.primary} flexShrink={0} wrapMode="none">
+                      ctrl+c again to exit
+                    </text>
+                  </Show>
                 </box>
               )}
             </Match>
@@ -1655,11 +1668,8 @@ export function Prompt(props: PromptProps) {
               <Switch>
                 <Match when={store.mode === "normal"}>
                   <Switch>
-                    <Match when={NormExit.armed()}>
-                      <text fg={theme.primary} wrapMode="none">
-                        ctrl+c again to exit
-                      </text>
-                    </Match>
+                    {/* norm: room for "ctrl+c again to exit" on the left */}
+                    <Match when={NormExit.armed()}>{null}</Match>
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
@@ -1686,7 +1696,7 @@ export function Prompt(props: PromptProps) {
                   {/* norm: → on an empty prompt toggles the sidebar (the hint
                       gives way on narrow screens, where "Build · model"
                       needs the room) */}
-                  <Show when={dimensions().width >= 70}>
+                  <Show when={dimensions().width >= 70 && !NormExit.armed()}>
                     <text fg={theme.text}>
                       → <span style={{ fg: theme.textMuted }}>sidebar</span>
                     </text>
