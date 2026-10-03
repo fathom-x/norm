@@ -7,7 +7,7 @@ export function sessionEpilogue(input: { title: string; sessionID?: string }) {
   return [
     "",
     `  ${weak("Session")}${bold}${input.title}${reset}`,
-    `  ${weak("Continue")}${bold}opencode -s ${input.sessionID}${reset}`,
+    `  ${weak("Continue")}${bold}norm -s ${input.sessionID}${reset}`,
     "",
   ].join("\n")
 }

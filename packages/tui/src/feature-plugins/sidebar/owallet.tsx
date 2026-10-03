@@ -5,6 +5,7 @@ import { Global } from "@opencode-ai/core/global"
 import { NormBudget } from "@opencode-ai/core/norm-budget"
 import { NormPricing } from "@opencode-ai/core/norm-pricing"
 import { NormAgentModels } from "@opencode-ai/core/norm-agent-models"
+import { NormBalance } from "../../component/norm-balance"
 import path from "node:path"
 import fs from "node:fs/promises"
 import open from "open"
@@ -398,32 +399,51 @@ function openRequestMaxDialog(api: TuiPluginApi, requestMax: number | null) {
   ))
 }
 
-function View(props: { api: TuiPluginApi }) {
-  const theme = () => props.api.theme.current
+/** One `GET /v1/status` poller for the whole app, started with the plugin:
+ * the sidebar widget renders it and the prompt's hints row shows its core
+ * balance (NormBalance), sidebar open or not. Re-read when a turn ends, so
+ * the balance reflects what the turn just spent. */
+function startStatusPoller(api: TuiPluginApi) {
   const base = owalletUrl()
-  const dashboard = `${base}/wallet`
   // The last successful read survives later failures, so stale data stays
   // on screen (with the failure line under it) instead of vanishing.
   const [status, setStatus] = createSignal<OwalletStatus | undefined>(undefined)
   const [outcome, setOutcome] = createSignal<FetchOutcome | undefined>(undefined)
 
   let timer: ReturnType<typeof setTimeout> | undefined
-  let disposed = false
-  const refresh = () =>
+  let reading = false
+  const refresh = () => {
+    if (reading) return
+    reading = true
+    if (timer) clearTimeout(timer)
     void fetchStatus(base).then((next) => {
-      if (disposed) return
+      reading = false
       setOutcome(next)
-      if (next.kind === "ok") setStatus(next.status)
+      if (next.kind === "ok") {
+        setStatus(next.status)
+        NormBalance.setCoreCents(next.status.merchant_credits?.find((row) => row.core === true)?.balance_cents)
+      }
       // A timeout means the serve is mid-read (Zcash sync) — hammering it
       // with retries only queues more of the same expensive read.
       const failedCheaply = next.kind !== "ok" && next.kind !== "timeout"
       timer = setTimeout(refresh, failedCheaply && !status() ? RETRY_MS : POLL_MS)
     })
+  }
   refresh()
-  onCleanup(() => {
-    disposed = true
-    if (timer) clearTimeout(timer)
+  api.event.on("session.status", (event) => {
+    if (event.properties.status.type === "idle") refresh()
   })
+  return { base, status, outcome }
+}
+
+type StatusPoller = ReturnType<typeof startStatusPoller>
+
+function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
+  const theme = () => props.api.theme.current
+  const base = props.poller.base
+  const dashboard = `${base}/wallet`
+  const status = props.poller.status
+  const outcome = props.poller.outcome
 
   // Core credits are the marketplace's primary spend balance: pinned to the
   // very top of the widget (above the chain balances) and shown even at $0.
@@ -436,6 +456,7 @@ function View(props: { api: TuiPluginApi }) {
   const waiting = () => status() === undefined
   const error = () => stateLine(outcome())
 
+  let disposed = false
   const [chatBudget, setChatBudget] = createSignal<NormBudget.Status>()
   const [requestMax, setRequestMax] = createSignal<number | null>(NormBudget.DEFAULT_REQUEST_MAX_USD)
   const [pricesVersion, setPricesVersion] = createSignal(NormPricing.version())
@@ -454,7 +475,10 @@ function View(props: { api: TuiPluginApi }) {
   }
   refreshChatBudget()
   const chatBudgetTimer = setInterval(refreshChatBudget, 5_000)
-  onCleanup(() => clearInterval(chatBudgetTimer))
+  onCleanup(() => {
+    disposed = true
+    clearInterval(chatBudgetTimer)
+  })
 
   // What the conversation's next model call would cost on the model it last
   // used — a list-price estimate (the charge is usually lower), from the
@@ -602,6 +626,7 @@ function View(props: { api: TuiPluginApi }) {
 const tui: TuiPlugin = async (api) => {
   if (normDisabled()) return
   loadPrices()
+  const poller = startStatusPoller(api)
   api.keymap.registerLayer({
     commands: [
       {
@@ -640,7 +665,7 @@ const tui: TuiPlugin = async (api) => {
     order: 250,
     slots: {
       sidebar_content() {
-        return <View api={api} />
+        return <View api={api} poller={poller} />
       },
     },
   })

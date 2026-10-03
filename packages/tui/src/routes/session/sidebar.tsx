@@ -3,12 +3,16 @@ import { useSync } from "../../context/sync"
 import { createMemo, Show } from "solid-js"
 import { useTheme } from "../../context/theme"
 import { useTuiConfig } from "../../config"
-import { InstallationChannel, InstallationVersion } from "@opencode-ai/core/installation/version"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { usePluginRuntime } from "../../plugin/runtime"
 
 import { getScrollAcceleration } from "../../util/scroll"
 import { WorkspaceLabel } from "../../component/workspace-label"
+import { abbreviateHome } from "../../runtime"
+import { useTuiPaths } from "../../context/runtime"
 
+// norm: also rendered on the home screen (sessionID ""), which is laid out
+// as an empty session; it then shows "New session" and the directory.
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const pluginRuntime = usePluginRuntime()
   const project = useProject()
@@ -22,15 +26,25 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
     return project.workspace.get(workspaceID)
   }
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
+  const paths = useTuiPaths()
+  // norm: the working directory (with branch) under the title, where
+  // upstream shows the session id; the prompt's hints row no longer has it.
+  const directory = createMemo(() => {
+    const dir = session()?.directory || sync.path.directory || paths.cwd
+    const out = abbreviateHome(dir, paths.home)
+    const branch = dir === sync.path.directory ? sync.data.vcs?.branch : undefined
+    return branch ? out + ":" + branch : out
+  })
+
+  const title = createMemo(() => session()?.title ?? "New session")
 
   return (
-    <Show when={session()}>
+    <Show when={session() || !props.sessionID}>
       <box
         backgroundColor={theme.backgroundPanel}
         width={42}
         height="100%"
         paddingTop={1}
-        paddingBottom={1}
         paddingLeft={2}
         paddingRight={2}
         position={props.overlay ? "absolute" : "relative"}
@@ -50,17 +64,15 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               name="sidebar_title"
               mode="single_winner"
               session_id={props.sessionID}
-              title={session()!.title}
-              share_url={session()!.share?.url}
+              title={title()}
+              share_url={session()?.share?.url}
             >
               <box paddingRight={1}>
                 <text fg={theme.text}>
-                  <b>{session()!.title}</b>
+                  <b>{title()}</b>
                 </text>
-                <Show when={InstallationChannel !== "latest"}>
-                  <text fg={theme.textMuted}>{props.sessionID}</text>
-                </Show>
-                <Show when={session()!.workspaceID}>
+                <text fg={theme.textMuted}>{directory()}</text>
+                <Show when={session()?.workspaceID}>
                   <text fg={theme.textMuted}>
                     <Show
                       when={workspace()}
@@ -77,7 +89,7 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                     </Show>
                   </text>
                 </Show>
-                <Show when={session()!.share?.url}>
+                <Show when={session()?.share?.url}>
                   <text fg={theme.textMuted}>{session()!.share!.url}</text>
                 </Show>
               </box>

@@ -86,6 +86,35 @@ syncs stay cheap:
   arithmetic. Without these the sidebar reads `$0.00 spent` for turns
   that spent real money.
 
+- **Compact session layout** (TUI): the session column has no side or
+  bottom padding; the input is a plain "> " in the agent's color (no
+  shaded panel, padding row or half-block edge); "agent · model ·
+  provider" moved from its own row in the input panel into the hints row
+  below it (replacing the cwd); user messages are one row; and the sidebar shows
+  the working directory (with branch) under the title instead of the
+  session id. The home route is laid out as an empty session (no logo,
+  tips or home footer; the sidebar shows "New session"), and the cursor
+  defaults to a steady block in the muted text color
+  (`tui/src/config/index.tsx`), hidden while the new-chat placeholder
+  shows. The model picker is the large dialog with a taller list
+  (`DialogSelect`'s `tall`), keeps prices in search results, and has no
+  "Connect provider" (ctrl+a) action (`component/dialog-model.tsx`);
+  in a conversation → toggles its prices between the next message and
+  the list price, hinted beside "esc" (`DialogSelect`'s `hint`).
+  "Build · model" starts in the column typed text does; while working a
+  one-character braille spinner sits two columns left of it (upstream: a
+  block sweep that pushed it right). → on an empty prompt toggles the
+  sidebar (session route and home). The hints row shows "$spent / $core" — the
+  conversation's spend over the wallet's core credits — from one
+  `/v1/status` poller the owallet plugin runs for the whole app
+  (`component/norm-balance.ts`), re-read when a turn ends. ctrl+c on an empty
+  prompt exits only on a second press within 2 s ("ctrl+c again to exit"
+  in the hints row; `component/norm-exit.ts`, bound in `app.tsx`, and
+  dropped from `app_exit`'s defaults in `config/keybind.ts`).
+  Edits: `routes/home.tsx`, `tui/src/component/prompt/index.tsx` (`Meta`),
+  `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
+  `feature-plugins/sidebar/footer.tsx` — expect conflicts there on syncs.
+
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until
@@ -134,7 +163,8 @@ state). There is no ASCII-art logo: the banner is "Norm <version>"
 (`cli/ui.ts` `logo()`, also printed by `norm`/`norm tui` ahead of the
 first-run wallet prompts in `cli/cmd/tui.ts`), the TUI home logo is the
 word "Norm" (`tui/src/component/logo.tsx`), and the exit summary is just
-the session lines (`tui/src/util/presentation.ts`).
+the session lines (`tui/src/util/presentation.ts`); the terminal window title is
+"Norm" / "Norm | <session title>" (`tui/src/app.tsx`).
 
 Deliberately *kept* from upstream for compatibility and cheap merges:
 `OPENCODE_*` env vars, `opencode.json`/`opencode.jsonc` config file
