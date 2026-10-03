@@ -7,7 +7,8 @@
 // Reads xterm.js's buffer (`window.__norm.term`), fails on any page error or
 // console error not on the allowlist below. Screenshots: test/screenshots/.
 //
-// Env: CHROME, PLAYWRIGHT, PORT (default 4319), DIST — as in smoke.mjs.
+// Env: CHROME, PLAYWRIGHT, PORT (default 4319), DIST — as in smoke.mjs;
+// BASE_PATH for a build served under a sub-path.
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { mkdirSync } from "node:fs"
@@ -18,7 +19,10 @@ import { fileURLToPath } from "node:url"
 const root = path.resolve(fileURLToPath(new URL("../..", import.meta.url)))
 const shots = path.join(root, "test/screenshots")
 const port = Number(process.env.PORT ?? 4319)
-const base = `http://127.0.0.1:${port}`
+// BASE_PATH: the page built for a sub-path (NORM_WEB_BASE=/norm/ vite build),
+// as on GitHub Pages; empty for the root.
+const basePath = (process.env.BASE_PATH ?? "").replace(/\/+$/, "")
+const base = `http://127.0.0.1:${port}${basePath}`
 const playwright = createRequire(import.meta.url)(
   process.env.PLAYWRIGHT ?? "/opt/node22/lib/node_modules/playwright/index.js",
 )
@@ -35,7 +39,7 @@ mkdirSync(shots, { recursive: true })
 const dist = process.env.DIST ?? path.join(root, "dist")
 const server = spawn(
   path.join(root, "node_modules/.bin/vite"),
-  ["preview", "--port", String(port), "--strictPort", "--outDir", dist],
+  ["preview", "--port", String(port), "--strictPort", "--outDir", dist, "--base", `${basePath}/`],
   {
   cwd: root,
     stdio: ["ignore", "pipe", "inherit"],

@@ -32,8 +32,14 @@ export type SetupResult = { npub?: string; linked: boolean }
 export type SetupDeps = {
   /** fetch against owallet-web; `path` starts with "/_mgmt/". */
   owallet: (path: string, init?: RequestInit) => Promise<Response>
-  /** The page origin; the OAuth redirect is `${origin}/oauth/callback.html`. */
+  /** The page origin: the OAuth callback page's messages must come from it. */
   origin: string
+  /**
+   * The OAuth callback page Overpay redirects to (default
+   * `${origin}/oauth/callback.html`). A page served under a path (GitHub
+   * Pages) passes it resolved against its base URL.
+   */
+  callbackUrl?: string
   /** Opens the Overpay login popup (must run inside the click handler). */
   openPopup?: (url: string) => Window | null
   /** Subscribes to window messages; returns an unsubscribe. */
@@ -284,7 +290,7 @@ async function linkOverpay(ui: SetupView, api: Client, deps: SetupDeps, status: 
 }
 
 async function linkExisting(ui: SetupView, api: Client, deps: SetupDeps): Promise<void> {
-  const redirect = `${deps.origin}/oauth/callback.html`
+  const redirect = deps.callbackUrl ?? `${deps.origin}/oauth/callback.html`
   const start: any = await api.post("/_mgmt/overpay/pkce/start", { redirect_uri: redirect })
   const url = start?.authorize_url
   const state = start?.state

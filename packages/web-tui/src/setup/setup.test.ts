@@ -197,6 +197,23 @@ describe("browser setup screen", () => {
     expect(fake.calls.find((c) => c.path === "/_mgmt/overpay/pkce/start")?.body).toEqual({
       redirect_uri: "https://norm.example/oauth/callback.html",
     })
+    // A page served under a path passes its own callback URL.
+    expect(
+      await (async () => {
+        const nested = fakeOwallet({ initialized: true, unlocked: true, wallet: { npub: "npub1me" } })
+        const host = document.createElement("div")
+        void runSetup(host, {
+          owallet: nested.owallet,
+          origin: "https://norm.example",
+          callbackUrl: "https://norm.example/norm/oauth/callback.html",
+          listen: () => () => {},
+        })
+        await screen(host, "Connect to Overpay")
+        click(host, "Use my existing Overpay account")
+        await screen(host, "Log in to Overpay")
+        return nested.calls.find((c) => c.path === "/_mgmt/overpay/pkce/start")?.body
+      })(),
+    ).toEqual({ redirect_uri: "https://norm.example/norm/oauth/callback.html" })
     click(root, "Open Overpay login")
     expect(opened).toEqual(["https://overpay.example/oauth/authorize?x=1"])
 

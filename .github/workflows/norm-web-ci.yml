@@ -147,6 +147,12 @@ jobs:
       - name: End to end (setup screen → TUI → owallet-web → mock Overpay)
         run: node test/browser/e2e.mjs
 
+      # As served from a sub-path (GitHub Pages: https://<owner>.github.io/<repo>/).
+      - name: The TUI under a sub-path
+        run: |
+          NORM_WEB_BASE=/norm/ node_modules/.bin/vite build --outDir "$RUNNER_TEMP/dist-sub"
+          DIST="$RUNNER_TEMP/dist-sub" BASE_PATH=/norm PORT=4321 node test/browser/tui.mjs
+
       - name: Screenshots
         if: always()
         uses: actions/upload-artifact@v4

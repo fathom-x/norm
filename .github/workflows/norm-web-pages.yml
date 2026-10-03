@@ -1,0 +1,77 @@
+# Deploy norm-in-the-browser (packages/web-tui) to GitHub Pages, on demand.
+#
+# Before the first run:
+#   - Settings → Pages → Source: "GitHub Actions".
+#   - The Overpay the page talks to (staging by default; `?overpay=<url>`
+#     overrides per visit) must allow the Pages origin
+#     (https://<owner>.github.io): API_CORS_ORIGINS for the API, and
+#     OAUTH_ALLOWED_REDIRECT_ORIGINS for "Use my existing Overpay account".
+#     Set DEMO_CREDITS_CENTS there too if new visitors should get demo credits.
+name: norm-web-pages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: norm-web-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-bun
+
+      - name: Cache the opentui checkout, Zig and its packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            packages/opentui-wasm/.work
+            ~/.cache/zig
+          key: opentui-wasm-${{ hashFiles('packages/opentui-wasm/UPSTREAM', 'packages/opentui-wasm/patches/**') }}
+
+      - name: opentui wasm core
+        run: bash packages/opentui-wasm/scripts/build.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: owallet/crates/owallet-web
+
+      - name: owallet-web
+        working-directory: packages/web-tui
+        run: |
+          command -v clang && command -v llvm-ar || { sudo apt-get update && sudo apt-get install -y clang llvm; }
+          v=$(grep -A1 '^name = "wasm-bindgen"$' ../../owallet/crates/owallet-web/Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          cargo install wasm-bindgen-cli --version "$v" --locked
+          bun run build:owallet
+
+      - name: Build the page for https://<owner>.github.io/<repo>/
+        working-directory: packages/web-tui
+        env:
+          NORM_WEB_BASE: /${{ github.event.repository.name }}/
+        run: bun run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: packages/web-tui/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

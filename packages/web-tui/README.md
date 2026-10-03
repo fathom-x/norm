@@ -43,6 +43,13 @@ Rust with the wasm32 target, clang + llvm-ar, and the matching
 wasm-bindgen-cli). The mock Overpay is
 `owallet/crates/owallet-web/tests/mock-overpay/server.mjs`.
 
+Serving from a sub-path (e.g. GitHub Pages, `https://<owner>.github.io/norm/`):
+build with `NORM_WEB_BASE=/norm/ bun run build`; assets, workers and the OAuth
+callback page resolve against it. `.github/workflows/norm-web-pages.yml`
+(manual dispatch) builds and deploys exactly that; its header lists what the
+target Overpay must allow (`API_CORS_ORIGINS`, `OAUTH_ALLOWED_REDIRECT_ORIGINS`,
+optionally `DEMO_CREDITS_CENTS`).
+
 CI: `.github/workflows/norm-web-ci.yml` runs all of the above (plus the
 opentui wasm build and norm's TUI suite on the wasm core). Its
 `staging-smoke` job runs `e2e.mjs` against a real Overpay nightly and on

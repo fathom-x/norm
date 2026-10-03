@@ -79,6 +79,8 @@ async function setUpWallet() {
     await runSetup(screen, {
       owallet: (path, init) => core.privateFetch(`${OWALLET_ORIGIN}${path}`, init),
       origin: location.origin,
+      // Next to the page, wherever it is served from (vite's `base`).
+      callbackUrl: new URL("oauth/callback.html", document.baseURI).href,
       reset: () => resetBrowserState({ stopCore: () => core.worker.terminate() }),
     })
   } finally {

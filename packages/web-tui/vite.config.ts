@@ -9,6 +9,9 @@ const opencode = fileURLToPath(new URL("../opencode/src", import.meta.url))
 // One build path: `vite build` bundles the page (the TUI on opentui's wasm
 // core) and the core worker into dist/, `vite preview` serves it. See README.md.
 export default defineConfig(({ command }) => ({
+  // Where the page is served from: "/" by default, e.g. "/norm/" on GitHub
+  // Pages. Every asset, the workers and the OAuth callback resolve against it.
+  base: process.env.NORM_WEB_BASE ?? "/",
   plugins: [
     browserBuild({ thread: "main", opentuiDist: OPENTUI_DIST }),
     // The TUI's JSX targets opentui's universal renderer — the transform
