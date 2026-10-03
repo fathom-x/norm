@@ -22,4 +22,10 @@ export const NormExit = {
     timer = setTimeout(() => setArmed(false), ARM_MS)
     return false
   },
+  /** Any other key: the next ctrl+c starts over (and the hint goes). */
+  disarm() {
+    if (!armed()) return
+    if (timer) clearTimeout(timer)
+    setArmed(false)
+  },
 }

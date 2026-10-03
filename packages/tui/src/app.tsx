@@ -1,4 +1,4 @@
-import { render, TimeToFirstDraw, useRenderer, useTerminalDimensions } from "@opentui/solid"
+import { render, TimeToFirstDraw, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { registerOpencodeSpinner } from "./component/register-spinner"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { Deferred, Effect } from "effect"
@@ -986,7 +986,12 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
 
   // norm: ctrl+c on an empty prompt exits only when pressed twice within
   // 2 s; the first press shows "ctrl+c again to exit" in the hints row.
-  // With text in the prompt, ctrl+c clears it (prompt.clear) as upstream.
+  // Any other key in between disarms it. With text in the prompt, ctrl+c
+  // clears it (prompt.clear) as upstream.
+  useKeyboard((evt) => {
+    if (evt.ctrl && evt.name === "c") return
+    NormExit.disarm()
+  })
   useBindings(() => ({
     mode: OPENCODE_BASE_MODE,
     enabled: () => {
