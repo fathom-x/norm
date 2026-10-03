@@ -9,6 +9,8 @@ import { MCP } from "../mcp"
 import { Skill } from "../skill"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
+import PROMPT_LOOP from "@/norm/loop.txt"
+import { NormTools } from "@/norm/tools"
 import { LegacyEvent } from "@opencode-ai/schema/legacy-event"
 
 type State = {
@@ -46,6 +48,7 @@ export function hints(template: string) {
 export const Default = {
   INIT: "init",
   REVIEW: "review",
+  LOOP: "loop",
 } as const
 
 export interface Interface {
@@ -86,6 +89,15 @@ const layer = Layer.effect(
         subtask: true,
         hints: hints(PROMPT_REVIEW),
       }
+      // norm: paced by the ScheduleWakeup tool, so it goes when that does.
+      if (!NormTools.disabled())
+        commands[Default.LOOP] = {
+          name: Default.LOOP,
+          description: "repeat a task, self-paced [task]",
+          source: "command",
+          template: PROMPT_LOOP,
+          hints: hints(PROMPT_LOOP),
+        }
 
       for (const [name, command] of Object.entries(cfg.command ?? {})) {
         commands[name] = {

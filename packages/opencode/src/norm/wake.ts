@@ -29,6 +29,8 @@ export type DeliverInput = {
   text: string
   /** Hidden from the transcript but sent to the model. Defaults to true. */
   synthetic?: boolean
+  /** Extra text for the model only, sent after `text` in the same message. */
+  hidden?: string
 }
 
 export type WhenIdleInput = DeliverInput & {
@@ -129,7 +131,10 @@ const layer = Layer.effect(
         model: user ? { providerID: user.model.providerID, modelID: user.model.modelID } : undefined,
         variant: user?.model.variant,
         noReply: true,
-        parts: [{ type: "text", text: input.text, synthetic: input.synthetic ?? true }],
+        parts: [
+          { type: "text", text: input.text, synthetic: input.synthetic ?? true },
+          ...(input.hidden ? [{ type: "text" as const, text: input.hidden, synthetic: true }] : []),
+        ],
       })
       yield* drive(input.sessionID, data.epochs.get(input.sessionID) ?? 0).pipe(
         Effect.catchCause((cause) =>

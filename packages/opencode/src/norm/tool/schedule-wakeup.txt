@@ -1,0 +1,18 @@
+Schedule when to resume work in /loop dynamic mode — the user invoked /loop, asking you to self-pace iterations of a specific task.
+
+Pass the same /loop prompt back via `prompt` each turn so the next firing repeats the task. To end the loop, call this tool with `stop: true` (omit every other field) — the loop ends immediately and no further wakeups fire.
+
+Set `noop: true` if nothing changed — you checked and there's nothing to report ("no change", "still waiting", "quiet hold"). Set `noop: false` if something happened worth keeping — you edited a file, posted a message, advanced state, or surfaced a finding. Omit `noop` when stopping (`stop: true`).
+
+The wakeup fires once the delay has passed and the session is idle, so end your turn after scheduling it. Only one wakeup is pending per session: scheduling again replaces it, and the user interrupting the session clears it.
+
+## Picking delaySeconds
+
+The runtime clamps the delay to [60, 3600]. Match the delay to what you're actually waiting for:
+
+- **Actively polling external state** (a CI run, a deploy, a remote queue): pick the delay from how fast that state actually changes. A CI run that takes ~8 minutes deserves one ~480s check, not eight 60s ones.
+- **Idle ticks with no specific signal to watch**: default to **1200s–1800s** (20–30 min). The loop still checks back regularly, and the user can always interrupt if they need you sooner.
+
+## The reason field
+
+One short sentence on what you chose and why. It is shown back to the user. "watching CI run" beats "waiting." The user reads this to understand what you're doing without having to predict your cadence in advance — make it specific.

@@ -141,6 +141,25 @@ syncs stay cheap:
   per instance: timers die with the process or a config reload. The scheduling and
   background tools (ScheduleWakeup, Monitor, cron) build on it.
 
+- **Claude Code's scheduling tools, under Claude Code's names**
+  (`src/norm/tools.ts`, `src/norm/tool/`): models are post-trained on
+  their vendor's tool schemas, and only Claude Code has these tools, so
+  ids, parameter names and descriptions are copied from it rather than
+  invented (PascalCase ids included). So far: `ScheduleWakeup`
+  (`delaySeconds` clamped to 60-3600, `prompt`, `reason`, `noop`, `stop`;
+  one pending wakeup per session, fired through `SessionWake.whenIdle`
+  as a visible user message plus a hidden note saying it was not typed)
+  and the `/loop` command that paces itself with it
+  (`command/index.ts`, template `src/norm/loop.txt`). Hook-ins:
+  `tool/registry.ts` appends `NormTools.infos` to the built-in list, and
+  `tool/task.ts` denies `NormTools.primaryOnly()` in subagent sessions
+  (a subagent that schedules a wakeup and ends its turn hands its parent
+  nothing). `NORM_DISABLE_WAKE=1` leaves the tools and `/loop` out; unset
+  they follow `NORM_DISABLE`; `=0` keeps them regardless (the test
+  preload sets `NORM_DISABLE=1`, so their tests opt back in this way).
+  `norm run` still exits when the turn ends, so a wakeup only fires in
+  the TUI or under `norm serve`. Tests: `test/norm/schedule-wakeup.test.ts`.
+
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until

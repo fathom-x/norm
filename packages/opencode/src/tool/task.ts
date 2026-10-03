@@ -14,6 +14,7 @@ import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { NormTools } from "@/norm/tools"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -147,6 +148,11 @@ export const TaskTool = Tool.define(
         ...(next.permission.some((rule) => rule.permission === id)
           ? []
           : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
+        ...NormTools.primaryOnly().map((permission) => ({
+          permission,
+          pattern: "*" as const,
+          action: "deny" as const,
+        })),
         ...(cfg.experimental?.primary_tools?.map((permission) => ({
           permission,
           pattern: "*" as const,
