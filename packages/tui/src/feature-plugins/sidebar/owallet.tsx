@@ -459,9 +459,7 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
   let disposed = false
   const [chatBudget, setChatBudget] = createSignal<NormBudget.Status>()
   const [requestMax, setRequestMax] = createSignal<number | null>(NormBudget.DEFAULT_REQUEST_MAX_USD)
-  const [pricesVersion, setPricesVersion] = createSignal(NormPricing.version())
   const refreshChatBudget = () => {
-    setPricesVersion(NormPricing.version())
     void NormBudget.getRequestMax().then(
       (next) => !disposed && setRequestMax(next),
       () => {},
@@ -480,26 +478,6 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
     clearInterval(chatBudgetTimer)
   })
 
-  // What the conversation's next model call would cost on the model it last
-  // used — a list-price estimate (the charge is usually lower), from the
-  // prices loadPrices() read.
-  const nextStep = createMemo(() => {
-    pricesVersion()
-    const sessionID = currentSessionID(props.api)
-    if (!sessionID) return undefined
-    const turns = props.api.state.session
-      .messages(sessionID)
-      .flatMap((message) =>
-        message.role === "assistant" && message.providerID === "overpay"
-          ? [{ modelID: message.modelID, tokens: message.tokens }]
-          : [],
-      )
-    const modelID = turns.at(-1)?.modelID
-    const model = modelID ? NormPricing.get(modelID) : undefined
-    const step = model?.pricing ? NormPricing.nextStep(model.pricing, model.id, turns) : undefined
-    return step && model ? { usd: step.usd, model: model.name ?? model.id } : undefined
-  })
-
   const needsLogin = () => status()?.overpay_connected === false
   // Every model — ":free" ones included — is paid by redeeming Overpay
   // credits, so a linked wallet with none can't answer a single prompt; the
@@ -515,6 +493,11 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
       <text fg={theme().text}>
         <b>owallet</b>
       </text>
+      <Show when={coreCredits()}>
+        <text fg={theme().textMuted}>
+          core credits <span style={{ fg: theme().text }}>{usd((coreCredits()!.balance_cents ?? 0) / 100)}</span>
+        </text>
+      </Show>
       {/* An unlinked wallet can't buy anything — norm's whole point. Say
           so first, ahead of every balance line. */}
       <Show when={needsLogin()}>
@@ -543,19 +526,7 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
           per message{" "}
           <span style={{ fg: theme().text }}>
             {requestMax() === null ? "no limit" : `≤ ${NormBudget.format(requestMax())}`}
-          </span>{" "}
-          · /budget
-        </text>
-        <Show when={nextStep()}>
-          <text fg={theme().textMuted}>
-            next step ≈ <span style={{ fg: theme().text }}>{NormPricing.money(nextStep()!.usd)}</span> on{" "}
-            {nextStep()!.model}
-          </text>
-        </Show>
-      </Show>
-      <Show when={coreCredits()}>
-        <text fg={theme().textMuted}>
-          core credits <span style={{ fg: theme().text }}>{usd((coreCredits()!.balance_cents ?? 0) / 100)}</span>
+          </span>
         </text>
       </Show>
       {/* Chain-qualified tickers (fathom-x/norm#22): both come from the
@@ -563,9 +534,6 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
           If /v1/status ever reports the chain, derive the prefix from it. */}
       <Show when={status()?.usdc_balance !== undefined}>
         <text fg={theme().textMuted}>{status()!.usdc_balance} BASE.USDC</text>
-      </Show>
-      <Show when={status()?.eth_balance !== undefined}>
-        <text fg={theme().textMuted}>{status()!.eth_balance} BASE.ETH</text>
       </Show>
       <Show when={status()?.zec_balance !== undefined}>
         <text fg={theme().textMuted}>{String(status()!.zec_balance)} ZEC</text>
@@ -581,21 +549,18 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
           </text>
         )}
       </For>
-      <Show when={!needsCredits() && status()?.merchant_credits !== undefined && credits().length === 0}>
-        <text fg={theme().textMuted}>no merchant credits</text>
-      </Show>
       <Show when={budget()}>
         <Show
           when={budget()!.daily_budget_usd != null}
           fallback={
             <text fg={theme().textMuted}>
-              budget <span style={{ fg: theme().text }}>{usd(budget()!.spent_today_usd ?? 0)}</span> today · no limit
+              daily budget <span style={{ fg: theme().text }}>{usd(budget()!.spent_today_usd ?? 0)}</span> · no limit
             </text>
           }
         >
           <text fg={theme().textMuted}>
-            budget <span style={{ fg: theme().text }}>{usd(budget()!.spent_today_usd ?? 0)}</span> /{" "}
-            {usd(budget()!.daily_budget_usd)} today
+            daily budget <span style={{ fg: theme().text }}>{usd(budget()!.spent_today_usd ?? 0)}</span> /{" "}
+            {usd(budget()!.daily_budget_usd)}
           </text>
         </Show>
       </Show>
@@ -609,13 +574,10 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
       <Show when={error()}>
         <text fg={theme().warning}>{error()}</text>
       </Show>
-      <Show when={status()?.overpay_url}>
-        <text fg={theme().textMuted} onMouseDown={() => void open(status()!.overpay_url!).catch(() => {})}>
-          {status()!.overpay_url}
-        </text>
-      </Show>
       {/* The dashboard link doubles as the headless port view
-          (fathom-x/norm#7): over ssh, this is the address to forward. */}
+          (fathom-x/norm#7): over ssh, this is the address to forward. (norm:
+          the Overpay site's URL no longer shows here.) */}
+      <text fg={theme().textMuted}>Admin Interface:</text>
       <text fg={theme().textMuted} onMouseDown={() => void open(dashboard).catch(() => {})}>
         {dashboard}
       </text>

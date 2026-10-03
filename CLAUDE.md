@@ -111,6 +111,14 @@ syncs stay cheap:
   prompt exits only on a second press within 2 s ("ctrl+c again to exit"
   in the hints row; `component/norm-exit.ts`, bound in `app.tsx`, and
   dropped from `app_exit`'s defaults in `config/keybind.ts`).
+  Queued messages (sent while a reply is in progress) get "press esc to
+  send immediately" once under them, and the hints row says "esc send
+  now": one esc, text in the prompt or not, calls norm's
+  `POST /session/:id/send_queued` (`server/routes/instance/httpapi`
+  groups + handlers `session.ts`), which cancels the reply and runs the
+  loop again so it answers every queued message. The generated SDK has no
+  method for it; `tui/src/util/norm-queue.ts` posts through the SDK's
+  underlying client.
   Edits: `routes/home.tsx`, `tui/src/component/prompt/index.tsx` (`Meta`),
   `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
   `feature-plugins/sidebar/footer.tsx` — expect conflicts there on syncs.

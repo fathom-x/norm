@@ -54,6 +54,7 @@ import { DialogTimeline } from "./dialog-timeline"
 import { DialogForkFromTimeline } from "./dialog-fork-from-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
+import { queuedCount } from "../../util/norm-queue"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
@@ -124,6 +125,7 @@ const sessionBindingCommands = [
   "session.redo",
   "session.sidebar.toggle",
   "session.toggle.conceal",
+  "session.toggle.edits",
   "session.toggle.timestamps",
   "session.toggle.thinking",
   "session.toggle.actions",
@@ -158,6 +160,8 @@ const context = createContext<{
   width: number
   sessionID: string
   conceal: () => boolean
+  editsExpanded: () => boolean
+  expandHint: (partID: string) => boolean
   thinkingMode: () => ThinkingMode
   showThinking: () => boolean
   showTimestamps: () => boolean
@@ -257,6 +261,33 @@ export function Session() {
   const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
   const [conceal, setConceal] = createSignal(true)
+  // norm: edit/write/patch diffs are collapsed to one line by default
+  const [editsExpanded, setEditsExpanded] = kv.signal("edit_display_expanded", false)
+  // norm: "ctrl+x d to expand" shows once, under the last of a run of
+  // collapsed tool results — a run can span several steps (each its own
+  // assistant message), and ends at any other visible part or a user message.
+  const expandHints = createMemo(() => {
+    const hints = new Set<string>()
+    let pending: string | undefined
+    const close = () => {
+      if (pending) hints.add(pending)
+      pending = undefined
+    }
+    for (const message of messages()) {
+      if (message.role === "user") {
+        close()
+        continue
+      }
+      for (const part of sync.data.part[message.id] ?? []) {
+        const kind = collapsedKind(part, editsExpanded())
+        if (kind === "skip") continue
+        if (kind === "collapsed") pending = part.id
+        else close()
+      }
+    }
+    close()
+    return hints
+  })
   const thinking = useThinkingMode()
   const thinkingMode = thinking.mode
   const showThinking = createMemo(() => true)
@@ -684,6 +715,15 @@ export function Session() {
           setSidebar(() => (isVisible ? "hide" : "auto"))
           setSidebarOpen(!isVisible)
         })
+        dialog.clear()
+      },
+    },
+    {
+      title: `Toggle edit and shell displays (${editsExpanded() ? "Enabled" : "Disabled"})`,
+      value: "session.toggle.edits",
+      category: "Session",
+      run: () => {
+        setEditsExpanded((prev) => !prev)
         dialog.clear()
       },
     },
@@ -1176,6 +1216,8 @@ export function Session() {
           },
           sessionID: route.sessionID,
           conceal,
+          editsExpanded,
+          expandHint: (partID: string) => expandHints().has(partID),
           thinkingMode,
           showThinking,
           showTimestamps,
@@ -1306,6 +1348,14 @@ export function Session() {
                     </Switch>
                   )}
                 </For>
+                {/* norm: once, under the queued messages */}
+                <Show when={queuedCount(messages()) > 0}>
+                  <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                    <text fg={theme.textMuted}>
+                      press <span style={{ fg: theme.text }}>esc</span> to send immediately
+                    </text>
+                  </box>
+                </Show>
               </scrollbox>
               <box flexShrink={0}>
                 <Show when={permissions().length > 0}>
@@ -1511,11 +1561,29 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
     return props.message.time.completed - user.time.created
   })
 
+  // norm: "Thinking..." while the model works on this reply and nothing of
+  // it shows yet — marketplace models don't stream their reasoning, so the
+  // transcript otherwise sits empty until the first words arrive.
+  const thinking = createMemo(() => {
+    if (props.message.time.completed || props.message.error) return false
+    if ((sync.data.session_status[props.message.sessionID]?.type ?? "idle") === "idle") return false
+    return !props.parts.some(
+      (part) =>
+        part.type === "tool" ||
+        ((part.type === "text" || part.type === "reasoning") && part.text.trim().length > 0),
+    )
+  })
+
   const childShortcut = useCommandShortcut("session.child.first")
   const backgroundShortcut = useCommandShortcut("session.background")
 
   return (
     <>
+      <Show when={thinking()}>
+        <box paddingLeft={3} marginTop={1} flexShrink={0}>
+          <text fg={theme.textMuted}>Thinking...</text>
+        </box>
+      </Show>
       <For each={props.parts}>
         {(part, index) => {
           const component = createMemo(() => PART_MAPPING[part.type as keyof typeof PART_MAPPING])
@@ -1962,12 +2030,7 @@ export function InlineToolRow(props: {
       onMouseUp={props.onMouseUp}
       ref={(el: BoxRenderable) => {
         if (props.separate) alwaysSeparate.add(el)
-        setPreLayoutSiblingMargin(el, (previous) => {
-          return props.separate ||
-            (previous instanceof BoxRenderable && (previous.height > 1 || alwaysSeparate.has(previous)))
-            ? 1
-            : 0
-        })
+        separateInlineRow(el, () => props.separate)
       }}
     >
       <Switch>
@@ -2013,6 +2076,16 @@ export function InlineToolRow(props: {
       </Show>
     </box>
   )
+}
+
+// A blank line above an inline row only when what precedes it is a block: a
+// multi-line box, or one that always separates (a user message, shell output).
+function separateInlineRow(el: BoxRenderable, separate?: () => boolean | undefined) {
+  setPreLayoutSiblingMargin(el, (previous) => {
+    return separate?.() || (previous instanceof BoxRenderable && (previous.height > 1 || alwaysSeparate.has(previous)))
+      ? 1
+      : 0
+  })
 }
 
 function BlockTool(props: {
@@ -2098,6 +2171,17 @@ function Shell(props: ToolProps) {
 
   return (
     <Switch>
+      {/* norm: one line from the moment the command starts — showing the
+          output while it streams and collapsing it at the end flickers. */}
+      <Match when={shellCollapsed(props.part, ctx.editsExpanded())}>
+        <CollapsedEdit
+          part={props.part}
+          icon="$"
+          spinner={isRunning()}
+          label={stringValue(props.input.command) ?? ""}
+          counts={!isRunning() && output() ? `${output().split("\n").length} lines` : undefined}
+        />
+      </Match>
       <Match when={stringValue(props.metadata.output) !== undefined}>
         <BlockTool
           title={title()}
@@ -2133,8 +2217,19 @@ function Write(props: ToolProps) {
     return stringValue(props.input.content) ?? ""
   })
 
+  const ctx = use()
+
   return (
     <Switch>
+      <Match when={props.metadata.diagnostics !== undefined && !ctx.editsExpanded()}>
+        <CollapsedEdit
+          part={props.part}
+          label={`Wrote ${pathFormatter.format(stringValue(props.input.filePath))}`}
+          counts={`${code().split("\n").length} lines`}
+          diagnostics={props.metadata.diagnostics}
+          filePath={stringValue(props.input.filePath) ?? ""}
+        />
+      </Match>
       <Match when={props.metadata.diagnostics !== undefined}>
         <BlockTool title={"# Wrote " + pathFormatter.format(stringValue(props.input.filePath))} part={props.part}>
           <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
@@ -2416,6 +2511,68 @@ function Execute(props: ToolProps) {
   )
 }
 
+// norm: an edit/write/patch result as one line — what changed and how much
+// — with the key that shows the diffs (session.toggle.edits). LSP problems
+// stay visible: they're short, and they're what needs attention.
+/** How a part counts for the "to expand" hint: a tool result shown
+ * collapsed, another visible part (ends a run), or nothing on screen. Mirrors
+ * the collapsed conditions in Edit, Write, ApplyPatch and Shell. */
+function collapsedKind(part: Part, expanded: boolean): "collapsed" | "visible" | "skip" {
+  if (part.type === "tool") {
+    if (shellCollapsed(part, expanded)) return "collapsed"
+    if (expanded || part.state.status !== "completed") return "visible"
+    const metadata = (part.state.metadata ?? {}) as Record<string, unknown>
+    if (part.tool === "edit" && typeof metadata.diff === "string") return "collapsed"
+    if (part.tool === "write" && metadata.diagnostics !== undefined) return "collapsed"
+    if (part.tool === "apply_patch" && parseApplyPatchFiles(metadata.files).length > 0) return "collapsed"
+    return "visible"
+  }
+  if ((part.type === "text" || part.type === "reasoning") && part.text.trim()) return "visible"
+  if (part.type === "file") return "visible"
+  return "skip"
+}
+
+/** A shell command shows as one line while it runs and after it finishes. */
+function shellCollapsed(part: ToolPart, expanded: boolean) {
+  if (expanded || part.tool !== "bash") return false
+  if (part.state.status === "running") return typeof part.state.input.command === "string"
+  return part.state.status === "completed"
+}
+
+function CollapsedEdit(props: {
+  part: ToolPart
+  label: string
+  counts?: string
+  icon?: string
+  spinner?: boolean
+  diagnostics?: unknown
+  filePath?: string
+}) {
+  const { theme } = useTheme()
+  const ctx = use()
+  const shortcut = useCommandShortcut("session.toggle.edits")
+  return (
+    // The margin rule goes on this wrapper: the row inside it has no sibling
+    // above, so on its own it would sit flush against a user message.
+    <box ref={(el: BoxRenderable) => separateInlineRow(el)}>
+      <InlineTool icon={props.icon ?? "←"} pending="" complete={true} spinner={props.spinner} part={props.part}>
+        {props.label}
+        <Show when={props.counts}>
+          <span style={{ fg: theme.textMuted }}> ({props.counts})</span>
+        </Show>
+      </InlineTool>
+      <Show when={shortcut() && ctx.expandHint(props.part.id)}>
+        <box paddingLeft={3}>
+          <text fg={theme.textMuted}>{shortcut()} to expand</text>
+        </box>
+      </Show>
+      <Show when={props.diagnostics !== undefined && props.filePath}>
+        <Diagnostics diagnostics={props.diagnostics as never} filePath={props.filePath!} />
+      </Show>
+    </box>
+  )
+}
+
 function Edit(props: ToolProps) {
   const ctx = use()
   const { theme, syntax } = useTheme()
@@ -2432,8 +2589,21 @@ function Edit(props: ToolProps) {
 
   const diffContent = createMemo(() => stringValue(props.metadata.diff) ?? "")
 
+  const filediff = createMemo(
+    () => props.metadata.filediff as { additions?: number; deletions?: number } | undefined,
+  )
+
   return (
     <Switch>
+      <Match when={stringValue(props.metadata.diff) !== undefined && !ctx.editsExpanded()}>
+        <CollapsedEdit
+          part={props.part}
+          label={`Edit ${pathFormatter.format(stringValue(props.input.filePath))}`}
+          counts={filediff() ? `+${filediff()!.additions ?? 0} −${filediff()!.deletions ?? 0}` : undefined}
+          diagnostics={props.metadata.diagnostics}
+          filePath={stringValue(props.input.filePath) ?? ""}
+        />
+      </Match>
       <Match when={stringValue(props.metadata.diff) !== undefined}>
         <BlockTool title={"← Edit " + pathFormatter.format(stringValue(props.input.filePath))} part={props.part}>
           <box paddingLeft={1}>
@@ -2517,6 +2687,17 @@ function ApplyPatch(props: ToolProps) {
 
   return (
     <Switch>
+      <Match when={files().length > 0 && !ctx.editsExpanded()}>
+        <CollapsedEdit
+          part={props.part}
+          label={
+            files().length === 1
+              ? title(files()[0]).replace(/^[#←] /, "")
+              : `Patched ${files().length} files`
+          }
+          counts={`+${files().reduce((sum, file) => sum + (file.additions ?? 0), 0)} −${files().reduce((sum, file) => sum + (file.deletions ?? 0), 0)}`}
+        />
+      </Match>
       <Match when={files().length > 0}>
         <For each={files()}>
           {(file) => (
@@ -2695,7 +2876,17 @@ export function parseApplyPatchFiles(value: unknown) {
     const patch = stringValue(file.patch)
     const deletions = numberValue(file.deletions)
     if (!type || !relativePath || !filePath || patch === undefined || deletions === undefined) return []
-    return [{ type, relativePath, filePath, patch, deletions, movePath: stringValue(file.movePath) }]
+    return [
+      {
+        type,
+        relativePath,
+        filePath,
+        patch,
+        deletions,
+        additions: numberValue(file.additions),
+        movePath: stringValue(file.movePath),
+      },
+    ]
   })
 }
 

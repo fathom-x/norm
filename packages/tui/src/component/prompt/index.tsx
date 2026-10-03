@@ -56,6 +56,7 @@ import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
 import { NormBalance } from "../norm-balance"
 import { NormExit } from "../norm-exit"
+import { queuedCount, sendQueued } from "../../util/norm-queue"
 import { isDefaultTitle } from "../../util/session"
 
 registerOpencodeSpinner()
@@ -423,6 +424,15 @@ export function Prompt(props: PromptProps) {
             return
           }
           if (!props.sessionID) return
+
+          // norm: with messages queued behind the reply, one esc (text in
+          // the prompt or not) interrupts it and answers them right away.
+          if (queuedCount(sync.data.message[props.sessionID] ?? []) > 0) {
+            setStore("interrupt", 0)
+            void sendQueued(sdk.client, props.sessionID).catch(() => {})
+            dialog.clear()
+            return
+          }
 
           setStore("interrupt", store.interrupt + 1)
 
@@ -1366,7 +1376,7 @@ export function Prompt(props: PromptProps) {
             </Show>
             <Show when={store.mode === "normal"}>
               <box flexDirection="row" gap={1} flexShrink={1} overflow="hidden">
-                <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
+                <text flexShrink={0} fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
                 <text
                   flexShrink={0}
                   wrapMode="none"
@@ -1407,6 +1417,7 @@ export function Prompt(props: PromptProps) {
           border={["top", "bottom"]}
           borderColor={theme.border}
           title={ruleTitle()}
+          titleColor={theme.textMuted}
           titleAlignment="right"
         >
           <text flexShrink={0} fg={borderHighlight()}>
@@ -1504,9 +1515,14 @@ export function Prompt(props: PromptProps) {
                 flexDirection="row"
                 gap={1}
                 flexGrow={1}
+                minWidth={0}
+                overflow="hidden"
                 justifyContent={status().type === "retry" ? "space-between" : "flex-start"}
               >
-                <box flexShrink={0} flexDirection="row" gap={1}>
+                {/* norm: shrinkable, so on a narrow screen "Build · model" is
+                    clipped rather than the row overflowing into the hints on
+                    the right (which left stray characters while working). */}
+                <box flexShrink={1} minWidth={0} overflow="hidden" flexDirection="row" gap={1}>
                   {/* norm: one column at 1, a space, then Meta at column 3 —
                       where typed text starts and where it sits when idle, so
                       "Build" doesn't move while working. */}
@@ -1515,7 +1531,7 @@ export function Prompt(props: PromptProps) {
                       <spinner color={spinnerColor()} frames={SPINNER_FRAMES} interval={80} />
                     </Show>
                   </box>
-                  <box flexDirection="row" gap={1} flexShrink={0}>
+                  <box flexDirection="row" gap={1} flexShrink={1} minWidth={0} overflow="hidden">
                     {(() => {
                       const retry = createMemo(() => {
                         const s = status()
@@ -1574,12 +1590,22 @@ export function Prompt(props: PromptProps) {
                     })()}
                   </box>
                 </box>
-                <text fg={store.interrupt > 0 ? theme.primary : theme.text}>
+                <text flexShrink={0} fg={store.interrupt > 0 ? theme.primary : theme.text}>
                   esc{" "}
                   <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
-                    {store.interrupt > 0 ? "again to interrupt" : "interrupt"}
+                    {queuedCount(sync.data.message[props.sessionID ?? ""] ?? []) > 0
+                      ? "send now"
+                      : store.interrupt > 0
+                        ? "again to interrupt"
+                        : "interrupt"}
                   </span>
                 </text>
+                {/* norm: where "esc again to interrupt" goes */}
+                <Show when={NormExit.armed()}>
+                  <text fg={theme.primary} flexShrink={0} wrapMode="none">
+                    ctrl+c again to exit
+                  </text>
+                </Show>
               </box>
             </Match>
             <Match when={workspace.notice()}>
@@ -1634,8 +1660,15 @@ export function Prompt(props: PromptProps) {
             </Match>
             <Match when={true}>
               {props.hint ?? (
-                <box marginLeft={3} flexShrink={1}>
-                  <Meta />
+                <box marginLeft={3} flexGrow={1} flexShrink={1} flexDirection="row" gap={2}>
+                  <box flexShrink={1}>
+                    <Meta />
+                  </box>
+                  <Show when={NormExit.armed()}>
+                    <text fg={theme.primary} flexShrink={0} wrapMode="none">
+                      ctrl+c again to exit
+                    </text>
+                  </Show>
                 </box>
               )}
             </Match>
@@ -1655,11 +1688,8 @@ export function Prompt(props: PromptProps) {
               <Switch>
                 <Match when={store.mode === "normal"}>
                   <Switch>
-                    <Match when={NormExit.armed()}>
-                      <text fg={theme.primary} wrapMode="none">
-                        ctrl+c again to exit
-                      </text>
-                    </Match>
+                    {/* norm: room for "ctrl+c again to exit" on the left */}
+                    <Match when={NormExit.armed()}>{null}</Match>
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
@@ -1686,7 +1716,7 @@ export function Prompt(props: PromptProps) {
                   {/* norm: → on an empty prompt toggles the sidebar (the hint
                       gives way on narrow screens, where "Build · model"
                       needs the room) */}
-                  <Show when={dimensions().width >= 70}>
+                  <Show when={dimensions().width >= 70 && !NormExit.armed()}>
                     <text fg={theme.text}>
                       → <span style={{ fg: theme.textMuted }}>sidebar</span>
                     </text>

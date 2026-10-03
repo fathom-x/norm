@@ -148,6 +148,8 @@ export const Definitions = {
   messages_undo: keybind("<leader>u", "Undo message"),
   messages_redo: keybind("<leader>r", "Redo message"),
   messages_toggle_conceal: keybind("<leader>h", "Toggle code block concealment in messages"),
+  // norm: show edit/write/patch diffs in the transcript (collapsed by default)
+  messages_toggle_edits: keybind("<leader>d", "Toggle edit displays"),
   tool_details: keybind("none", "Toggle tool details visibility"),
   display_thinking: keybind("none", "Toggle thinking blocks visibility"),
 
@@ -353,6 +355,7 @@ export const CommandMap = {
   messages_undo: "session.undo",
   messages_redo: "session.redo",
   messages_toggle_conceal: "session.toggle.conceal",
+  messages_toggle_edits: "session.toggle.edits",
   tool_details: "session.toggle.actions",
   display_thinking: "session.toggle.thinking",
   prompt_submit: "prompt.submit",
