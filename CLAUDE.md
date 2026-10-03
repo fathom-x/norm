@@ -115,6 +115,11 @@ syncs stay cheap:
   `routes/session/index.tsx`, `routes/session/sidebar.tsx`,
   `feature-plugins/sidebar/footer.tsx` — expect conflicts there on syncs.
 
+- **apply_patch for every model** (`src/tool/registry.ts`): upstream
+  offers the diff-editing `apply_patch` tool only to GPT models (instead
+  of edit/write); norm offers it to all of them, with edit/write kept
+  beside it except on GPT. Test in `test/tool/registry.test.ts`.
+
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until
@@ -150,8 +155,7 @@ with the already-installed binary. It is the supported way to exercise a
 fresh install (or anything else that would otherwise write to
 `~/.owallet`) without touching the real wallet database; read at process
 start, so export it before launching. `rm -rf` the directory to undo.
-
-
+  
 ## Testing norm as an agent
 
 Don't hand manual testing back to the user: norm is fully drivable without
