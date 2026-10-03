@@ -1,5 +1,7 @@
-// Vite plugins that let opencode's core (written for Bun/Node) bundle for a
-// browser Web Worker. Three mechanisms, in order of preference:
+// The Vite plugin that lets opencode (written for Bun/Node) bundle for a
+// browser: the core server in a Web Worker (`thread: "worker"`) and the TUI
+// on the page (`thread: "main"`, which adds opentui on its wasm core —
+// packages/opentui-wasm). Three mechanisms, in order of preference:
 //
 // 1. Browser twins — whole core modules replaced by a browser sibling with the
 //    same exports (TWINS). Used where the module *is* the platform seam.
@@ -10,6 +12,7 @@
 //    when called. Importing one is harmless; only calling it fails, and every
 //    such call sits on a path the browser build turns off (servers, child
 //    processes, native addons).
+import { readFileSync } from "node:fs"
 import { builtinModules } from "node:module"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -18,6 +21,10 @@ import type { Plugin } from "vite"
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)))
 const packages = path.resolve(root, "..")
 const shim = (file: string) => path.join(root, "src/shims", file)
+const opentuiShim = (file: string) => path.join(packages, "opentui-wasm/src/shims", file)
+
+/** packages/opentui-wasm's build output (scripts/build.sh). */
+export const OPENTUI_DIST = path.join(packages, "opentui-wasm/dist")
 
 /** module → browser twin with the same exports (absolute paths). */
 export const TWINS: Record<string, string> = Object.fromEntries(
@@ -54,10 +61,30 @@ export const SHIMS: Record<string, string> = {
   buffer: "buffer",
   stream: "readable-stream",
   "@effect/platform-node": shim("effect-platform-node.ts"),
+  open: shim("open.ts"),
+  clipboardy: shim("clipboardy.ts"),
   "opencode-gitlab-auth": shim("inert-auth-plugins.ts"),
   "opencode-poe-auth": shim("inert-auth-plugins.ts"),
   "@effect/platform-node/NodeFileSystem": shim("effect-node-filesystem.ts"),
   "@effect/platform-node/NodePath": shim("effect-node-path.ts"),
+}
+
+/**
+ * The page (main thread) also runs opentui and the TUI. These replace the
+ * worker's mapping where the terminal needs more than a stub: opentui-wasm's
+ * own shims for the built-ins its renderer touches (it owns `process` there —
+ * see shims/process.ts), and a `Bun` stand-in for the TUI's Bun.file/write.
+ */
+export const MAIN_SHIMS: Record<string, string> = {
+  perf_hooks: opentuiShim("perf_hooks.ts"),
+  console: opentuiShim("console.ts"),
+  worker_threads: opentuiShim("worker_threads.ts"),
+  tty: opentuiShim("tty.ts"),
+  child_process: opentuiShim("child_process.ts"),
+  bun: shim("bun.ts"),
+  "@opentui/core/testing": opentuiShim("testing-unavailable.ts"),
+  "@opentui/solid/runtime-plugin-support": shim("runtime-plugin-support.ts"),
+  "@opentui/solid/runtime-plugin-support/configure": shim("runtime-plugin-support.ts"),
 }
 
 /**
@@ -76,34 +103,60 @@ export const ABSENT = new Set([
   // load them lazily for their own providers.
   "@aws-sdk/credential-providers",
   "google-auth-library",
+  // opentui's native libraries (the page uses the wasm core).
+  "@opentui/core-darwin-arm64",
+  "@opentui/core-darwin-x64",
+  "@opentui/core-linux-arm64",
+  "@opentui/core-linux-arm64-musl",
+  "@opentui/core-linux-x64",
+  "@opentui/core-linux-x64-musl",
+  "@opentui/core-win32-arm64",
+  "@opentui/core-win32-x64",
 ])
 
 /** Built-in names an npm package provides; the package wins when installed. */
 const POLYFILLED = new Set(["string_decoder", "punycode"])
 
-const SHIM_FILES = new Map(
-  Object.entries(SHIMS)
-    .filter(([, target]) => path.isAbsolute(target))
-    .map(([name, target]) => [target, name]),
-)
-
 const builtins = new Set(builtinModules.filter((name) => !name.startsWith("_")))
 const STUB = "\0browser-stub:"
 const MISSING = "\0browser-absent:"
 
-export function browserBuild(): Plugin {
+export interface BrowserBuildOptions {
+  thread: "worker" | "main"
+  /** opentui-wasm's dist/ (main thread only). */
+  opentuiDist?: string
+}
+
+export function browserBuild(options: BrowserBuildOptions): Plugin {
+  const main = options.thread === "main"
+  const shims = main ? { ...SHIMS, ...MAIN_SHIMS } : SHIMS
+  const shimFiles = new Map(
+    Object.entries(shims)
+      .filter(([, target]) => path.isAbsolute(target) && target.startsWith(root))
+      .map(([name, target]) => [target, name]),
+  )
+  const dist = options.opentuiDist ?? OPENTUI_DIST
   return {
-    name: "norm-web:browser-build",
+    name: `norm-web:browser-build:${options.thread}`,
     enforce: "pre",
     async resolveId(source, importer, options) {
       const bare = source.startsWith("node:") ? source.slice(5) : source
-      const target = SHIMS[bare]
+      const target = shims[bare]
       if (target) {
         if (path.isAbsolute(target)) return target
         // An npm polyfill: resolve it from this package, not the importer.
         return this.resolve(target, path.join(root, "package.json"), { ...options, skipSelf: true })
       }
       if (ABSENT.has(source)) return MISSING + source
+      if (main) {
+        const opentui = opentuiPackage(dist, source)
+        if (opentui) return opentui
+        // The built opentui packages import their few runtime dependencies
+        // (solid-js, entities, ...) by bare name: resolve them from this
+        // package, so there is one solid-js on the page.
+        if (importer?.startsWith(dist) && /^[@a-z]/.test(source) && !builtins.has(bare) && !source.startsWith("bun"))
+          return this.resolve(source, path.join(root, "package.json"), { ...options, skipSelf: true })
+      }
       // Bun loads these as text (prompts, tool descriptions).
       if (/\.(md|txt)$/.test(source)) {
         const resolved = await this.resolve(source, importer, { ...options, skipSelf: true })
@@ -134,7 +187,8 @@ export function browserBuild(): Plugin {
     // A shim implements what opencode calls; any other name a dependency
     // imports from it links to a throwing stub instead of failing the build.
     transform(code, id) {
-      const name = SHIM_FILES.get(id)
+      if (main && id.startsWith(dist)) return patchOpentuiDist(code)
+      const name = shimFiles.get(id)
       if (!name) return
       return {
         code: `${code}\n${stubPrelude(name)}\nexport const $fallback = $stub`,
@@ -155,6 +209,48 @@ export function browserBuild(): Plugin {
       return { code: await stubModule(name), syntheticNamedExports: true }
     },
   }
+}
+
+// Two edits to the built opentui core for the page:
+// - CliRenderer installs its own requestAnimationFrame on the global object
+//   (Bun has none; callbacks then run inside its render loop). In a browser
+//   the global *is* `window`, so that also captured xterm.js's frames and the
+//   terminal's DOM stopped updating. The browser's own rAF serves the TUI's
+//   few callers just as well, so the override is renamed away.
+// - The tree-sitter parser loader builds `new URL(\`./${path}\`)`, which Vite
+//   expands into a glob over the whole dist/core directory (every chunk, map
+//   and .d.ts copied into the build). Highlighting assets are not served in
+//   the browser yet, so the URL is left to runtime.
+function patchOpentuiDist(code: string) {
+  const patched = code
+    .replace("global.requestAnimationFrame =", "global.__opentuiRequestAnimationFrame =")
+    .replace("global.cancelAnimationFrame =", "global.__opentuiCancelAnimationFrame =")
+    .replace("global.window.requestAnimationFrame = requestAnimationFrame;", "")
+    .replace("new URL(`./${relativePath}`, import.meta.url)", "new URL(/* @vite-ignore */ `./${relativePath}`, import.meta.url)")
+  if (patched === code) return
+  return { code: patched, map: null }
+}
+
+// `@opentui/core[/x]` / `@opentui/solid[/x]` → the built package's file for
+// that export, preferring the `browser` condition (the wasm-backed core).
+function opentuiPackage(dist: string, source: string) {
+  const match = /^@opentui\/(core|solid)(\/.*)?$/.exec(source)
+  if (!match) return
+  const dir = path.join(dist, match[1])
+  const exports = readExports(dir)
+  const entry = exports[`.${match[2] ?? ""}`]
+  if (typeof entry === "string") return path.join(dir, entry)
+  const target = entry && (entry.browser ?? entry.import ?? entry.default)
+  if (typeof target === "string") return path.join(dir, target)
+}
+
+const exportsCache = new Map<string, Record<string, string | Record<string, string>>>()
+function readExports(dir: string) {
+  const cached = exportsCache.get(dir)
+  if (cached) return cached
+  const exports = JSON.parse(readFileSync(path.join(dir, "package.json"), "utf8")).exports ?? {}
+  exportsCache.set(dir, exports)
+  return exports
 }
 
 // Named exports come from the real Node module when this build runs on Node

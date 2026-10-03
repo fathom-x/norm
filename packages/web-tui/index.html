@@ -77,6 +77,26 @@
       pre {
         padding-left: 16px;
       }
+      /* The TUI: the terminal fills the viewport. */
+      html:has(#app.tui),
+      html:has(#app.tui) body {
+        height: 100%;
+        overflow: hidden;
+        background: #0a0a0a;
+      }
+      #app.tui {
+        position: fixed;
+        inset: 0;
+        max-width: none;
+        margin: 0;
+        padding: 4px;
+        box-sizing: border-box;
+        background: #0a0a0a;
+        color: #e7e5e4;
+      }
+      #app.tui .xterm {
+        height: 100%;
+      }
     </style>
   </head>
   <body>

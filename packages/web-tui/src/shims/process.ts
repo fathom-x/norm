@@ -34,7 +34,7 @@ const stream = (fd: number) => ({
   end: () => undefined,
 })
 
-export const process = Object.assign(emitter, {
+const own = Object.assign(emitter, {
   title: "browser",
   browser: true,
   platform: "linux" as const,
@@ -89,5 +89,31 @@ export const process = Object.assign(emitter, {
   features: {},
   config: { variables: {} },
 })
+
+/**
+ * The process object every `process` import sees. In the worker that is this
+ * module's (installed as the global by globals.ts). On the page opentui-wasm
+ * installs its own first (bootOpenTUIWasm: stdin/stdout wired to xterm.js)
+ * and `completeProcess` fills in the rest, so both views agree.
+ */
+export const process: typeof own = existing() ?? own
+
+function existing() {
+  const current = (globalThis as { process?: { browser?: boolean } }).process
+  return current?.browser === true ? (current as typeof own) : undefined
+}
+
+/** Give opentui-wasm's process the members only this shim has (cwd, chdir, env, ...). */
+export function completeProcess(target: Record<string, unknown>, env: Record<string, string>) {
+  const source = own as unknown as Record<string, unknown>
+  for (const key of Object.keys(source))
+    if (!(key in target) && !key.startsWith("_")) target[key] = source[key]
+  Object.assign(target.env as Record<string, string>, env)
+  target.cwd = own.cwd
+  target.chdir = own.chdir
+  target.argv = own.argv
+  target.hrtime = own.hrtime
+  return target
+}
 
 export default process

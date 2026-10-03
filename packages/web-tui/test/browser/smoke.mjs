@@ -1,10 +1,12 @@
-// Browser smoke test for the core worker (Spike 2 exit criteria), against the
+// Browser smoke test for the core worker (Spike 2 exit criteria), through the
+// debug panel (`?debug-panel`), against the
 // built page (`vite build` first; `bun run test:browser` does both).
 //
 //   node test/browser/smoke.mjs
 //
 // Env: CHROME (Chromium binary), PLAYWRIGHT (path to playwright's index.js),
-// PORT (preview port, default 4317). Screenshots land in test/screenshots/.
+// PORT (preview port, default 4317), DIST (the build to serve, default dist/).
+// Screenshots land in test/screenshots/.
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { mkdirSync } from "node:fs"
@@ -22,10 +24,17 @@ const playwright = createRequire(import.meta.url)(
 const executablePath = process.env.CHROME ?? "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
 
 mkdirSync(shots, { recursive: true })
-const server = spawn(path.join(root, "node_modules/.bin/vite"), ["preview", "--port", String(port), "--strictPort"], {
+// DIST: the build to serve (default dist/; `vite build --outDir <dir>` elsewhere
+// keeps parallel builds from overwriting each other).
+const dist = process.env.DIST ?? path.join(root, "dist")
+const server = spawn(
+  path.join(root, "node_modules/.bin/vite"),
+  ["preview", "--port", String(port), "--strictPort", "--outDir", dist],
+  {
   cwd: root,
-  stdio: ["ignore", "pipe", "inherit"],
-})
+    stdio: ["ignore", "pipe", "inherit"],
+  },
+)
 await new Promise((resolve, reject) => {
   server.stdout.on("data", (chunk) => String(chunk).includes(String(port)) && resolve())
   server.on("exit", (code) => reject(new Error(`vite preview exited (${code})`)))
@@ -63,7 +72,7 @@ try {
 
   let created
   await step("boots the core worker on OPFS and seeds the demo workspace", async () => {
-    await page.goto(`${base}/`)
+    await page.goto(`${base}/?debug-panel`)
     const status = await ready()
     assert.match(status, /files: opfs \(demo workspace created\)/)
   })
@@ -110,7 +119,7 @@ try {
   }
 
   await step("write + read tool round trip on the workspace (scripted model)", async () => {
-    await page.goto(`${base}/?mock-owallet`)
+    await page.goto(`${base}/?debug-panel&mock-owallet`)
     await ready()
     const { tools, messages } = await prompt("write a note, then read it back")
     assert.deepEqual(

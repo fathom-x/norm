@@ -1070,18 +1070,24 @@
         "@opencode-ai/plugin": "workspace:*",
         "@opencode-ai/schema": "workspace:*",
         "@opencode-ai/sdk": "workspace:*",
+        "@opencode-ai/tui": "workspace:*",
+        "@opentui/keymap": "catalog:",
         "@sqlite.org/sqlite-wasm": "3.53.4-build1",
+        "@xterm/addon-fit": "0.10.0",
+        "@xterm/xterm": "5.5.0",
         "@zenfs/core": "2.7.6",
         "@zenfs/dom": "1.2.14",
         "buffer": "6.0.3",
         "drizzle-orm": "catalog:",
         "effect": "catalog:",
+        "entities": "7.0.1",
         "events": "3.3.0",
         "kerium": "1.5.0",
         "opencode": "workspace:*",
         "path-browserify": "1.0.1",
         "readable-stream": "4.7.0",
         "solid-js": "catalog:",
+        "string-width": "7.2.0",
         "utilium": "3.9.0",
       },
       "devDependencies": {
@@ -3089,6 +3095,10 @@
     "@webgpu/types": ["@webgpu/types@0.1.54", "", {}, "sha512-81oaalC8LFrXjhsczomEQ0u3jG+TqE6V9QHLA8GNZq/Rnot0KDugu3LhSYSlie8tSdooAN1Hov05asrUUp9qgg=="],
 
     "@xmldom/xmldom": ["@xmldom/xmldom@0.8.13", "", {}, "sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw=="],
+
+    "@xterm/addon-fit": ["@xterm/addon-fit@0.10.0", "", { "peerDependencies": { "@xterm/xterm": "^5.0.0" } }, "sha512-UFYkDm4HUahf2lnEyHvio51TNGiLK66mqP2JoATy7hRZeXaGMRDr00JiSF7m63vR5WKATF605yEggJKsw0JpMQ=="],
+
+    "@xterm/xterm": ["@xterm/xterm@5.5.0", "", {}, "sha512-hqJHYaQb5OptNunnyAnkHyM8aCjZ1MEIDTQu1iIbbTD/xops91NB5yq1ZK/dC2JDbVWtF23zUtl9JE2NqwT87A=="],
 
     "@zenfs/core": ["@zenfs/core@2.7.6", "", { "dependencies": { "@types/node": "^26.0.0", "@zenfs/streams": "^1.0.0", "buffer": "^6.0.3", "eventemitter3": "^5.0.1", "kerium": "^1.5.0", "memium": "^1.0.0", "utilium": "^3.7.0" }, "bin": { "make-index": "scripts/make-index.js", "zenfs-test": "scripts/test.js", "zci": "scripts/ci-cli.js" } }, "sha512-XFXuud3+ZUfH5gg7Wt6RsXNT54WTmRX/S6GTMfPFwJhPTMVWqZ+r/fE3PC3sbw2+qoQ16EwbEA+a+dmeApAg/w=="],
 

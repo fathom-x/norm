@@ -124,13 +124,16 @@ start, so export it before launching. `rm -rf` the directory to undo.
 
 ## norm in the browser
 
-`packages/web-tui` runs the opencode core in a dedicated Web Worker
+`packages/web-tui` runs norm in a browser tab: the real TUI on the page
+(xterm.js + opentui on its wasm core from `packages/opentui-wasm`) and the
+opencode core in a dedicated Web Worker
 (`packages/opencode/src/cli/tui/worker.browser.ts`: the `worker.ts` RPC
 surface minus `server`/`snapshot`/`checkUpgrade`, answered by
 `HttpApiApp.webHandler()` — never `server/server.ts`). Run everything from
 `packages/web-tui`: `bun run build` / `bun run preview`, `bun run test`
-(unit, bun + happy-dom), `bun run test:browser` (headless Chromium smoke
-test). Its README has the full map; the rules for core code:
+(unit, bun + happy-dom), `bun run test:tui` (the TUI in headless Chromium),
+`bun run test:browser` (core smoke test via `?debug-panel`). Its README has
+the full map; the rules for core and TUI code:
 
 - **Browser variants are new files**, never edits to the native ones:
   `#sqlite`/`#pty`/`#fff` have a `browser` condition (after `bun`/`node`, so
@@ -143,7 +146,8 @@ test). Its README has the full map; the rules for core code:
   SQLite is sqlite-wasm in the OPFS sahpool; there are no processes (every
   spawn fails `NotFound`), so new code that shells out must already tolerate
   a missing binary. Raw `node:*` imports resolve to `src/shims` or to stubs
-  that throw only when called.
+  that throw only when called. On the page the TUI's files are the worker's
+  tree (ZenFS `Port`); sync fs calls there read a cache filled at mount.
 - `process.env.NORM_RUNTIME === "browser"` marks the build (seeded by
   `packages/web-tui/src/env.ts`); norm talks to owallet at
   `http://owallet.internal`, answered in-process by the worker's fetch router.

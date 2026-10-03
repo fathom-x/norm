@@ -5,8 +5,10 @@ import { Rpc } from "opencode/util/rpc"
 import type { rpc } from "opencode/cli/tui/worker.browser"
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import { OPENCODE_ORIGIN } from "./fetch-router"
+import type { WorkerRpc } from "./worker-rpc"
 
-export type CoreClient = ReturnType<typeof Rpc.client<typeof rpc>>
+type CoreRpc = typeof rpc & WorkerRpc
+export type CoreClient = ReturnType<typeof Rpc.client<CoreRpc>>
 
 export type BootEvent =
   | { phase: "vfs"; storage: "opfs" | "memory"; seeded: boolean }
@@ -22,6 +24,8 @@ export interface WorkerOptions {
    * staging Overpay. The page fills it from `?overpay=<url>`.
    */
   overpay?: { railsUrl: string; env?: string; publicUrl?: string }
+  /** BroadcastChannel name the worker serves its file tree on (main-vfs.ts). */
+  vfsChannel?: string
 }
 
 export interface Core {
@@ -32,6 +36,8 @@ export interface Core {
   /** `fetch` against the core server, e.g. `core.fetch("/session")`. */
   readonly fetch: typeof fetch
   readonly onEvent: (handler: (event: GlobalEvent) => void) => () => void
+  /** `fetch` for the worker's private origins (http://owallet.internal), buffered. */
+  readonly privateFetch: typeof fetch
 }
 
 export function startCore(options: WorkerOptions = {}): Core {
@@ -39,7 +45,7 @@ export function startCore(options: WorkerOptions = {}): Core {
     type: "module",
     name: JSON.stringify(options),
   })
-  const client = Rpc.client<typeof rpc>(worker)
+  const client = Rpc.client<CoreRpc>(worker)
   const ready = new Promise<BootEvent & { phase: "vfs" }>((resolve, reject) => {
     const boot = { current: undefined as (BootEvent & { phase: "vfs" }) | undefined }
     client.on<BootEvent>("boot", (event) => {
@@ -55,19 +61,21 @@ export function startCore(options: WorkerOptions = {}): Core {
     ready,
     fetch: createWorkerFetch(client),
     onEvent: (handler) => client.on<GlobalEvent>("global.event", handler),
+    privateFetch: createWorkerFetch(client, "privateFetch"),
   }
 }
 
 // cli/cmd/tui.ts's createWorkerFetch, with relative URLs resolved against the
-// core's private origin.
-export function createWorkerFetch(client: CoreClient): typeof fetch {
+// core's private origin. `method` picks the RPC: the core server (`fetch`) or
+// the worker's private-origin router (`privateFetch`).
+export function createWorkerFetch(client: CoreClient, method: "fetch" | "privateFetch" = "fetch"): typeof fetch {
   const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = new Request(
       input instanceof Request ? input : new URL(String(input), OPENCODE_ORIGIN),
       init,
     )
     const body = request.body ? await request.text() : undefined
-    const result = await client.call("fetch", {
+    const result = await client.call(method, {
       url: request.url,
       method: request.method,
       headers: Object.fromEntries(request.headers.entries()),

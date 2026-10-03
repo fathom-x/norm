@@ -7,7 +7,9 @@ import type { WorkerOptions } from "./core-client"
 import { installFetchRouter, OWALLET_ORIGIN } from "./fetch-router"
 import { mockOwallet } from "./mock-owallet"
 import { owallet } from "./owallet"
+import { serveVfs } from "./main-vfs"
 import { mountVfs } from "./vfs"
+import { workerRpc } from "./worker-rpc"
 
 // The page passes its options as the worker's name (core-client.ts).
 const options: WorkerOptions = (() => {
@@ -31,7 +33,11 @@ const boot = (data: object) => postMessage(JSON.stringify({ type: "rpc.event", e
 
 try {
   boot({ phase: "vfs", ...(await mountVfs()) })
-  await import("opencode/cli/tui/worker.browser")
+  // The page mounts this tree over the channel (main-vfs.ts) for the TUI.
+  if (options.vfsChannel) serveVfs(options.vfsChannel)
+  const { rpc } = await import("opencode/cli/tui/worker.browser")
+  // Rpc.listen looks methods up per call; add the page's private-origin fetch.
+  Object.assign(rpc, workerRpc)
 } catch (error) {
   console.error("[norm worker] failed to start", error)
   boot({ phase: "error", message: error instanceof Error ? `${error.message}\n${error.stack}` : String(error) })

@@ -1,116 +1,57 @@
-// norm in the browser — for now a debug panel over the core worker: the real
-// TUI (packages/tui's `run()`) replaces it once opentui runs on WebAssembly.
-// It boots the worker, creates and lists sessions, and reads/writes files in
-// the demo workspace through the same RPC the TUI will use.
-import "./shims/globals"
-import { startCore, type Core } from "./core-client"
-import { WORKSPACE } from "./env"
+// norm in the browser. The core (opencode server) runs in a Web Worker
+// (core.worker.ts); the page hosts the real norm TUI in xterm.js (tui.ts).
+//
+// URL flags: ?mock-owallet (scripted owallet, see mock-owallet.ts), ?debug
+// (core logs + norm diagnostics in the console), ?debug-panel (the plain-DOM
+// debug panel instead of the TUI), ?overpay=<url> (the Overpay owallet-web
+// talks to), ?session=<id>, ?prompt=<text>.
+import wasmUrl from "../../opentui-wasm/dist/opentui.wasm?url"
+import { startCore } from "./core-client"
+import { ENV } from "./env"
 
-type Session = { id: string; title: string; directory: string; time: { created: number; updated: number } }
+// The build points `process.env` at `globalThis.process.env`, and some
+// modules read it as they load. Until opentui-wasm installs the page's real
+// process (tui.ts), this placeholder carries the env; tui.ts keeps the same
+// env object.
+;(globalThis as { process?: unknown }).process ??= { env: { ...ENV } }
 
 const params = new URLSearchParams(location.search)
-// ?mock-owallet: scripted owallet (see mock-owallet.ts); ?debug: core logs
-// and norm's bootstrap diagnostics in the devtools console.
+const root = document.querySelector<HTMLElement>("#app")!
+// The worker serves its file tree to the page on this channel (main-vfs.ts);
+// per page, so two tabs never answer each other.
+const vfsChannel = `norm-vfs-${crypto.randomUUID()}`
 const core = startCore({
   mockOwallet: params.has("mock-owallet"),
   env: params.has("debug") ? { OPENCODE_PRINT_LOGS: "1", NORM_DEBUG: "1" } : {},
+  overpay: params.get("overpay") ? { railsUrl: params.get("overpay")! } : undefined,
+  vfsChannel,
 })
-const root = document.querySelector<HTMLElement>("#app")!
 
-// For Playwright and the devtools console.
-Object.assign(globalThis, { norm: { core, api } })
-
-render()
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await core.fetch(path, {
-    ...init,
-    headers: { "content-type": "application/json", ...init?.headers },
-  })
-  const text = await response.text()
-  if (!response.ok) throw new Error(`${init?.method ?? "GET"} ${path} → ${response.status}: ${text}`)
-  return (text ? JSON.parse(text) : undefined) as T
+if (params.has("debug-panel")) {
+  const { startDebugPanel } = await import("./debug-panel")
+  startDebugPanel({ core, root })
+} else {
+  // Fetch the opentui wasm core while the worker boots.
+  const wasm = fetch(wasmUrl)
+  root.classList.add("tui")
+  root.dataset.state = "booting"
+  try {
+    await core.ready
+    // setup screen: wired by the lead
+    const { startTui } = await import("./tui")
+    root.dataset.state = "ready"
+    await startTui({
+      core,
+      container: root,
+      vfsChannel,
+      wasm,
+      sessionID: params.get("session") ?? undefined,
+      prompt: params.get("prompt") ?? undefined,
+    })
+    root.dataset.state = "exited"
+  } catch (error) {
+    root.dataset.state = "error"
+    root.textContent = `norm failed to start: ${error instanceof Error ? error.message : String(error)}`
+    console.error(error)
+  }
 }
-
-function render() {
-  root.innerHTML = `
-    <header>
-      <h1>norm <span>in the browser</span></h1>
-      <p id="status" data-state="booting">Starting the core worker…</p>
-    </header>
-    <section>
-      <h2>Sessions</h2>
-      <div class="row">
-        <button id="create" disabled>New session</button>
-        <button id="refresh" disabled>Refresh</button>
-      </div>
-      <ul id="sessions"></ul>
-    </section>
-    <section>
-      <h2>Files in ${WORKSPACE}</h2>
-      <div class="row">
-        <input id="path" value="README.md" aria-label="File path" />
-        <button id="read" disabled>Read</button>
-      </div>
-      <pre id="content"></pre>
-    </section>
-    <section>
-      <h2>Events</h2>
-      <ol id="events"></ol>
-    </section>
-  `
-  const status = root.querySelector<HTMLElement>("#status")!
-  const buttons = [...root.querySelectorAll<HTMLButtonElement>("button")]
-  core.ready.then(
-    (boot) => {
-      status.dataset.state = "ready"
-      status.textContent = `Core ready — files: ${boot.storage}${boot.seeded ? " (demo workspace created)" : ""}`
-      buttons.forEach((button) => (button.disabled = false))
-      return listSessions()
-    },
-    (error: Error) => {
-      status.dataset.state = "error"
-      status.textContent = `Core failed to start: ${error.message}`
-    },
-  )
-  root.querySelector("#create")!.addEventListener("click", () =>
-    api<Session>("/session", { method: "POST", body: JSON.stringify({}) }).then(listSessions).catch(show),
-  )
-  root.querySelector("#refresh")!.addEventListener("click", () => listSessions().catch(show))
-  root.querySelector("#read")!.addEventListener("click", () => {
-    const path = root.querySelector<HTMLInputElement>("#path")!.value
-    api<{ content: string }>(`/file/content?path=${encodeURIComponent(path)}`)
-      .then((file) => (root.querySelector("#content")!.textContent = file.content))
-      .catch(show)
-  })
-  const events = root.querySelector("#events")!
-  core.onEvent((event) => {
-    const item = document.createElement("li")
-    item.textContent = `${event.payload.type} (${event.directory ?? "global"})`
-    events.prepend(item)
-    while (events.children.length > 20) events.lastChild?.remove()
-  })
-}
-
-async function listSessions() {
-  const sessions = await api<Session[]>("/session")
-  const list = root.querySelector("#sessions")!
-  list.replaceChildren(
-    ...sessions.map((session) => {
-      const item = document.createElement("li")
-      item.dataset.id = session.id
-      item.textContent = `${session.title} — ${session.id} — ${new Date(session.time.updated).toLocaleTimeString()}`
-      return item
-    }),
-  )
-  if (sessions.length === 0) list.innerHTML = "<li class=empty>No sessions yet</li>"
-  return sessions
-}
-
-function show(error: unknown) {
-  const status = root.querySelector<HTMLElement>("#status")!
-  status.dataset.state = "error"
-  status.textContent = error instanceof Error ? error.message : String(error)
-}
-
-export type { Core }

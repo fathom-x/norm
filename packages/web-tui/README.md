@@ -1,20 +1,26 @@
 # @opencode-ai/web-tui — norm in the browser
 
-The opencode core (sessions, tools, providers, the norm layer) running in a
-dedicated **Web Worker**, answering the TUI's RPC protocol unchanged. Today the
-page is a small debug panel over that worker; the real TUI (`packages/tui`)
-takes over once opentui runs on WebAssembly (`packages/opentui-wasm`), and
-owallet arrives as `owallet-web` behind `http://owallet.internal`.
+The real norm TUI (`packages/tui`) in a browser tab: xterm.js plus opentui on
+its WebAssembly core (`packages/opentui-wasm`) on the page, and the opencode
+core (sessions, tools, providers, the norm layer) in a dedicated **Web
+Worker**, talking over the same RPC the native TUI uses for its Bun worker.
+owallet is `owallet-web` behind `http://owallet.internal` in the worker.
 
 ```
-page (main thread)                      core worker (dedicated, OPFS lives here)
-  src/main.ts — debug panel              src/core.worker.ts
-  src/core-client.ts                       1. shims/globals.ts (process, Buffer)
-    Rpc.client + createWorkerFetch  ──►    2. fetch router: owallet.internal → owallet-web
-      { fetch, reload, shutdown }          3. ZenFS VFS mounted (OPFS dir `norm-vfs`)
-    ◄── global.event, ready, boot          4. import opencode/cli/tui/worker.browser.ts
-                                              HttpApiApp.webHandler() + Rpc.listen
-                                              sqlite-wasm in OPFS sahpool (`.norm-sqlite`)
+page (main thread)                           core worker (dedicated; OPFS lives here)
+  src/main.ts                                  src/core.worker.ts
+    startCore() ─────── Rpc (JSON) ─────►        1. shims/globals.ts (process, Buffer)
+    await core.ready                             2. fetch router: owallet.internal → owallet-web
+    // setup screen: wired by the lead           3. ZenFS VFS mounted (OPFS dir `norm-vfs`),
+    src/tui.ts                                      served to the page (serveVfs)
+      xterm.js + FitAddon                        4. opencode/cli/tui/worker.browser.ts
+      bootOpenTUIWasm (opentui-wasm)                HttpApiApp.webHandler() + Rpc.listen,
+      process/Bun/timers completed                  + worker-rpc.ts: privateFetch
+      ZenFS Port mount of the worker's tree ◄── BroadcastChannel ──► attachFS
+      owallet.internal → core.privateFetch  ──► worker's router
+    src/tui-run.ts
+      TuiConfig.get(), run() (opencode/cli/tui/layer),
+      transport { url: opencode.internal, fetch: core.fetch, events: global.event }
 ```
 
 ## Commands
@@ -23,30 +29,120 @@ Run from `packages/web-tui` (never from the repo root).
 
 | What | Command |
 | --- | --- |
-| Build page + worker into `dist/` | `bun run build` (`vite build`) |
+| Build page + worker into `dist/` | `bun run build` (`vite build`; needs `packages/opentui-wasm/dist`, see below) |
 | Serve the build | `bun run preview` → http://127.0.0.1:4173/ |
 | Unit tests (bun + happy-dom, `--conditions=browser`) | `bun run test` |
-| Browser smoke test (build, then headless Chromium) | `bun run test:browser` |
+| TUI browser test (build, then headless Chromium) | `bun run test:tui` |
+| Core smoke test through the debug panel | `bun run test:browser` |
 | Typecheck | `bun run typecheck` |
+
+The page needs opentui's wasm build: `bash ../opentui-wasm/scripts/build.sh`
+once (it writes `packages/opentui-wasm/dist/`: `opentui.wasm`, `core/`,
+`solid/`).
 
 The one supported build path is **`vite build` + `vite preview`** (for
 iteration, `vite build --watch` in one terminal and `vite preview` in
 another). The `vite` dev server is not supported: its dependency
-pre-bundling (esbuild) bypasses the Node shims below, so the worker fails to
-start.
+pre-bundling (esbuild) bypasses the Node shims below. Several agents/CI jobs
+building at once: `vite build --outDir <dir>` and pass `DIST=<dir>` to the
+browser tests.
 
-Page URL flags: `?mock-owallet` answers `owallet.internal` with the scripted
-stand-in in `src/mock-owallet.ts` (no wallet needed; its "model" drives the
-file tools), `?debug` prints the core's logs and norm's bootstrap diagnostics
-to the devtools console. In the console, `norm.api("/session")` calls the
-core server and `norm.core` is the RPC client.
+Page URL flags:
 
-`test/browser/smoke.mjs` reads `CHROME` (Chromium binary), `PLAYWRIGHT` (path
-to playwright's `index.js`) and `PORT` (default 4317); screenshots go to
-`test/screenshots/`. It checks: boot on OPFS with the demo workspace,
-`POST /session` + `GET /session` through `Rpc`, a file read, persistence
-across a reload, and scripted write → read, grep → glob, read → edit and bash turns through
-the real session loop (including owallet's `charged_cents` as the cost).
+| Flag | Effect |
+| --- | --- |
+| `?mock-owallet` | `owallet.internal` is the scripted stand-in in `src/mock-owallet.ts` (no wallet needed; its "model" drives the file tools by keyword; `/v1/status` and an empty `/mcp` for the sidebar) |
+| `?debug` | the core's logs and norm's bootstrap diagnostics in the devtools console |
+| `?debug-panel` | the plain-DOM debug panel instead of the TUI (`norm.api("/session")` in the console) |
+| `?overpay=<url>` | the Overpay owallet-web talks to |
+| `?session=<id>`, `?prompt=<text>` | open a session / start with a prompt (the CLI's `--session` / `--prompt`) |
+
+`window.__norm = { term, core, host }` is there for tests and the console.
+
+Browser tests read `CHROME` (Chromium binary), `PLAYWRIGHT` (path to
+playwright's `index.js`), `PORT` and `DIST`; screenshots go to
+`test/screenshots/`.
+
+- `test/browser/tui.mjs` (port 4319, `tui-*.png`): the home screen renders in
+  xterm (logo, prompt placeholder); typing a prompt + Enter creates a session
+  and the scripted reply (write → read through the real tools) appears; the
+  sidebar shows owallet's status from `/v1/status`; ctrl+p opens the command
+  palette; the grid follows the viewport size; after a reload ctrl+x l lists
+  the session. Any page error or console error fails it (allowlist in the
+  file, empty today).
+- `test/browser/smoke.mjs` (port 4317, `0*-*.png`, via `?debug-panel`): boot
+  on OPFS with the demo workspace, `POST /session` + `GET /session` through
+  `Rpc`, a file read, persistence across a reload, and scripted
+  write → read, grep → glob, read → edit and bash turns through the real
+  session loop (with owallet's `charged_cents` as the cost).
+
+## The page (main thread)
+
+`vite.config.ts` builds the page with `browserBuild({ thread: "main" })` and
+`vite-plugin-solid` in opentui's universal mode
+(`{ generate: "universal", moduleName: "@opentui/solid" }`); the worker with
+`browserBuild({ thread: "worker" })`. One alias table, in
+`build/browser-build.ts`:
+
+| Specifier | Worker | Page |
+| --- | --- | --- |
+| `fs`, `fs/promises`, `path`, `os`, `url`, `util`, `crypto`, `async_hooks`, `timers/promises`, `module`, `diagnostics_channel`, `events`, `buffer`, `stream`, `@effect/platform-node*` | `src/shims` / npm polyfills (below) | same — `fs` is ZenFS, on the page the worker's tree over a port |
+| `process` | `src/shims/process.ts` | the same module, which on the page returns opentui-wasm's process (installed by `bootOpenTUIWasm`, stdin/stdout wired to xterm) after `completeProcess` gave it env, `cwd()` = `/workspace`, … |
+| `perf_hooks`, `console`, `worker_threads`, `tty`, `child_process` | throwing stubs | opentui-wasm's shims (`packages/opentui-wasm/src/shims`) |
+| `bun` | stub | `src/shims/bun.ts` (`Bun.file().text/json`, `Bun.write`, `Bun.stringWidth`, file-URL helpers; also installed as the `Bun` global) |
+| `open`, `clipboardy` | `window.open` / `navigator.clipboard` (best effort) | same |
+| `@opentui/core[/x]`, `@opentui/solid[/x]` | — | `packages/opentui-wasm/dist`, by the package's `exports` (`browser` first) |
+| `@opentui/core/testing` | — | opentui-wasm's throwing stub |
+| `@opentui/solid/runtime-plugin-support[/configure]` | — | no-op (`src/shims/runtime-plugin-support.ts`): no runtime loading of external TUI plugins in a tab |
+| bare imports from inside `opentui-wasm/dist` (`solid-js/…`, `entities`) | — | resolved from this package: one solid-js on the page (`resolve.dedupe` too) |
+| `@opentui/core-<platform>` native libraries | — | absent |
+
+Two edits to the built opentui core (`patchOpentuiDist`): `CliRenderer`
+installs its own `requestAnimationFrame` on the global object, which in a
+browser is `window` — it captured xterm.js's frames and the terminal's DOM
+stopped updating, so the override is renamed away (the TUI's few callers use
+the browser's rAF); and the tree-sitter loader's
+`` new URL(`./${path}`, import.meta.url) `` would make Vite copy all of
+`dist/core` into the build, so it is left to runtime.
+
+Boot order (`src/main.ts` → `src/tui.ts` → `src/tui-run.ts`) matters:
+`main.ts` keeps a placeholder `process.env` until opentui-wasm installs the
+real process; `tui.ts` creates the terminal (FitAddon, ResizeObserver,
+focus), boots the wasm core, completes the process, installs `Bun` and
+Node-style timer handles (`.unref()`, `.refresh()`; `src/shims/timers.ts`),
+mounts the worker's file tree (`src/main-vfs.ts`) and routes
+`owallet.internal` to the worker; only then is the TUI imported.
+
+The page's files are the worker's: ZenFS's `Port` backend over a per-page
+`BroadcastChannel`. Async calls go to the worker; sync calls (`existsSync`,
+`realpathSync`, used by the TUI only for path checks) read a cache filled when
+the page mounts, so they see the page's own writes but not files the worker
+creates later. `/tmp` is private to each side.
+
+### Setup screen seam
+
+`src/main.ts`, between `await core.ready` and the TUI import:
+
+```ts
+await core.ready
+// setup screen: wired by the lead
+const { startTui } = await import("./tui")
+```
+
+### Known gaps
+
+- No tree-sitter syntax highlighting (parser worker and grammars are not
+  served yet), no audio (compiled out of the wasm core), no kitty keyboard
+  protocol (xterm.js; opentui falls back to legacy keys), 256 MiB fixed wasm
+  memory for the renderer.
+- External TUI plugins (npm or `.opencode/plugin` files) are not loaded; the
+  built-in ones run.
+- Clipboard: copy uses `navigator.clipboard` (needs focus/permission); OSC 52
+  is ignored by xterm.js.
+- Main-thread sync fs reads can be stale for files the worker wrote after the
+  page mounted (see above).
+- One tab at a time: the OPFS stores (`norm-vfs`, `.norm-sqlite`,
+  `.owallet-web`) are exclusive.
 
 ## How the core is made to bundle (`build/browser-build.ts`)
 
@@ -117,32 +213,6 @@ norm's state lives under `NORM_HOME=/norm`, the demo project under
 `/workspace` (written once, never overwritten). SQLite uses its own OPFS
 sahpool directory `.norm-sqlite`; both are exclusive to one tab at a time.
 Outside a worker with OPFS (tests) both fall back to memory.
-
-## Plugging in the real TUI (M1)
-
-`src/main.ts` becomes the TUI host once `@opentui/core` has its wasm backend
-(`packages/opentui-wasm`). Mirror the worker branch of
-`packages/opencode/src/cli/cmd/tui.ts`:
-
-1. `const core = startCore()` (`src/core-client.ts`) and `await core.ready`.
-2. Build the transport the native TUI uses for its Bun worker:
-   `{ url: "http://opencode.internal", fetch: core.fetch, events: { subscribe: async (handler) => core.onEvent(handler) } }`
-   (`core.fetch` is `createWorkerFetch`; `onEvent` listens for `global.event`).
-3. Call `run` from `opencode/cli/tui/layer` (which wraps
-   `@opencode-ai/tui`'s `run`, `packages/tui/src/app.tsx`) with that
-   transport, `directory: "/workspace"`, the TUI config,
-   `pluginHost: createLegacyTuiPluginHost()` and no `onSnapshot`, rendering
-   into the xterm.js-backed renderer.
-4. The TUI's own main-thread file access (`util/persistence.ts`,
-   `sidebar/owallet.tsx`'s `node:fs/promises` + `Global`) needs the same
-   aliases as the worker, but must not open a second ZenFS over the same OPFS
-   directory: mount the worker's tree on the main thread with ZenFS's `Port`
-   backend instead.
-5. The TUI calls owallet directly (the sidebar's `/v1/status`): route
-   `owallet.internal` on the main thread to the worker — add an RPC method
-   that runs the worker's `fetch` (which the router there answers) — once
-   owallet-web is registered in `core.worker.ts` in place of
-   `owalletUnavailable`.
 
 ## owallet-web in the page
 

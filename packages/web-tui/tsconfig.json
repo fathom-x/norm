@@ -2,14 +2,28 @@
   "$schema": "https://json.schemastore.org/tsconfig",
   "extends": "@tsconfig/bun/tsconfig.json",
   "compilerOptions": {
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "types": ["bun", "vite/client"],
+    "lib": [
+      "ESNext",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "types": [
+      "bun",
+      "vite/client"
+    ],
     "jsx": "preserve",
-    "jsxImportSource": "solid-js",
+    "jsxImportSource": "@opentui/solid",
     "noUncheckedIndexedAccess": false,
-    "customConditions": ["browser"],
+    "customConditions": [
+      "browser"
+    ],
     "paths": {
-      "@/*": ["../opencode/src/*"]
+      "@/*": [
+        "../opencode/src/*"
+      ],
+      "@opentui/core/wasm": [
+        "../opentui-wasm/dist/core/platform/ffi-wasm.d.ts"
+      ]
     }
   },
   "include": [

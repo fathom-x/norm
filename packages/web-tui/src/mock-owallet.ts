@@ -1,7 +1,7 @@
 // A scripted stand-in for owallet-web at http://owallet.internal, for tests
 // and for demoing the page before the real WebAssembly owallet is plugged in
 // (`?mock-owallet` on the page URL). It answers the routes norm uses — the
-// /_mgmt setup calls, /health, /v1/status, /v1/models — and an
+// /_mgmt setup calls, /health, /v1/status, /v1/models, an empty /mcp — and an
 // OpenAI-compatible /v1/chat/completions that plays a fixed script of tool
 // calls, chosen by a keyword in the user's message, then replies with what
 // the last tool returned. One prompt thereby exercises the real session loop,
@@ -34,7 +34,18 @@ export const mockOwallet: Route = async (request) => {
       overpay_linked: true,
     })
   if (pathname === "/_mgmt/provider-key/create") return Response.json({ key: "owk_mock_browser_build" })
-  if (pathname === "/v1/status") return Response.json({ key_can_spend: true, balance_cents: 500 })
+  if (pathname === "/v1/status")
+    return Response.json({
+      key_can_spend: true,
+      overpay_connected: true,
+      overpay_url: "https://overpay.example",
+      merchant_credits: [
+        { organization_slug: "overpay", balance_cents: 500, core: true },
+        { seller_slug: "mock-seller", balance_cents: 250 },
+      ],
+      key_budget: { daily_budget_usd: 10, spent_today_usd: 0.01, remaining_today_usd: 9.99 },
+    })
+  if (pathname === "/mcp") return mcp(request)
   if (pathname === "/v1/models")
     return Response.json({
       object: "list",
@@ -134,6 +145,25 @@ function complete(body: ChatRequest) {
     }),
     { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } },
   )
+}
+
+// Just enough MCP (streamable HTTP, JSON responses) for the owallet server
+// to connect with an empty tool list.
+async function mcp(request: Request) {
+  if (request.method !== "POST") return new Response(null, { status: 405 })
+  const message = (await request.json()) as { id?: number | string; method?: string }
+  if (message.id === undefined) return new Response(null, { status: 202 })
+  const result =
+    message.method === "initialize"
+      ? {
+          protocolVersion: "2025-03-26",
+          capabilities: { tools: {} },
+          serverInfo: { name: "owallet (mock)", version: MOCK_VERSION },
+        }
+      : message.method === "tools/list"
+        ? { tools: [] }
+        : {}
+  return Response.json({ jsonrpc: "2.0", id: message.id, result })
 }
 
 function text(content: unknown): string {
