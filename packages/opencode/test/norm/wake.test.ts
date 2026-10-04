@@ -185,15 +185,17 @@ describe("SessionWake", () => {
       yield* release
       yield* eventually(() => Effect.sync(() => test.state.replied.length === 1))
 
-      yield* test.wake.deliver({ sessionID: test.chat.id, text: "event", synthetic: false })
+      yield* test.wake.deliver({ sessionID: test.chat.id, text: "event", note: "from a timer" })
       yield* eventually(() => Effect.sync(() => test.state.replied.length === 2))
 
       const user = MessageV2.latest(yield* test.read()).user
       expect(user?.agent).toBe("build")
       expect(user?.model).toMatchObject(ref)
-      const parts = (yield* test.read()).find((message) => message.info.id === user?.id)?.parts
-      expect(parts).toMatchObject([{ type: "text", text: "event" }])
-      expect(parts?.[0]).not.toMatchObject({ synthetic: true })
+      // Both parts are for the model only: nothing here was typed by the user.
+      expect((yield* test.read()).find((message) => message.info.id === user?.id)?.parts).toMatchObject([
+        { type: "text", text: "event", synthetic: true },
+        { type: "text", text: "from a timer", synthetic: true },
+      ])
     }),
   )
 

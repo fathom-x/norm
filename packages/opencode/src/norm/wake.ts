@@ -46,11 +46,13 @@ export type Pending = {
 
 export type DeliverInput = {
   sessionID: SessionID
+  /**
+   * What the model reads. Never shown in the transcript: the chat history
+   * holds what the user typed, and nothing an agent or a timer wrote.
+   */
   text: string
-  /** Hidden from the transcript but sent to the model. Defaults to true. */
-  synthetic?: boolean
-  /** Extra text for the model only, sent after `text` in the same message. */
-  hidden?: string
+  /** Extra context for the model, sent after `text` in the same message. */
+  note?: string
 }
 
 export type WhenIdleInput = DeliverInput & {
@@ -67,8 +69,8 @@ export interface Interface {
    */
   readonly attach: (ops: Ops) => Effect.Effect<void>
   /**
-   * Persists a user message in the session and guarantees a model turn sees
-   * it: a running turn picks it up at its next step, an idle session starts
+   * Persists a hidden user message in the session and guarantees a model
+   * turn sees it: a running turn picks it up at its next step, an idle session starts
    * one. Returns once the message is persisted, not when the turn ends.
    */
   readonly deliver: (input: DeliverInput) => Effect.Effect<void>
@@ -164,8 +166,8 @@ const layer = Layer.effect(
         variant: user?.model.variant,
         noReply: true,
         parts: [
-          { type: "text", text: input.text, synthetic: input.synthetic ?? true },
-          ...(input.hidden ? [{ type: "text" as const, text: input.hidden, synthetic: true }] : []),
+          { type: "text", text: input.text, synthetic: true },
+          ...(input.note ? [{ type: "text" as const, text: input.note, synthetic: true }] : []),
         ],
       })
       yield* drive(input.sessionID, data.epochs.get(input.sessionID) ?? 0).pipe(
@@ -260,9 +262,7 @@ const layer = Layer.effect(
         key: WAKEUP,
         delay: FALLBACK_DELAY,
         text: loop.prompt,
-        synthetic: false,
-        hidden:
-          "This message was sent by a fallback wakeup, not typed by the user: the previous iteration of this loop ended without calling ScheduleWakeup. Run the next iteration, then call ScheduleWakeup to keep the loop going, or with stop: true to end it. If you do neither, the loop ends here.",
+        note: "This message was sent by a fallback wakeup, not typed by the user: the previous iteration of this loop ended without calling ScheduleWakeup. Run the next iteration, then call ScheduleWakeup to keep the loop going, or with stop: true to end it. If you do neither, the loop ends here.",
       })
     })
 

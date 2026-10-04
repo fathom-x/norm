@@ -119,8 +119,7 @@ const layer = Layer.effect(
           key: `cron:${job.id}`,
           delay: 0,
           text: job.prompt,
-          synthetic: false,
-          hidden: `This message was sent by the scheduled job ${job.id} (cron "${job.cron}") you created with CronCreate, not typed by the user.${due.last ? " This was its final run: recurring jobs expire after 7 days." : ""}`,
+          note: `This message was sent by the scheduled job ${job.id} (cron "${job.cron}") you created with CronCreate, not typed by the user.${due.last ? " This was its final run: recurring jobs expire after 7 days." : ""}`,
         })
         if (!job.recurring || due.last) return yield* forget
       }

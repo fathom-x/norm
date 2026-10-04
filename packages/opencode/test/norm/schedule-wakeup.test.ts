@@ -138,9 +138,9 @@ describe("ScheduleWakeup", () => {
       yield* TestClock.adjust("1 second")
       expect(test.sent).toHaveLength(1)
       expect(test.sent[0]).toMatchObject({ sessionID: test.chat.id, noReply: true })
-      // The prompt is shown like the user's own; the note is for the model only.
+      // Neither part is shown in the transcript: the user did not type them.
       expect(test.sent[0].parts).toMatchObject([
-        { type: "text", text: "check the deploy", synthetic: false },
+        { type: "text", text: "check the deploy", synthetic: true },
         { type: "text", synthetic: true },
       ])
       expect(test.sent[0].parts[1]).toMatchObject({
@@ -226,7 +226,7 @@ describe("ScheduleWakeup", () => {
       yield* TestClock.adjust("20 minutes")
       expect(test.sent).toHaveLength(2)
       expect(test.sent[1].parts).toMatchObject([
-        { type: "text", text: "check the deploy", synthetic: false },
+        { type: "text", text: "check the deploy", synthetic: true },
         { type: "text", synthetic: true },
       ])
       expect(test.sent[1].parts[1]).toMatchObject({ text: expect.stringContaining("fallback wakeup") })

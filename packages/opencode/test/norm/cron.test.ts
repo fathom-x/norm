@@ -154,9 +154,9 @@ describe("cron tools", () => {
       expect(test.sent).toEqual([])
       yield* TestClock.adjust("2 minutes")
       expect(test.texts()).toEqual(["check the queue"])
-      // Shown like the user's own prompt, with a note for the model only.
+      // Neither part is shown in the transcript: the user did not type them.
       expect(test.sent[0].parts).toMatchObject([
-        { type: "text", text: "check the queue", synthetic: false },
+        { type: "text", text: "check the queue", synthetic: true },
         { type: "text", synthetic: true },
       ])
       expect(test.sent[0].parts[1]).toMatchObject({

@@ -129,7 +129,7 @@ syncs stay cheap:
   beside it except on GPT. Test in `test/tool/registry.test.ts`.
 
 - `src/norm/wake.ts` (`SessionWake`) is how anything outside a turn gets
-  the model's attention: `deliver` persists a (by default hidden) user
+  the model's attention: `deliver` persists a hidden user
   message and guarantees a turn sees it, `whenIdle` does so after a delay
   once the session is idle. It exists because a bare `SessionPrompt.prompt`
   from the background can be dropped: a message that lands while a run is
@@ -141,6 +141,15 @@ syncs stay cheap:
   per instance: timers die with the process or a config reload. The scheduling and
   background tools (ScheduleWakeup, Monitor, cron) build on it.
 
+- **The chat history shows only what the human typed.** Everything the
+  wake layer delivers (wakeup and cron prompts, monitor events,
+  background-command exits) is `synthetic` text, which the session view
+  skips, so none of it appears in the transcript, least of all as
+  something the user submitted; the user sees the model's reply and the
+  hints row's `wake 4m · 2 bg`. Such messages also do not count as
+  queued user messages (`tui/src/util/norm-notification.ts`,
+  `norm-queue.ts`), so esc still interrupts while one waits.
+
 - **Claude Code's scheduling tools, under Claude Code's names**
   (`src/norm/tools.ts`, `src/norm/tool/`): models are post-trained on
   their vendor's tool schemas, and only Claude Code has these tools, so
@@ -148,7 +157,7 @@ syncs stay cheap:
   invented (PascalCase ids included). So far: `ScheduleWakeup`
   (`delaySeconds` clamped to 60-3600, `prompt`, `reason`, `noop`, `stop`;
   one pending wakeup per session, fired through `SessionWake.whenIdle`
-  as a visible user message plus a hidden note saying it was not typed)
+  as a hidden user message plus a note saying it was not typed)
   and the `/loop` command that paces itself with it
   (`command/index.ts`, template `src/norm/loop.txt`). Hook-ins:
   `tool/registry.ts` appends `NormTools.infos` to the built-in list, and
@@ -183,10 +192,7 @@ syncs stay cheap:
   jobs filed under `sessionId`, and a monitor must survive Esc. They die
   on `TaskStop`, session delete (`session/session.ts` matcher), and
   instance dispose (so also a TUI config reload). Claude Code's
-  WebSocket source (`ws`) is not implemented. In the TUI a notification
-  message renders as one muted line and does not count as a queued
-  message (`tui/src/util/norm-notification.ts`, `norm-queue.ts`), so esc
-  still interrupts while one waits. Tests: `test/norm/monitor.test.ts`,
+  WebSocket source (`ws`) is not implemented. Tests: `test/norm/monitor.test.ts`,
   `packages/tui/test/util/norm-notification.test.ts`.
 
 - **Background commands** (`run_in_background` on the bash tool, as in

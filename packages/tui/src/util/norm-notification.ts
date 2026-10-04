@@ -1,27 +1,14 @@
 import type { Part } from "@opencode-ai/sdk/v2"
 
-// norm: background work (a monitor, a background command) reaches the model
-// as a user message whose text is hidden from the transcript, a
-// <task-notification> block. Without this the session view would show
-// nothing for it, and the model would seem to start talking unprompted.
+// norm: wakeups, cron jobs, monitors and background commands reach the model
+// as user-role messages that the user did not write. The chat history shows
+// what the human typed and nothing else, so these render as nothing (their
+// text parts are `synthetic`, which the session view already skips) and must
+// not be treated as the user's in other places either.
 
-const OPEN = "<task-notification>"
-
-function tag(text: string, name: string) {
-  return text.match(new RegExp(`<${name}>([\\s\\S]*?)</${name}>`))?.[1]
-}
-
-/** One line for a message that carries only a background notification, or
- * nothing for any other message. */
-export function notice(parts: readonly Part[] | undefined): string | undefined {
-  if (!parts || parts.some((part) => part.type === "text" && !part.synthetic && part.text.trim())) return
-  const text = parts.flatMap((part) => (part.type === "text" && part.text.startsWith(OPEN) ? [part.text] : []))[0]
-  if (!text) return
-  const summary = tag(text, "summary")?.trim()
-  if (!summary) return
-  const lines = tag(text, "event")
-    ?.split("\n")
-    .filter((line) => line.trim())
-  if (!lines?.length) return summary
-  return `${summary}: ${lines[0].trim()}${lines.length > 1 ? ` (+${lines.length - 1} more)` : ""}`
+/** Whether a user-role message is made only of text the user never saw:
+ * nothing typed, attached or otherwise asked for by them. */
+export function agentWritten(parts: readonly Part[] | undefined): boolean {
+  if (!parts || parts.length === 0) return false
+  return parts.every((part) => part.type === "text" && part.synthetic === true)
 }

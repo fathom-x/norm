@@ -73,11 +73,9 @@ export const ScheduleWakeupTool = Tool.define<typeof Parameters, Metadata, Sessi
             sessionID: ctx.sessionID,
             key: KEY,
             delay: `${delaySeconds} seconds`,
-            // The prompt shows in the transcript like the user's own; the
-            // note tells the model where it came from.
+            // The note tells the model the prompt was not typed by the user.
             text: params.prompt,
-            synthetic: false,
-            hidden: `This message was sent by the wakeup you scheduled with ScheduleWakeup (${params.reason.trim()}), not typed by the user. Run the next iteration, then call ScheduleWakeup again to keep the loop going, or with stop: true to end it.`,
+            note: `This message was sent by the wakeup you scheduled with ScheduleWakeup (${params.reason.trim()}), not typed by the user. Run the next iteration, then call ScheduleWakeup again to keep the loop going, or with stop: true to end it.`,
           })
           return {
             title: `Wake in ${duration(delaySeconds)}: ${params.reason.trim()}`,
