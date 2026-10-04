@@ -1,0 +1,11 @@
+Run the task below as a self-paced loop.
+
+<task>
+$ARGUMENTS
+</task>
+
+Do one iteration of the task now. When the iteration is done, call the ScheduleWakeup tool to schedule the next one: pick `delaySeconds` from what you are waiting for, give a one-sentence `reason`, pass the task above verbatim as `prompt`, and set `noop` to whether this iteration found nothing to report. Then end your turn: you will be re-invoked with that prompt once the delay has passed.
+
+When the task is complete, or can make no further progress, call ScheduleWakeup with `stop: true` instead and tell the user why the loop ended.
+
+If the task is empty, do not schedule anything; ask the user what to loop on.

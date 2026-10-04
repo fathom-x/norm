@@ -2496,3 +2496,36 @@ it.instance("norm wake: cancelling a run keeps the session's pending timers", ()
     expect(yield* wake.pending(chat.id)).toEqual([])
   }),
 )
+
+it.instance(
+  "norm wake: a /loop turn that never calls ScheduleWakeup leaves a fallback wakeup pending",
+  () =>
+    Effect.gen(function* () {
+      // The preload turns the norm layer off, and /loop with it.
+      process.env.NORM_DISABLE_WAKE = "0"
+      yield* Effect.addFinalizer(() => Effect.sync(() => delete process.env.NORM_DISABLE_WAKE))
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const wake = yield* SessionWake.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* llm.text("Checked once; forgot to schedule.")
+
+      const before = Date.now()
+      yield* prompt.command({ sessionID: chat.id, command: "loop", arguments: "watch the queue", agent: "build" })
+
+      const pending = yield* wake.pending(chat.id)
+      expect(pending.map((timer) => timer.key)).toEqual(["wakeup"])
+      expect(pending[0].at).toBeGreaterThanOrEqual(before + 20 * 60_000)
+      expect(pending[0].at).toBeLessThan(Date.now() + 20 * 60_000 + 1)
+
+      // Stopping the session ends the loop with it.
+      yield* wake.clear(chat.id)
+      yield* wake.settled(chat.id)
+      expect(yield* wake.pending(chat.id)).toEqual([])
+    }),
+  30_000,
+)

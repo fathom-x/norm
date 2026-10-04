@@ -1,0 +1,24 @@
+import { Effect } from "effect"
+import * as Tool from "@/tool/tool"
+import { SessionWake } from "./wake"
+import { ScheduleWakeupTool } from "./tool/schedule-wakeup"
+
+/**
+ * Tool ids offered to primary sessions only. A subagent runs inside its
+ * parent's turn: one that schedules a wakeup and ends its turn would hand the
+ * parent a result that is not there yet.
+ */
+export function primaryOnly(): string[] {
+  if (disabled()) return []
+  return [ScheduleWakeupTool.id]
+}
+
+export const disabled = SessionWake.disabled
+
+/** norm's own built-in tools, for the registry to initialise beside upstream's. */
+export const infos = Effect.gen(function* () {
+  const all: Tool.Info[] = disabled() ? [] : [yield* ScheduleWakeupTool]
+  return all
+})
+
+export * as NormTools from "./tools"

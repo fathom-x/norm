@@ -54,6 +54,8 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { McpCatalog } from "@/mcp/catalog"
+import { NormTools } from "@/norm/tools"
+import { SessionWake } from "@/norm/wake"
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return providerID === ProviderV2.ID.opencode || flags.exa || flags.parallel
@@ -109,6 +111,7 @@ const layer = Layer.effect(
     const greptool = yield* GrepTool
     const patchtool = yield* ApplyPatchTool
     const skilltool = yield* SkillTool
+    const normTools = yield* NormTools.infos
     const agent = yield* Agent.Service
     const codeMode = flags.experimentalCodeMode ? yield* Effect.promise(() => import("./code-mode")) : undefined
     const codeModeTool = codeMode ? yield* codeMode.CodeModeTool : undefined
@@ -241,6 +244,7 @@ const layer = Layer.effect(
             ...(tool.execute ? [tool.execute] : []),
             ...(flags.experimentalLspTool ? [tool.lsp] : []),
             ...(flags.experimentalPlanMode && flags.client === "cli" ? [tool.plan] : []),
+            ...(yield* Effect.forEach(normTools, (info) => Tool.init(info))),
           ],
           task: tool.task,
           read: tool.read,
@@ -434,6 +438,7 @@ export const node = LayerNode.make({
     Skill.node,
     Session.node,
     BackgroundJob.node,
+    SessionWake.node,
     Provider.node,
     LSP.node,
     Instruction.node,

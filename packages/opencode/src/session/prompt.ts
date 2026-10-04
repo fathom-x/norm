@@ -1353,7 +1353,15 @@ const layer = Layer.effect(
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
-      return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
+      const result = yield* state.ensureRunning(
+        input.sessionID,
+        lastAssistant(input.sessionID),
+        runLoop(input.sessionID),
+      )
+      // norm: a /loop iteration that ended without rescheduling itself gets
+      // one fallback wakeup.
+      yield* wake.settled(input.sessionID)
+      return result
     })
 
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(
@@ -1378,6 +1386,10 @@ const layer = Layer.effect(
         throw error
       }
       const agentName = cmd.agent ?? input.agent
+      // norm: /loop starts a self-paced loop, which SessionWake keeps alive
+      // through one forgotten ScheduleWakeup.
+      if (cmd.name === Command.Default.LOOP && input.arguments.trim())
+        yield* wake.loopStart(input.sessionID, input.arguments.trim())
 
       const raw = input.arguments.match(argsRegex) ?? []
       const args = raw.map((arg) => arg.replace(quoteTrimRegex, ""))
