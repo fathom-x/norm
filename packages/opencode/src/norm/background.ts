@@ -3,11 +3,12 @@ import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { FSUtil } from "@opencode-ai/core/fs-util"
-import { Cause, Clock, Context, Duration, Effect, Fiber, Layer, Queue, Stream } from "effect"
+import { Cause, Clock, Context, Duration, Effect, Fiber, Layer, Queue, Schema, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { BackgroundJob } from "@/background/job"
 import { SessionID } from "@/session/schema"
+import { Session } from "@/session/session"
 import * as Tool from "@/tool/tool"
 import { TRUNCATION_DIR } from "@/tool/truncation-dir"
 import { SessionWake } from "./wake"
@@ -30,7 +31,7 @@ export type Launch = {
 
 export type Task = {
   id: string
-  type: "monitor"
+  type: "monitor" | "shell"
   description: string
   command: string
   outputFile: string
@@ -40,6 +41,12 @@ export type MonitorInput = Launch & {
   sessionID: SessionID
   description: string
   timeout: Duration.Duration
+}
+
+export type ShellInput = Launch & {
+  sessionID: SessionID
+  /** Killed after this long, with a notice. Runs until it exits when left out. */
+  timeout?: Duration.Duration
 }
 
 export type Notification = {
@@ -56,6 +63,11 @@ export interface Interface {
    * to the session as a notification; stderr only reaches the output file.
    */
   readonly monitor: (input: MonitorInput) => Effect.Effect<Task>
+  /**
+   * Runs the command outside any turn, all output going to a file, and
+   * notifies the session once when it exits.
+   */
+  readonly shell: (input: ShellInput) => Effect.Effect<Task, SubagentError>
   /** Stops a task the session started. Returns it, or nothing if it has none running by that id. */
   readonly stop: (sessionID: SessionID, id: string) => Effect.Effect<BackgroundJob.Info | undefined>
   /** The session's running tasks. */
@@ -63,6 +75,34 @@ export interface Interface {
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/BackgroundTask") {}
+
+/**
+ * A subagent runs inside its parent's turn. A command it left running would
+ * report back to the subagent's session, starting a turn nobody reads.
+ */
+export class SubagentError extends Schema.TaggedErrorClass<SubagentError>()("BackgroundTaskSubagentError", {}) {
+  override get message() {
+    return "run_in_background is not available to subagents. Run the command in the foreground instead."
+  }
+}
+
+/** What the bash tool's schema gains when background commands are on. */
+export const ShellFields = {
+  run_in_background: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Set to true to run this command in the background. It keeps running across turns and you are notified when it exits.",
+  }),
+}
+
+/** Appended to the bash tool's description when background commands are on. */
+export const SHELL_NOTE = `
+
+# Background commands
+- \`run_in_background\` runs the command detached: it keeps running across turns and re-invokes you when it exits. No \`&\` needed.
+- Use it for long-running commands (dev servers, builds, test suites), and to wait for a condition with a command that exits when it is true, e.g. \`until grep -q "Ready in" dev.log; do sleep 0.5; done\`. You get a single completion notification when it exits.
+- The call returns at once with a task id and an output file. All output goes to that file; read it with the read tool. Stop the command with TaskStop.
+- Do not sleep or poll while it runs. \`timeout\`, when given, kills it after that long.
+- To be notified of every matching line rather than once at exit, use the Monitor tool instead.`
 
 // The shell tool hands its vetted command to this instead of running it when
 // the caller put one in the tool context: that is how Monitor reuses the
@@ -100,6 +140,7 @@ const layer = Layer.effect(
     const wake = yield* SessionWake.Service
     const spawner = yield* ChildProcessSpawner
     const fs = yield* FSUtil.Service
+    const sessions = yield* Session.Service
 
     const deliver = (sessionID: SessionID, input: Notification) =>
       wake.deliver({ sessionID, text: notification(input) }).pipe(
@@ -209,16 +250,14 @@ const layer = Layer.effect(
       return final.summary
     }, Effect.scoped)
 
-    const monitor: Interface["monitor"] = Effect.fn("BackgroundTask.monitor")(function* (input) {
-      const id = `mon_${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`
-      const task: Task = {
-        id,
-        type: "monitor",
-        description: input.description,
-        command: input.command,
-        // Beside truncated tool output, which the read tool may open.
-        outputFile: path.join(TRUNCATION_DIR, `${id}.log`),
-      }
+    const start = Effect.fnUntraced(function* (
+      sessionID: SessionID,
+      input: Pick<Task, "type" | "description" | "command">,
+      run: (task: Task) => Effect.Effect<string>,
+    ) {
+      const id = `${input.type === "monitor" ? "mon" : "sh"}_${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`
+      // Beside truncated tool output, which the read tool may open.
+      const task: Task = { ...input, id, outputFile: path.join(TRUNCATION_DIR, `${id}.log`) }
       yield* fs.ensureDir(TRUNCATION_DIR).pipe(Effect.orDie)
       yield* fs.writeFileString(task.outputFile, "").pipe(Effect.orDie)
       yield* jobs.start({
@@ -226,11 +265,70 @@ const layer = Layer.effect(
         type: task.type,
         title: input.description,
         // `ownerSessionId`, not `sessionId`: cancelling a session's run (Esc)
-        // cancels jobs filed under `sessionId`, and a monitor must outlive it.
-        metadata: { ownerSessionId: input.sessionID, command: input.command, outputFile: task.outputFile },
-        run: watch(input, task),
+        // cancels jobs filed under `sessionId`, and these must outlive it.
+        metadata: { ownerSessionId: sessionID, command: input.command, outputFile: task.outputFile },
+        run: run(task),
       })
       return task
+    })
+
+    const monitor: Interface["monitor"] = Effect.fn("BackgroundTask.monitor")(function* (input) {
+      return yield* start(
+        input.sessionID,
+        { type: "monitor", description: input.description, command: input.command },
+        (task) => watch(input, task),
+      )
+    })
+
+    const wait = Effect.fn("BackgroundTask.wait")(function* (input: ShellInput, task: Task) {
+      const handle = yield* spawner.spawn(input.process).pipe(Effect.orDie)
+      yield* Effect.addFinalizer(() => handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.ignore))
+      const sink = yield* Effect.acquireRelease(
+        Effect.sync(() => createWriteStream(task.outputFile, { flags: "a" })),
+        (stream) => Effect.promise(() => new Promise<void>((resolve) => stream.end(resolve))),
+      )
+      const reader = yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
+        Effect.sync(() => sink.write(chunk)),
+      ).pipe(Effect.ignore, Effect.forkScoped)
+
+      const end = yield* Effect.raceAll([
+        handle.exitCode.pipe(
+          Effect.map((code) => ({ kind: "exit" as const, code: Number(code) })),
+          Effect.catch(() => Effect.succeed({ kind: "exit" as const, code: -1 })),
+        ),
+        ...(input.timeout ? [Effect.sleep(input.timeout).pipe(Effect.as({ kind: "timeout" as const }))] : []),
+      ])
+      if (end.kind === "timeout") yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.ignore)
+      yield* Fiber.join(reader).pipe(Effect.timeoutOption("1 second"))
+
+      const name = `Background command "${task.description}"`
+      const final: Notification =
+        end.kind === "timeout"
+          ? {
+              id: task.id,
+              outputFile: task.outputFile,
+              status: "killed",
+              summary: `${name} was killed after exceeding its timeout of ${Duration.toMillis(input.timeout ?? Duration.zero)}ms.`,
+            }
+          : {
+              id: task.id,
+              outputFile: task.outputFile,
+              status: end.code === 0 ? "completed" : "failed",
+              summary:
+                end.code === 0 ? `${name} completed (exit code 0).` : `${name} failed with exit code ${end.code}.`,
+            }
+      yield* deliver(input.sessionID, final)
+      return final.summary
+    }, Effect.scoped)
+
+    const shell: Interface["shell"] = Effect.fn("BackgroundTask.shell")(function* (input) {
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      if (session.parentID) return yield* new SubagentError()
+      return yield* start(
+        input.sessionID,
+        { type: "shell", description: summarize(input.command), command: input.command },
+        (task) => wait(input, task),
+      )
     })
 
     const owned = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -254,21 +352,27 @@ const layer = Layer.effect(
     const list: Interface["list"] = Effect.fn("BackgroundTask.list")(function* (sessionID) {
       return (yield* owned(sessionID)).map((job) => ({
         id: job.id,
-        type: "monitor" as const,
+        type: job.type === "monitor" ? ("monitor" as const) : ("shell" as const),
         description: job.title ?? "",
         command: String(job.metadata?.command ?? ""),
         outputFile: String(job.metadata?.outputFile ?? ""),
       }))
     })
 
-    return Service.of({ monitor, stop, list })
+    return Service.of({ monitor, shell, stop, list })
   }),
 )
 
 export const node = LayerNode.make({
   service: Service,
   layer,
-  deps: [BackgroundJob.node, SessionWake.node, CrossSpawnSpawner.node, FSUtil.node],
+  deps: [BackgroundJob.node, SessionWake.node, CrossSpawnSpawner.node, FSUtil.node, Session.node],
 })
+
+// A command can be a whole script; notifications name it by its first line.
+function summarize(command: string) {
+  const line = command.trim().split("\n")[0]
+  return line.length > 80 ? `${line.slice(0, 77)}...` : line
+}
 
 export * as BackgroundTask from "./background"

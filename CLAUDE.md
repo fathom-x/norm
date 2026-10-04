@@ -203,6 +203,22 @@ syncs stay cheap:
   WebSocket source (`ws`) is not implemented. Tests: `test/norm/monitor.test.ts`,
   `packages/tui/test/util/norm-notification.test.ts`.
 
+- **Background commands** (`run_in_background` on the bash tool, as in
+  Claude Code): the call returns at once with a task id and an output
+  file; the command runs outside the turn (`BackgroundTask.shell`, same
+  ownership and lifetime rules as a monitor) and the session gets one
+  `<task-notification>` when it exits. `tool/shell.ts` always accepts the
+  parameter in its schema but shows it to the model (and appends
+  `BackgroundTask.SHELL_NOTE` to the description) only when it works:
+  when the `BackgroundTask` service is in the layer and the wake tools
+  are on. Otherwise it passes upstream's JSON schema, as `task.ts` does
+  for `background`, so upstream's parameter snapshot is untouched and a
+  stray `run_in_background` just runs in the foreground. Refused in
+  subagent sessions (the notification would start a turn nobody reads).
+  `timeout`, when given, kills the command with a notice; without it the
+  command runs until it exits or is stopped. Tests:
+  `test/norm/background-shell.test.ts`.
+
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until
