@@ -14,6 +14,12 @@ import { Norm } from "./norm"
 // second is slack for a run that ended for an unrelated reason.
 const RETRIES = 2
 
+/** The one self-scheduled wakeup a session can have pending (ScheduleWakeup). */
+export const WAKEUP = "wakeup"
+// How long after a /loop iteration that forgot to reschedule the loop gets
+// one more chance, as in Claude Code.
+const FALLBACK_DELAY = Duration.minutes(20)
+
 /**
  * `NORM_DISABLE_WAKE=1` leaves out everything built on this layer (the
  * scheduling and background tools, `/loop`, bash's `run_in_background`).
@@ -76,8 +82,18 @@ export interface Interface {
    * queued message at once cancels the reply too).
    */
   readonly interrupt: (sessionID: SessionID) => Effect.Effect<void>
-  /** The user stopped the session: drop its pending timers. */
+  /** The user stopped the session: drop its pending timers and end its loop. */
   readonly clear: (sessionID: SessionID) => Effect.Effect<void>
+  /**
+   * A self-paced loop is running in the session with this prompt (set by
+   * /loop and by every ScheduleWakeup). While one is, a turn that ends with
+   * no wakeup pending gets a single fallback wakeup; if that iteration does
+   * not reschedule either, the loop is over.
+   */
+  readonly loopStart: (sessionID: SessionID, prompt: string) => Effect.Effect<void>
+  readonly loopStop: (sessionID: SessionID) => Effect.Effect<void>
+  /** A run of the session ended. SessionPrompt calls this after every loop. */
+  readonly settled: (sessionID: SessionID) => Effect.Effect<void>
   readonly pending: (sessionID: SessionID) => Effect.Effect<Pending[]>
 }
 
@@ -101,6 +117,8 @@ const layer = Layer.effect(
           // Bumped on every cancel. A cancelled run returns like a
           // finished one, so this is how `drive` tells them apart.
           epochs: new Map<SessionID, number>(),
+          // `fallback`: the last wakeup was the fallback one, not the model's.
+          loops: new Map<SessionID, { prompt: string; fallback: boolean }>(),
         }
       }),
     )
@@ -204,6 +222,7 @@ const layer = Layer.effect(
 
     const clear: Interface["clear"] = Effect.fn("SessionWake.clear")(function* (sessionID) {
       const data = yield* InstanceState.get(state)
+      data.loops.delete(sessionID)
       const timers = Array.from(data.timers.get(sessionID)?.values() ?? [])
       data.timers.delete(sessionID)
       yield* Effect.forEach(timers, (timer) => Fiber.interrupt(timer.fiber), { discard: true })
@@ -216,7 +235,41 @@ const layer = Layer.effect(
         .toSorted((a, b) => a.at - b.at)
     })
 
+    const loopStart: Interface["loopStart"] = Effect.fn("SessionWake.loopStart")(function* (sessionID, prompt) {
+      const data = yield* InstanceState.get(state)
+      data.loops.set(sessionID, { prompt, fallback: false })
+    })
+
+    const loopStop: Interface["loopStop"] = Effect.fn("SessionWake.loopStop")(function* (sessionID) {
+      const data = yield* InstanceState.get(state)
+      data.loops.delete(sessionID)
+    })
+
+    const settled: Interface["settled"] = Effect.fn("SessionWake.settled")(function* (sessionID) {
+      const data = yield* InstanceState.get(state)
+      const loop = data.loops.get(sessionID)
+      if (!loop || data.timers.get(sessionID)?.has(WAKEUP)) return
+      // The iteration the fallback started did not reschedule either.
+      if (loop.fallback) {
+        data.loops.delete(sessionID)
+        return
+      }
+      loop.fallback = true
+      yield* whenIdle({
+        sessionID,
+        key: WAKEUP,
+        delay: FALLBACK_DELAY,
+        text: loop.prompt,
+        synthetic: false,
+        hidden:
+          "This message was sent by a fallback wakeup, not typed by the user: the previous iteration of this loop ended without calling ScheduleWakeup. Run the next iteration, then call ScheduleWakeup to keep the loop going, or with stop: true to end it. If you do neither, the loop ends here.",
+      })
+    })
+
     return Service.of({
+      loopStart,
+      loopStop,
+      settled,
       attach: (input) =>
         Effect.sync(() => {
           attached = input

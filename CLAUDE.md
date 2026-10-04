@@ -157,6 +157,13 @@ syncs stay cheap:
   nothing). `NORM_DISABLE_WAKE=1` (`SessionWake.disabled()`) leaves the tools and `/loop` out; unset
   they follow `NORM_DISABLE`; `=0` keeps them regardless (the test
   preload sets `NORM_DISABLE=1`, so their tests opt back in this way).
+  A loop survives one forgotten reschedule, as in Claude Code:
+  `SessionWake` knows a loop is running (`loopStart`, called by
+  `SessionPrompt.command` for `/loop` and by every ScheduleWakeup), and
+  `SessionPrompt.loop` calls `wake.settled` after each run; a run that
+  ends with a loop active and no wakeup pending gets one fallback wakeup
+  20 minutes later. If that iteration does not reschedule either, the
+  loop is over. `stop: true` and esc end the loop outright.
   Tests: `test/norm/schedule-wakeup.test.ts`.
 
 - **Monitor and TaskStop** (`src/norm/tool/monitor.ts`, `task-stop.ts`,

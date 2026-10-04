@@ -206,6 +206,95 @@ describe("ScheduleWakeup", () => {
     }).pipe(withTmpdirInstance()),
   )
 
+  it.effect("an iteration that forgets to reschedule gets one fallback wakeup", () =>
+    Effect.gen(function* () {
+      const test = yield* setup()
+      yield* test.call({ ...loop, delaySeconds: 60 })
+      // The turn that scheduled it ends: the wakeup is pending, nothing to do.
+      yield* test.wake.settled(test.chat.id)
+      const scheduled = yield* test.wake.pending(test.chat.id)
+      expect(scheduled).toHaveLength(1)
+
+      // It fires, and that iteration ends without calling ScheduleWakeup.
+      yield* TestClock.adjust("60 seconds")
+      expect(test.sent).toHaveLength(1)
+      yield* test.wake.settled(test.chat.id)
+      yield* test.wake.settled(test.chat.id)
+      const now = yield* Clock.currentTimeMillis
+      expect(yield* test.wake.pending(test.chat.id)).toEqual([{ key: "wakeup", at: now + 20 * 60_000 }])
+
+      yield* TestClock.adjust("20 minutes")
+      expect(test.sent).toHaveLength(2)
+      expect(test.sent[1].parts).toMatchObject([
+        { type: "text", text: "check the deploy", synthetic: false },
+        { type: "text", synthetic: true },
+      ])
+      expect(test.sent[1].parts[1]).toMatchObject({ text: expect.stringContaining("fallback wakeup") })
+
+      // The fallback iteration does not reschedule either: the loop is over.
+      yield* test.wake.settled(test.chat.id)
+      expect(yield* test.wake.pending(test.chat.id)).toEqual([])
+      yield* test.wake.settled(test.chat.id)
+      yield* TestClock.adjust("1 hour")
+      expect(test.sent).toHaveLength(2)
+    }).pipe(withTmpdirInstance()),
+  )
+
+  it.effect("rescheduling in the fallback iteration keeps the loop, and its fallback, alive", () =>
+    Effect.gen(function* () {
+      const test = yield* setup()
+      yield* test.call({ ...loop, delaySeconds: 60 })
+      yield* TestClock.adjust("60 seconds")
+      yield* test.wake.settled(test.chat.id)
+      yield* TestClock.adjust("20 minutes")
+      expect(test.sent).toHaveLength(2)
+
+      // The model recovers and schedules the next iteration itself.
+      yield* test.call({ ...loop, delaySeconds: 120 })
+      yield* test.wake.settled(test.chat.id)
+      yield* TestClock.adjust("120 seconds")
+      expect(test.sent).toHaveLength(3)
+      expect(test.sent[2].parts[1]).not.toMatchObject({ text: expect.stringContaining("fallback wakeup") })
+
+      // Forgetting again later earns another fallback.
+      yield* test.wake.settled(test.chat.id)
+      expect(yield* test.wake.pending(test.chat.id)).toHaveLength(1)
+    }).pipe(withTmpdirInstance()),
+  )
+
+  it.effect("no fallback after stop, after the user stops the session, or without a loop", () =>
+    Effect.gen(function* () {
+      const test = yield* setup()
+      yield* test.wake.settled(test.chat.id)
+      expect(yield* test.wake.pending(test.chat.id)).toEqual([])
+
+      yield* test.call({ ...loop, delaySeconds: 60 })
+      yield* test.call({ stop: true })
+      yield* test.wake.settled(test.chat.id)
+      expect(yield* test.wake.pending(test.chat.id)).toEqual([])
+
+      yield* test.call({ ...loop, delaySeconds: 60 })
+      yield* test.wake.clear(test.chat.id)
+      yield* test.wake.settled(test.chat.id)
+      expect(yield* test.wake.pending(test.chat.id)).toEqual([])
+
+      yield* TestClock.adjust("2 hours")
+      expect(test.sent).toEqual([])
+    }).pipe(withTmpdirInstance()),
+  )
+
+  it.effect("a /loop whose first iteration never schedules still gets its fallback", () =>
+    Effect.gen(function* () {
+      const test = yield* setup()
+      // What SessionPrompt.command does for /loop.
+      yield* test.wake.loopStart(test.chat.id, "watch the queue")
+      yield* test.wake.settled(test.chat.id)
+
+      yield* TestClock.adjust("20 minutes")
+      expect(test.sent.map((input) => input.parts[0])).toMatchObject([{ text: "watch the queue" }])
+    }).pipe(withTmpdirInstance()),
+  )
+
   it.effect("rejects a schedule that is missing a field", () =>
     Effect.gen(function* () {
       const test = yield* setup()

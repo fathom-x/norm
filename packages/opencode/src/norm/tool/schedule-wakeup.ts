@@ -6,7 +6,7 @@ import DESCRIPTION from "./schedule-wakeup.txt"
 const MIN_DELAY = 60
 const MAX_DELAY = 3600
 // One pending wakeup per session: scheduling again replaces it.
-const KEY = "wakeup"
+const KEY = SessionWake.WAKEUP
 
 // Names and shapes mirror Claude Code's ScheduleWakeup so models trained on
 // it call this one the same way. Everything is optional in the schema because
@@ -53,6 +53,7 @@ export const ScheduleWakeupTool = Tool.define<typeof Parameters, Metadata, Sessi
         Effect.gen(function* () {
           if (params.stop) {
             const pending = yield* wake.cancel(ctx.sessionID, KEY)
+            yield* wake.loopStop(ctx.sessionID)
             return {
               title: "Loop stopped",
               output: pending
@@ -66,6 +67,7 @@ export const ScheduleWakeupTool = Tool.define<typeof Parameters, Metadata, Sessi
           if (!params.prompt?.trim()) return yield* Effect.fail(new Error("prompt is required unless stop is true"))
           if (!params.reason?.trim()) return yield* Effect.fail(new Error("reason is required unless stop is true"))
 
+          yield* wake.loopStart(ctx.sessionID, params.prompt)
           const delaySeconds = Math.round(Math.min(MAX_DELAY, Math.max(MIN_DELAY, params.delaySeconds)))
           const timer = yield* wake.whenIdle({
             sessionID: ctx.sessionID,
