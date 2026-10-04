@@ -53,6 +53,7 @@ import { Format } from "../../src/format"
 import { TestInstance } from "../fixture/fixture"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 import { reply, TestLLMServer } from "../lib/llm-server"
+import { SessionWake } from "@/norm/wake"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -188,6 +189,7 @@ const promptRoot = LayerNode.group([
   BackgroundJob.node,
   SessionStatus.node,
   SessionRunState.node,
+  SessionWake.node,
   Database.node,
   EventV2Bridge.node,
   Question.node,
@@ -2439,4 +2441,58 @@ noLLMServer.instance(
       }
     }),
   30_000,
+)
+
+it.instance(
+  "norm wake: a delivered notification gets a model turn in an idle session",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const wake = yield* SessionWake.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* llm.text("world")
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", parts: [{ type: "text", text: "hello" }] })
+
+      yield* llm.text("noted")
+      yield* wake.deliver({ sessionID: chat.id, text: "the build finished" })
+      const answered = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+          const last = msgs.at(-1)
+          if (last?.info.role === "assistant" && last.info.finish && msgs.length === 4) return msgs
+        }),
+        "delivered notification never got a reply",
+        "10 seconds",
+      )
+
+      expect(answered[2].info).toMatchObject({ role: "user", agent: "build" })
+      expect(answered[2].parts).toMatchObject([{ type: "text", text: "the build finished", synthetic: true }])
+      expect(answered[3].parts.some((part) => part.type === "text" && part.text === "noted")).toBe(true)
+      expect(yield* llm.calls).toBe(2)
+    }),
+  30_000,
+)
+
+// Not every cancel is the user stopping the session: sending a queued message
+// at once (send_queued) cancels the reply too. Only the abort route clears.
+it.instance("norm wake: cancelling a run keeps the session's pending timers", () =>
+  Effect.gen(function* () {
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const wake = yield* SessionWake.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    yield* wake.whenIdle({ sessionID: chat.id, key: "wakeup", delay: "1 hour", text: "wake up" })
+    expect(yield* wake.pending(chat.id)).toHaveLength(1)
+
+    yield* prompt.cancel(chat.id)
+    expect(yield* wake.pending(chat.id)).toHaveLength(1)
+
+    yield* wake.clear(chat.id)
+    expect(yield* wake.pending(chat.id)).toEqual([])
+  }),
 )
