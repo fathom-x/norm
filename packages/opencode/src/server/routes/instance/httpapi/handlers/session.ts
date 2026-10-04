@@ -12,6 +12,7 @@ import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
 import { SessionWake } from "@/norm/wake"
+import { BackgroundTask } from "@/norm/background"
 import { SessionStatus } from "@/session/status"
 import { SessionSummary } from "@/session/summary"
 import { Todo } from "@/session/todo"
@@ -55,6 +56,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const compactSvc = yield* SessionCompaction.Service
     const runState = yield* SessionRunState.Service
     const wake = yield* SessionWake.Service
+    const tasks = yield* BackgroundTask.Service
     const agentSvc = yield* Agent.Service
     const permissionSvc = yield* Permission.Service
     const statusSvc = yield* SessionStatus.Service
@@ -236,6 +238,21 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       yield* wake.clear(ctx.params.sessionID)
       yield* promptSvc.cancel(ctx.params.sessionID)
       return true
+    })
+
+    // norm: what will still start a turn here. `norm run` waits for these
+    // before it exits.
+    const pending = Effect.fn("SessionHttpApi.pending")(function* (ctx: { params: { sessionID: SessionID } }) {
+      yield* requireSession(ctx.params.sessionID)
+      return {
+        wakeups: yield* wake.pending(ctx.params.sessionID),
+        tasks: (yield* tasks.list(ctx.params.sessionID)).map((task) => ({
+          id: task.id,
+          type: task.type,
+          description: task.description,
+          deadline: task.deadline,
+        })),
+      }
     })
 
     // norm: messages sent while a reply is in progress wait behind it
@@ -452,6 +469,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       .handleRaw("fork", forkRaw)
       .handle("abort", abort)
       .handle("sendQueued", sendQueued)
+      .handle("pending", pending)
       .handle("init", init)
       .handle("share", share)
       .handle("unshare", unshare)

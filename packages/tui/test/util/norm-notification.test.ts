@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { Message, Part } from "@opencode-ai/sdk/v2"
 import { agentWritten } from "../../src/util/norm-notification"
+import { pendingLabel } from "../../src/util/norm-pending"
 import { queuedCount } from "../../src/util/norm-queue"
 
 const text = (value: string, synthetic = true) => ({ type: "text", text: value, synthetic }) as Part
@@ -41,5 +42,38 @@ describe("util.norm-notification", () => {
     expect(queuedCount(messages.slice(0, 3), parts)).toBe(0)
     // Without parts every waiting user message counts, as before.
     expect(queuedCount(messages)).toBe(2)
+  })
+})
+
+describe("util.norm-pending", () => {
+  const now = 1_800_000_000_000
+
+  test("labels what will start a turn on its own", () => {
+    const task = { id: "mon_1", type: "monitor", description: "errors" }
+    expect(pendingLabel({ wakeups: [{ key: "wakeup", at: now + 4 * 60_000 }], tasks: [] }, now)).toBe("wake 4m")
+    expect(pendingLabel({ wakeups: [{ key: "wakeup", at: now + 185_000 }], tasks: [task, task] }, now)).toBe(
+      "wake 4m · 2 bg",
+    )
+    expect(pendingLabel({ wakeups: [], tasks: [task] }, now)).toBe("1 bg")
+    // Due, and waiting for the session to go idle.
+    expect(pendingLabel({ wakeups: [{ key: "wakeup", at: now - 5_000 }], tasks: [] }, now)).toBe("wake <1m")
+    // The soonest of several.
+    expect(
+      pendingLabel(
+        {
+          wakeups: [
+            { key: "cron:a", at: now + 30 * 60_000 },
+            { key: "wakeup", at: now + 2 * 60_000 },
+          ],
+          tasks: [],
+        },
+        now,
+      ),
+    ).toBe("wake 2m")
+  })
+
+  test("says nothing when nothing is pending", () => {
+    expect(pendingLabel(undefined, now)).toBeUndefined()
+    expect(pendingLabel({ wakeups: [], tasks: [] }, now)).toBeUndefined()
   })
 })

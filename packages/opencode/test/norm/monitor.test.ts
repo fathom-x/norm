@@ -251,9 +251,10 @@ describe("Monitor", () => {
       const read = (name: string) => Effect.promise(async () => Number(await fs.readFile(path.join(dir, name), "utf8")))
       const pids = [yield* read("pid"), yield* read("child")]
       expect(pids.every(alive)).toBe(true)
-      expect((yield* (yield* BackgroundTask.Service).list(test.chat.id)).map((task) => task.id)).toEqual([
-        result.metadata.taskId,
-      ])
+      const listed = yield* (yield* BackgroundTask.Service).list(test.chat.id)
+      expect(listed.map((task) => task.id)).toEqual([result.metadata.taskId])
+      // A monitor always has a deadline (here the default five minutes).
+      expect(listed[0].deadline).toBeGreaterThan(Date.now() + 290_000)
 
       // Another session cannot stop it.
       const other = yield* (yield* Session.Service).create({ title: "other" })
