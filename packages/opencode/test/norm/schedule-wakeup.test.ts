@@ -11,7 +11,9 @@ import { Command } from "@/command"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { BackgroundTask } from "@/norm/background"
 import { NormTools } from "@/norm/tools"
+import { Plugin } from "@/plugin"
 import { Parameters, ScheduleWakeupTool } from "@/norm/tool/schedule-wakeup"
 import { SessionWake } from "@/norm/wake"
 import { Permission } from "@/permission"
@@ -24,6 +26,7 @@ import { ToolJsonSchema } from "@/tool/json-schema"
 import { ToolRegistry } from "@/tool/registry"
 import { Truncate } from "@/tool/truncate"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { FSUtil } from "@opencode-ai/core/fs-util"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
@@ -47,6 +50,9 @@ const it = testEffect(
       ToolRegistry.node,
       CrossSpawnSpawner.node,
       Ripgrep.node,
+      FSUtil.node,
+      Plugin.node,
+      BackgroundTask.node,
       Agent.node,
       BackgroundJob.node,
       Command.node,

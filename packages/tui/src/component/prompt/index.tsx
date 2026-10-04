@@ -427,7 +427,7 @@ export function Prompt(props: PromptProps) {
 
           // norm: with messages queued behind the reply, one esc (text in
           // the prompt or not) interrupts it and answers them right away.
-          if (queuedCount(sync.data.message[props.sessionID] ?? []) > 0) {
+          if (queuedCount(sync.data.message[props.sessionID] ?? [], sync.data.part) > 0) {
             setStore("interrupt", 0)
             void sendQueued(sdk.client, props.sessionID).catch(() => {})
             dialog.clear()
@@ -1593,7 +1593,7 @@ export function Prompt(props: PromptProps) {
                 <text flexShrink={0} fg={store.interrupt > 0 ? theme.primary : theme.text}>
                   esc{" "}
                   <span style={{ fg: store.interrupt > 0 ? theme.primary : theme.textMuted }}>
-                    {queuedCount(sync.data.message[props.sessionID ?? ""] ?? []) > 0
+                    {queuedCount(sync.data.message[props.sessionID ?? ""] ?? [], sync.data.part) > 0
                       ? "send now"
                       : store.interrupt > 0
                         ? "again to interrupt"

@@ -960,6 +960,9 @@ const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function*
       if (job.status !== "running") return false
       if (job.id === sessionID) return true
       if (job.metadata?.sessionId === sessionID) return true
+      // norm: monitors and background shells (they outlive a cancelled run,
+      // so run-state's cancel does not match them, but not their session).
+      if (job.metadata?.ownerSessionId === sessionID) return true
       return job.metadata?.parentSessionId === sessionID
     }),
     (job) => background.cancel(job.id),
