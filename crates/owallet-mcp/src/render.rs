@@ -825,7 +825,7 @@ fn order_amount_cell(o: &Value) -> String {
 
 /// Cents that may be fractional (sub-cent pricing) → `$X.YZ`, or up to six
 /// dollar decimals when the amount isn't a whole cent.
-fn fmt_cents(cents: f64) -> String {
+pub(crate) fn fmt_cents(cents: f64) -> String {
     if cents.fract() == 0.0 {
         return fmt_usd_cents(cents as i64);
     }
@@ -851,17 +851,18 @@ fn balance_cell(v: &Value) -> String {
     if let Some(s) = v.get("formatted_balance").and_then(Value::as_str) {
         return s.to_string();
     }
-    if let Some(cents) = v.get("balance_cents").and_then(Value::as_i64) {
-        return fmt_usd_cents(cents);
+    if let Some(cents) = v.get("balance_cents").and_then(Value::as_f64) {
+        return fmt_cents(cents);
     }
     "—".to_string()
 }
 
-/// Money from a cents field (first key present), formatted as `$X.YZ`.
+/// Money from a cents field (first key present), formatted as `$X.YZ` —
+/// or to the micro-dollar when the amount isn't a whole cent.
 fn money_field(v: &Value, keys: &[&str]) -> Option<String> {
     for k in keys {
-        if let Some(c) = v.get(*k).and_then(Value::as_i64) {
-            return Some(fmt_usd_cents(c));
+        if let Some(c) = v.get(*k).and_then(Value::as_f64) {
+            return Some(fmt_cents(c));
         }
     }
     None

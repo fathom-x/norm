@@ -75,8 +75,8 @@ pub async fn dashboard(
                     None => "no limit".to_string(),
                     Some(budget) => format!(
                         "{} left today of {}/day",
-                        super::provider::format_usd_cents(
-                            key.remaining_today_usd_cents().unwrap_or(0)
+                        super::provider::format_usd_micros(
+                            key.remaining_today_usd_micros().unwrap_or(0)
                         ),
                         super::provider::format_usd_cents(budget),
                     ),

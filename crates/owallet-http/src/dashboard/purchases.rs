@@ -267,9 +267,12 @@ fn status_badge(status: Option<&str>) -> (String, String) {
     (class.to_string(), s.to_string())
 }
 
-fn format_dollars(cents: Option<i64>) -> String {
+/// `$12.34`, or to the micro-dollar for a sub-cent amount (`$0.000756`).
+fn format_dollars(cents: Option<f64>) -> String {
     match cents {
-        Some(c) => format!("${:.2}", c as f64 / 100.0),
+        Some(c) => super::provider::format_usd_micros(
+            (c * owallet_db::MICROS_PER_CENT as f64).round() as i64,
+        ),
         None => "—".to_string(),
     }
 }
@@ -785,7 +788,7 @@ mod render_tests {
             fulfillment_status: Some("delivered".into()),
             delivered_at: None,
             paid_at: None,
-            total_usd_cents: Some(5),
+            total_usd_cents: Some(5.0),
             delivered_content: Some(content.to_string()),
             delivered_content_url: None,
             delivered_content_type: Some("application/json".into()),

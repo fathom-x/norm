@@ -395,7 +395,7 @@ fn gate_provider_key(state: &McpState, name: &str, args: &Value) -> Result<Optio
         // recorded after — the same soft gate as /v1's pay_order.
         "pay_order" | "redeem_merchant_credits" => {
             if let Some(key) = v1::read_key(state, Some(key_id)) {
-                if key.remaining_today_usd_cents() == Some(0) {
+                if key.remaining_today_usd_micros() == Some(0) {
                     return Err(exhausted_budget_error(&key));
                 }
             }
@@ -544,7 +544,7 @@ async fn marketplace_tool_call(
     // key via the shared place-and-pay path.
     let key_id = state.provider_key_id.as_deref();
     if let Some(key) = key_id.and_then(|id| v1::read_key(state, Some(id))) {
-        if key.remaining_today_usd_cents() == Some(0) {
+        if key.remaining_today_usd_micros() == Some(0) {
             return Err(exhausted_budget_error(&key));
         }
     }

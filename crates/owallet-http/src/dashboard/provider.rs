@@ -162,3 +162,16 @@ pub async fn revoke_post(
 pub(crate) fn format_usd_cents(cents: i64) -> String {
     format!("${}.{:02}", cents / 100, (cents % 100).abs())
 }
+
+/// Micro-dollars (a key's budget tracking unit) → `"$12.34"` for a whole
+/// cent, else to the micro-dollar with trailing zeros trimmed
+/// (`"$0.000756"`), so sub-cent spend doesn't read as `$0.00`.
+pub(crate) fn format_usd_micros(micros: i64) -> String {
+    if micros % owallet_db::MICROS_PER_CENT == 0 {
+        return format_usd_cents(micros / owallet_db::MICROS_PER_CENT);
+    }
+    let sign = if micros < 0 { "-" } else { "" };
+    let abs = micros.unsigned_abs();
+    let frac = format!("{:06}", abs % 1_000_000);
+    format!("{sign}${}.{}", abs / 1_000_000, frac.trim_end_matches('0'))
+}

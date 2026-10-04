@@ -282,7 +282,7 @@ async fn list_listings_passes_filters_as_query_params() {
     // Regression: the string price must parse (previously `Option<f64>` here
     // raised "invalid type: string, expected f64").
     assert_eq!(page.data[0].price_usd.as_deref(), Some("$9.99"));
-    assert_eq!(page.data[0].price_cents, Some(999));
+    assert_eq!(page.data[0].price_cents, Some(999.0));
     assert_eq!(
         page.data[0].seller.as_ref().and_then(|s| s.slug.as_deref()),
         Some("acme")
@@ -358,7 +358,7 @@ async fn list_orders_with_filters() {
     assert_eq!(o.payment_status.as_deref(), Some("paid"));
     assert_eq!(o.fulfillment_status.as_deref(), Some("shipping"));
     assert_eq!(o.total_usd.as_deref(), Some("$0.0010"));
-    assert_eq!(o.total_usd_cents, Some(1));
+    assert_eq!(o.total_usd_cents, Some(1.0));
     assert_eq!(o.tracking_number.as_deref(), Some("1Z999"));
     // listing.id surfaces as listing_id on the flat Rust struct.
     assert_eq!(o.listing_id.as_deref(), Some("L42"));
@@ -569,7 +569,7 @@ async fn list_merchant_credits_handles_seller_and_org_owned_rows() {
     assert_eq!(list.data.len(), 2);
     assert_eq!(list.data[0].seller_slug.as_deref(), Some("alice"));
     assert_eq!(list.data[0].holder_type.as_deref(), Some("seller"));
-    assert_eq!(list.data[0].total_purchased_cents, Some(2000));
+    assert_eq!(list.data[0].total_purchased_cents, Some(2000.0));
     // Org-owned row: seller_slug absent, organization_slug present.
     assert!(list.data[1].seller_slug.is_none());
     assert_eq!(list.data[1].organization_slug.as_deref(), Some("acme"));
@@ -601,7 +601,7 @@ async fn get_merchant_credits_for_one_seller_unwraps_data_envelope() {
         .await
         .unwrap();
     assert_eq!(mc.seller_slug.as_deref(), Some("alice"));
-    assert_eq!(mc.balance_cents, Some(5000));
+    assert_eq!(mc.balance_cents, Some(5000.0));
     assert_eq!(mc.formatted_balance.as_deref(), Some("$50.00"));
 }
 
@@ -644,7 +644,7 @@ async fn purchase_merchant_credits_posts_amount_cents() {
         resp.payment_address.as_deref(),
         Some("0x000000000000000000000000000000000000dead")
     );
-    assert_eq!(resp.total_usd_cents, Some(1500));
+    assert_eq!(resp.total_usd_cents, Some(1500.0));
     assert_eq!(resp.payment_status.as_deref(), Some("pending"));
 }
 
@@ -705,8 +705,8 @@ async fn redeem_merchant_credits_posts_order_id() {
         .await
         .unwrap();
     assert_eq!(resp.status, "applied");
-    assert_eq!(resp.amount_redeemed_cents, 1500);
-    assert_eq!(resp.credit_balance_cents, 3500);
+    assert_eq!(resp.amount_redeemed_cents, 1500.0);
+    assert_eq!(resp.credit_balance_cents, 3500.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -740,4 +740,38 @@ async fn fetch_delivered_content_refuses_a_foreign_host() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("not this marketplace"), "{err}");
+}
+
+#[tokio::test]
+async fn sub_cent_prices_and_balances_parse_exactly() {
+    // Micropayments: the marketplace emits sub-cent amounts as fractional
+    // cents (to 4 places). A fractional `price_cents` used to fail the whole
+    // listings parse (it was typed as an integer).
+    let (server, client) = fixture().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/listings"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "L1", "title": "Micro lookup", "price_cents": 0.05, "price_usd": "$0.0005"}]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v1/merchant_credits/[A-Za-z0-9_-]+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"seller_slug": "alice", "balance_cents": 99.9244, "formatted_balance": "$0.999244"}
+        })))
+        .mount(&server)
+        .await;
+
+    let page = client
+        .list_listings(&ListingFilters::default())
+        .await
+        .unwrap();
+    assert_eq!(page.data[0].price_cents, Some(0.05));
+
+    let mc = client
+        .get_merchant_credits("alice", Auth::Bearer("tok"))
+        .await
+        .unwrap();
+    assert_eq!(mc.balance_cents, Some(99.9244));
 }

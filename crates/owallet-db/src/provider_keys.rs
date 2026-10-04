@@ -11,6 +11,17 @@ pub const PROVIDER_SCOPE_CHAT: &str = "chat";
 /// (`buy` / `pay_order` / …) on `/v1`. Never granted by default.
 pub const PROVIDER_SCOPE_SPEND: &str = "spend";
 
+/// Spend is tracked in micro-dollars ($0.000001, one USDC base unit — the
+/// marketplace's own money precision), so a key spending sub-cent
+/// micropayments still counts every one against its budget. Budgets
+/// themselves stay in whole cents.
+pub const MICROS_PER_CENT: i64 = 10_000;
+
+/// Today's stored spend in micro-dollars, falling back to the pre-micros
+/// `spent_usd_cents` column for a row last written before it existed.
+const STORED_SPENT_MICROS: &str =
+    "COALESCE(spent_usd_micros, COALESCE(spent_usd_cents, 0) * 10000)";
+
 /// The budget window key: the julian day number of the calendar date *in
 /// the wallet's timezone* (an IANA name like "America/New_York"; UTC when
 /// unset or unrecognized). Spend accounting is scoped to the current day
@@ -55,13 +66,13 @@ pub struct ProviderKeyRow {
     /// `None` — rows from before the column, and keys minted without a
     /// limit — means no daily bound (the per-request cap still applies).
     pub daily_budget_usd_cents: Option<i64>,
-    /// Cents the key's spending tools have moved **today** (the wallet's
-    /// timezone). Normalized at read time: when the stored window is a
-    /// past day, this reads as 0 without waiting for a write to roll the
-    /// row over.
-    pub spent_usd_cents: i64,
+    /// Micro-dollars the key's spending tools have moved **today** (the
+    /// wallet's timezone). Normalized at read time: when the stored window
+    /// is a past day, this reads as 0 without waiting for a write to roll
+    /// the row over.
+    pub spent_usd_micros: i64,
     /// Raw stored window (julian day, wallet timezone) — `None` until the
-    /// key first spends. Diagnostic; `spent_usd_cents` is already
+    /// key first spends. Diagnostic; `spent_usd_micros` is already
     /// normalized against it.
     pub spent_day: Option<i64>,
 }
@@ -73,17 +84,17 @@ impl ProviderKeyRow {
         scopes_allow_spend(self.scopes.as_deref())
     }
 
-    /// Cents spent so far today (wallet timezone). Reads the normalized
-    /// field — kept as a method so call sites say what they mean.
-    pub fn spent_today_usd_cents(&self) -> i64 {
-        self.spent_usd_cents
+    /// Micro-dollars spent so far today (wallet timezone). Reads the
+    /// normalized field — kept as a method so call sites say what they mean.
+    pub fn spent_today_usd_micros(&self) -> i64 {
+        self.spent_usd_micros
     }
 
-    /// Cents left of today's budget (wallet timezone) — `None` when the
-    /// key has no daily budget.
-    pub fn remaining_today_usd_cents(&self) -> Option<i64> {
+    /// Micro-dollars left of today's budget (wallet timezone) — `None` when
+    /// the key has no daily budget.
+    pub fn remaining_today_usd_micros(&self) -> Option<i64> {
         self.daily_budget_usd_cents
-            .map(|budget| (budget - self.spent_today_usd_cents()).max(0))
+            .map(|budget| (budget * MICROS_PER_CENT - self.spent_today_usd_micros()).max(0))
     }
 }
 
@@ -98,24 +109,27 @@ pub fn scopes_allow_spend(scopes: Option<&str>) -> bool {
 /// Outcome of trying to reserve part of a key's daily budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BudgetReservation {
-    /// The amount fit today's window — `spent_usd_cents` now includes it.
+    /// The amount fit today's window — `spent_usd_micros` now includes it.
     Reserved,
     /// The amount would exceed the key's daily budget; nothing was
     /// recorded.
     OverBudget {
         daily_budget_usd_cents: i64,
-        remaining_today_usd_cents: i64,
+        remaining_today_usd_micros: i64,
     },
     /// No such key (revoked mid-request); nothing was recorded.
     KeyMissing,
 }
 
-/// `?1` in every query below is the current budget day: `spent_usd_cents`
-/// is normalized to 0 in SQL when the stored window is not today, so every
+/// `?1` in every query below is the current budget day: the spend is
+/// normalized to 0 in SQL when the stored window is not today, so every
 /// row handed out is already "as of now".
 const SELECT_COLUMNS: &str =
     "id, npub, created_at, label, token_prefix, scopes, daily_budget_usd_cents, \
-     CASE WHEN spent_day IS ?1 THEN COALESCE(spent_usd_cents, 0) ELSE 0 END, spent_day";
+     CASE WHEN spent_day IS ?1 \
+          THEN COALESCE(spent_usd_micros, COALESCE(spent_usd_cents, 0) * 10000) \
+          ELSE 0 END, \
+     spent_day";
 
 fn row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderKeyRow> {
     Ok(ProviderKeyRow {
@@ -126,7 +140,7 @@ fn row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderKeyRow> {
         token_prefix: row.get(4)?,
         scopes: row.get(5)?,
         daily_budget_usd_cents: row.get(6)?,
-        spent_usd_cents: row.get(7)?,
+        spent_usd_micros: row.get(7)?,
         spent_day: row.get(8)?,
     })
 }
@@ -134,7 +148,7 @@ fn row_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderKeyRow> {
 pub(crate) fn insert(conn: &Connection, row: &ProviderKeyRow, token_hash: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO provider_keys(id, token_hash, npub, created_at, label, token_prefix, \
-         scopes, daily_budget_usd_cents, spent_usd_cents, spent_day) \
+         scopes, daily_budget_usd_cents, spent_usd_micros, spent_day) \
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             row.id,
@@ -145,7 +159,7 @@ pub(crate) fn insert(conn: &Connection, row: &ProviderKeyRow, token_hash: &str) 
             row.token_prefix,
             row.scopes,
             row.daily_budget_usd_cents,
-            row.spent_usd_cents,
+            row.spent_usd_micros,
             row.spent_day,
         ],
     )?;
@@ -212,31 +226,33 @@ pub(crate) fn update_budget(
     Ok(changed > 0)
 }
 
-/// Atomically reserve `amount_cents` of the key's daily budget. The one
-/// guarded UPDATE both rolls a stale window over to today (`spent_day IS
-/// NOT ?today` ⇒ today's spend counts as 0) and refuses when the new total
-/// wouldn't fit — so two concurrent requests on the same key cannot both
-/// squeeze through the last dollar, and the wallet-local midnight needs
-/// no sweeper job.
+/// Atomically reserve `amount_micros` (micro-dollars) of the key's daily
+/// budget. The one guarded UPDATE both rolls a stale window over to today
+/// (`spent_day IS NOT ?today` ⇒ today's spend counts as 0) and refuses when
+/// the new total wouldn't fit — so two concurrent requests on the same key
+/// cannot both squeeze through the last dollar, and the wallet-local
+/// midnight needs no sweeper job.
 pub(crate) fn try_reserve_spend(
     conn: &Connection,
     id: &str,
-    amount_cents: i64,
+    amount_micros: i64,
     today: i64,
 ) -> Result<BudgetReservation> {
-    debug_assert!(amount_cents > 0);
+    debug_assert!(amount_micros > 0);
     let changed = conn.execute(
-        "UPDATE provider_keys \
-         SET spent_usd_cents = CASE WHEN spent_day IS ?3 \
-                                    THEN COALESCE(spent_usd_cents, 0) + ?2 \
-                                    ELSE ?2 END, \
-             spent_day = ?3 \
-         WHERE id = ?1 \
-           AND (daily_budget_usd_cents IS NULL \
-                OR (CASE WHEN spent_day IS ?3 \
-                         THEN COALESCE(spent_usd_cents, 0) \
-                         ELSE 0 END) + ?2 <= daily_budget_usd_cents)",
-        params![id, amount_cents, today],
+        &format!(
+            "UPDATE provider_keys \
+             SET spent_usd_micros = CASE WHEN spent_day IS ?3 \
+                                         THEN {STORED_SPENT_MICROS} + ?2 \
+                                         ELSE ?2 END, \
+                 spent_day = ?3 \
+             WHERE id = ?1 \
+               AND (daily_budget_usd_cents IS NULL \
+                    OR (CASE WHEN spent_day IS ?3 \
+                             THEN {STORED_SPENT_MICROS} \
+                             ELSE 0 END) + ?2 <= daily_budget_usd_cents * {MICROS_PER_CENT})"
+        ),
+        params![id, amount_micros, today],
     )?;
     if changed > 0 {
         return Ok(BudgetReservation::Reserved);
@@ -245,51 +261,56 @@ pub(crate) fn try_reserve_spend(
         Some(row) => Ok(BudgetReservation::OverBudget {
             // The guard only refuses when a daily budget exists.
             daily_budget_usd_cents: row.daily_budget_usd_cents.unwrap_or(0),
-            remaining_today_usd_cents: row.remaining_today_usd_cents().unwrap_or(0),
+            remaining_today_usd_micros: row.remaining_today_usd_micros().unwrap_or(0),
         }),
         None => Ok(BudgetReservation::KeyMissing),
     }
 }
 
-/// Hand back a reservation that turned out not to spend (payment refused
-/// before anything moved). Floored at 0, and a no-op if the wallet-local
-/// midnight already rolled the window (the reservation it would refund no
-/// longer counts against anything).
+/// Hand back a reservation (micro-dollars) that turned out not to spend —
+/// a payment refused before anything moved, or the part of a metered
+/// deposit the seller released. Floored at 0, and a no-op if the
+/// wallet-local midnight already rolled the window (the reservation it
+/// would refund no longer counts against anything).
 pub(crate) fn release_spend(
     conn: &Connection,
     id: &str,
-    amount_cents: i64,
+    amount_micros: i64,
     today: i64,
 ) -> Result<()> {
-    debug_assert!(amount_cents > 0);
+    debug_assert!(amount_micros > 0);
     conn.execute(
-        "UPDATE provider_keys \
-         SET spent_usd_cents = MAX(COALESCE(spent_usd_cents, 0) - ?2, 0) \
-         WHERE id = ?1 AND spent_day IS ?3",
-        params![id, amount_cents, today],
+        &format!(
+            "UPDATE provider_keys \
+             SET spent_usd_micros = MAX({STORED_SPENT_MICROS} - ?2, 0) \
+             WHERE id = ?1 AND spent_day IS ?3"
+        ),
+        params![id, amount_micros, today],
     )?;
     Ok(())
 }
 
-/// Record spend discovered after the fact (credit redemption amounts) —
-/// unconditional, so it may overshoot the daily budget by the final
-/// amount; the key just refuses everything else until the wallet-local
-/// midnight.
+/// Record spend (micro-dollars) discovered after the fact (credit
+/// redemption amounts) — unconditional, so it may overshoot the daily
+/// budget by the final amount; the key just refuses everything else until
+/// the wallet-local midnight.
 pub(crate) fn record_spend(
     conn: &Connection,
     id: &str,
-    amount_cents: i64,
+    amount_micros: i64,
     today: i64,
 ) -> Result<()> {
-    debug_assert!(amount_cents > 0);
+    debug_assert!(amount_micros > 0);
     conn.execute(
-        "UPDATE provider_keys \
-         SET spent_usd_cents = CASE WHEN spent_day IS ?3 \
-                                    THEN COALESCE(spent_usd_cents, 0) + ?2 \
-                                    ELSE ?2 END, \
-             spent_day = ?3 \
-         WHERE id = ?1",
-        params![id, amount_cents, today],
+        &format!(
+            "UPDATE provider_keys \
+             SET spent_usd_micros = CASE WHEN spent_day IS ?3 \
+                                         THEN {STORED_SPENT_MICROS} + ?2 \
+                                         ELSE ?2 END, \
+                 spent_day = ?3 \
+             WHERE id = ?1"
+        ),
+        params![id, amount_micros, today],
     )?;
     Ok(())
 }
