@@ -149,6 +149,31 @@ syncs stay cheap:
   per instance: timers die with the process or a config reload. The scheduling and
   background tools (ScheduleWakeup, Monitor, cron) build on it.
 
+- **Claude Code's scheduling tools, under Claude Code's names**
+  (`src/norm/tools.ts`, `src/norm/tool/`): models are post-trained on
+  their vendor's tool schemas, and only Claude Code has these tools, so
+  ids, parameter names and descriptions are copied from it rather than
+  invented (PascalCase ids included). So far: `ScheduleWakeup`
+  (`delaySeconds` clamped to 60-3600, `prompt`, `reason`, `noop`, `stop`;
+  one pending wakeup per session, fired through `SessionWake.whenIdle`
+  as a hidden user message plus a note saying it was not typed)
+  and the `/loop` command that paces itself with it
+  (`command/index.ts`, template `src/norm/loop.txt`). Hook-ins:
+  `tool/registry.ts` appends `NormTools.infos` to the built-in list, and
+  `tool/task.ts` denies `NormTools.primaryOnly()` in subagent sessions
+  (a subagent that schedules a wakeup and ends its turn hands its parent
+  nothing). `NORM_DISABLE_WAKE=1` (`SessionWake.disabled()`) leaves the tools and `/loop` out; unset
+  they follow `NORM_DISABLE`; `=0` keeps them regardless (the test
+  preload sets `NORM_DISABLE=1`, so their tests opt back in this way).
+  A loop survives one forgotten reschedule, as in Claude Code:
+  `SessionWake` knows a loop is running (`loopStart`, called by
+  `SessionPrompt.command` for `/loop` and by every ScheduleWakeup), and
+  `SessionPrompt.loop` calls `wake.settled` after each run; a run that
+  ends with a loop active and no wakeup pending gets one fallback wakeup
+  20 minutes later. If that iteration does not reschedule either, the
+  loop is over. `stop: true` and esc end the loop outright.
+  Tests: `test/norm/schedule-wakeup.test.ts`.
+
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until
