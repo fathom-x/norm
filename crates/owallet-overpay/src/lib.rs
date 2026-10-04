@@ -16,6 +16,9 @@
 //! - `Auth::Nip98 { sk }` — wallet-based fallback (wired into endpoint
 //!   methods directly; the actual NIP-98 signing happens in
 //!   `owallet_crypto::nip98`)
+//! - `Auth::BearerSigned(token, sk)` — the token, plus the wallet key's
+//!   NIP-98 signature in `X-Nostr-Signature` (POST bodies covered by the
+//!   `payload` tag), which Overpay stores against each spend
 
 pub mod client;
 pub mod error;

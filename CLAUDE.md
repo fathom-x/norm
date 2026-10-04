@@ -62,12 +62,21 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   **16-byte nonces** (PyCryptodome default), not 12 — see
   `Aes256Gcm<U16>` in `aesgcm.rs`.
 
-- **NIP-98 fallback.** The `Auth` enum on `OverpayClient` has three
-  variants (`None`, `Bearer`, `Nip98(&PrivateKey)`). Any tool /
-  command that takes an Overpay action should go through
-  `McpState::resolve_owned_auth()` (for tools) or the
-  bearer-or-derive-key branch in `commands/account.rs` (for the CLI),
-  so users without a stored token still authenticate via wallet key.
+- **NIP-98 fallback, and every request signed.** The `Auth` enum on
+  `OverpayClient` has four variants (`None`, `Bearer`, `Nip98(&PrivateKey)`,
+  `BearerSigned(&str, &PrivateKey)`). Any tool / command that takes an
+  Overpay action should go through `McpState::resolve_owned_auth()` (for
+  tools) or the bearer-or-derive-key branch in `commands/account.rs` (for
+  the CLI), so users without a stored token still authenticate via wallet
+  key. With a token *and* an unlocked DB (always, under `owallet serve`)
+  it returns `BearerSigned`: every request also carries
+  `X-Nostr-Signature`, a NIP-98 event by the wallet key (the npub's, which
+  is also the EVM key) — and for POSTs a `payload` tag, the sha256 of the
+  **exact body bytes sent**. Overpay stores it as the buyer's signed
+  authorization of each spend (orders, merchant-credit redeem / purchase /
+  load) and refuses replays. So `post_json*` serialise the body once,
+  sign those bytes and send them unchanged (`post_signed`); never add a
+  POST path that re-serialises after signing.
 
 - **`/v1` OpenAI-compatible endpoint** (`owallet-mcp/src/openai_compat.rs`,
   mounted by `owallet-http`). Hardcoded to exactly two *listings*

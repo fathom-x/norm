@@ -50,6 +50,10 @@ pub struct McpState {
 pub enum OwnedAuth {
     Bearer(String),
     Nip98(PrivateKey),
+    /// The bearer token plus the wallet key, which signs every request
+    /// (`X-Nostr-Signature`; POST bodies covered by the NIP-98 `payload`
+    /// tag) — Overpay's proof that the keyholder authorized each spend.
+    BearerSigned(String, PrivateKey),
 }
 
 impl OwnedAuth {
@@ -57,6 +61,7 @@ impl OwnedAuth {
         match self {
             Self::Bearer(t) => Auth::Bearer(t),
             Self::Nip98(sk) => Auth::Nip98(sk),
+            Self::BearerSigned(t, sk) => Auth::BearerSigned(t, sk),
         }
     }
 }
@@ -176,7 +181,11 @@ impl McpState {
 
     /// Resolve the auth strategy for an Overpay request:
     ///
-    /// 1. If a Bearer token is stored for the active wallet, use it.
+    /// 1. If a Bearer token is stored for the active wallet, use it — and
+    ///    when the wallet key is available (the DB is unlocked, as it is
+    ///    under `owallet serve`), sign every request with it too
+    ///    ([`OwnedAuth::BearerSigned`]): each spend then carries the
+    ///    keyholder's signature over its exact body.
     /// 2. Otherwise fall back to NIP-98 by decrypting the wallet seed,
     ///    deriving the secp256k1 key, and signing each request.
     ///
@@ -184,7 +193,10 @@ impl McpState {
     pub fn resolve_owned_auth(&self) -> Result<(String, OwnedAuth), ResolveAuthError> {
         let npub = self.resolve_npub().ok_or(ResolveAuthError::NoWallet)?;
         if let Some(token) = self.read_overpay_token(&npub) {
-            return Ok((npub, OwnedAuth::Bearer(token)));
+            return Ok(match self.wallet_key(&npub) {
+                Some(sk) => (npub, OwnedAuth::BearerSigned(token, sk)),
+                None => (npub, OwnedAuth::Bearer(token)),
+            });
         }
         let seed = {
             let db = self
@@ -198,5 +210,18 @@ impl McpState {
         };
         let sk = derive_from_stored_seed(&seed)?;
         Ok((npub, OwnedAuth::Nip98(sk)))
+    }
+
+    /// The wallet's signing key (the npub's, which is also its EVM key), if
+    /// the DB is unlocked and the seed readable.
+    fn wallet_key(&self, npub: &str) -> Option<PrivateKey> {
+        let seed = {
+            let db = self.db.lock().ok()?;
+            if !db.is_unlocked() {
+                return None;
+            }
+            db.read_seed(npub).ok().flatten()?
+        };
+        derive_from_stored_seed(&seed).ok()
     }
 }

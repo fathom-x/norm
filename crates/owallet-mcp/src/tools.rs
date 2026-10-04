@@ -911,7 +911,7 @@ async fn get_wallet_orders(state: &McpState, args: Value) -> Result<Value, ToolE
     // address", which we don't want — only set it for NIP-98.
     let payer_address = match &auth {
         OwnedAuth::Nip98(sk) => Some(Address::from_private_key(sk).to_hex_lower()),
-        OwnedAuth::Bearer(_) => None,
+        OwnedAuth::Bearer(_) | OwnedAuth::BearerSigned(..) => None,
     };
 
     // Raw Rails passthrough — see list_marketplace and
@@ -1581,7 +1581,7 @@ async fn sync_purchases(state: &McpState, args: Value) -> Result<Value, ToolErro
     // NIP-98 requests must pin the payer_address; Bearer requests skip it.
     let payer_address = match &auth {
         OwnedAuth::Nip98(sk) => Some(Address::from_private_key(sk).to_hex_lower()),
-        OwnedAuth::Bearer(_) => None,
+        OwnedAuth::Bearer(_) | OwnedAuth::BearerSigned(..) => None,
     };
 
     let mut synced = 0u64;

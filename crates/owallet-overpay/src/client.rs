@@ -43,7 +43,15 @@ pub enum Auth<'a> {
     /// Wallet-key-signed NIP-98 envelope. The signing happens per-request
     /// because the canonical event includes the URL + method.
     Nip98(&'a PrivateKey),
+    /// The bearer token, plus the wallet key's signature on every request in
+    /// `X-Nostr-Signature` (NIP-98, with a `payload` tag over the exact body
+    /// for POSTs). Overpay stores it as the buyer's signed authorization of
+    /// a spend and refuses replays.
+    BearerSigned(&'a str, &'a PrivateKey),
 }
+
+/// Header carrying the wallet's NIP-98 signature next to a bearer token.
+pub const SIGNATURE_HEADER: &str = "x-nostr-signature";
 
 #[derive(Clone)]
 pub struct OverpayClient {
@@ -556,9 +564,37 @@ impl OverpayClient {
         url: Url,
         auth: Auth<'_>,
     ) -> Result<RequestBuilder, OverpayError> {
+        self.build_with_body(method, url, auth, None)
+    }
+
+    /// [`Self::build`] for a request with a body: signatures cover these
+    /// exact bytes (NIP-98 `payload` tag), so the caller must send them
+    /// unchanged — never re-serialise.
+    fn build_with_body(
+        &self,
+        method: Method,
+        url: Url,
+        auth: Auth<'_>,
+        body: Option<&[u8]>,
+    ) -> Result<RequestBuilder, OverpayError> {
         let mut req = self.http.request(method.clone(), url.clone());
-        req = req.headers(auth_headers(method.as_str(), url.as_str(), auth)?);
+        req = req.headers(auth_headers(method.as_str(), url.as_str(), auth, body)?);
         Ok(req)
+    }
+
+    /// A JSON POST whose signature covers the body: serialise once, sign
+    /// those bytes, send those bytes.
+    fn post_signed<B: Serialize>(
+        &self,
+        url: Url,
+        auth: Auth<'_>,
+        body: &B,
+    ) -> Result<RequestBuilder, OverpayError> {
+        let bytes = serde_json::to_vec(body)?;
+        let req = self.build_with_body(Method::POST, url, auth, Some(&bytes))?;
+        Ok(req
+            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+            .body(bytes))
     }
 
     async fn get_json<T: DeserializeOwned>(
@@ -578,11 +614,7 @@ impl OverpayClient {
         body: &B,
     ) -> Result<T, OverpayError> {
         let url = self.join(path)?;
-        let mut req = self.build(Method::POST, url, auth)?;
-        req = req
-            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-            .json(body);
-        let resp = req.send().await?;
+        let resp = self.post_signed(url, auth, body)?.send().await?;
         decode_json(resp).await
     }
 
@@ -604,29 +636,34 @@ impl OverpayClient {
         body: &B,
     ) -> Result<Value, OverpayError> {
         let url = self.join(path)?;
-        let mut req = self.build(Method::POST, url, auth)?;
-        req = req
-            .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
-            .json(body);
-        let resp = req.send().await?;
+        let resp = self.post_signed(url, auth, body)?.send().await?;
         decode_value(resp).await
     }
 }
 
-fn auth_headers(method: &str, url: &str, auth: Auth<'_>) -> Result<HeaderMap, OverpayError> {
+fn auth_headers(
+    method: &str,
+    url: &str,
+    auth: Auth<'_>,
+    body: Option<&[u8]>,
+) -> Result<HeaderMap, OverpayError> {
+    let sign = |sk: &PrivateKey| match body {
+        Some(body) => nip98::sign_with_body(sk, url, method, body),
+        None => nip98::sign(sk, url, method),
+    };
+    let value = |s: &str| HeaderValue::from_str(s).map_err(|e| OverpayError::Sign(e.to_string()));
     let mut h = HeaderMap::new();
     match auth {
         Auth::None => {}
         Auth::Bearer(token) => {
-            let v = HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|e| OverpayError::Sign(e.to_string()))?;
-            h.insert(AUTHORIZATION, v);
+            h.insert(AUTHORIZATION, value(&format!("Bearer {token}"))?);
         }
         Auth::Nip98(sk) => {
-            let header = nip98::sign(sk, url, method);
-            let v =
-                HeaderValue::from_str(&header).map_err(|e| OverpayError::Sign(e.to_string()))?;
-            h.insert(AUTHORIZATION, v);
+            h.insert(AUTHORIZATION, value(&sign(sk))?);
+        }
+        Auth::BearerSigned(token, sk) => {
+            h.insert(AUTHORIZATION, value(&format!("Bearer {token}"))?);
+            h.insert(HeaderName::from_static(SIGNATURE_HEADER), value(&sign(sk))?);
         }
     }
     // Always announce JSON. Silently ignored if Content-Type is set later.

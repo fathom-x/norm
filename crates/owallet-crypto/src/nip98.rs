@@ -6,6 +6,11 @@
 //! signed BIP-340 schnorr against the canonical event JSON, the whole event
 //! serialised as JSON, then base64-encoded into an `Authorization: Nostr <b64>`
 //! header.
+//!
+//! [`sign_with_body`] adds NIP-98's `payload` tag — the hex SHA-256 of the
+//! exact request body — so the signature covers what is being bought, not
+//! just the URL: Overpay checks it against the body it received and stores
+//! the event as the buyer's authorization of the spend.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -37,6 +42,25 @@ pub fn sign(sk: &PrivateKey, url: &str, method: &str) -> String {
     sign_at(sk, url, method, now_secs(), rand_aux())
 }
 
+/// [`sign`] covering a request body too: adds `["payload", sha256(body)]`.
+/// The body must be the exact bytes sent — the server hashes what it
+/// receives.
+pub fn sign_with_body(sk: &PrivateKey, url: &str, method: &str, body: &[u8]) -> String {
+    sign_event(sk, url, method, Some(body), now_secs(), rand_aux())
+}
+
+/// Deterministic [`sign_with_body`], for tests.
+pub fn sign_with_body_at(
+    sk: &PrivateKey,
+    url: &str,
+    method: &str,
+    body: &[u8],
+    created_at: i64,
+    aux_rand: [u8; 32],
+) -> String {
+    sign_event(sk, url, method, Some(body), created_at, aux_rand)
+}
+
 /// Variant of [`sign`] that takes an explicit timestamp + aux randomness so
 /// tests can produce deterministic output.
 pub fn sign_at(
@@ -46,16 +70,33 @@ pub fn sign_at(
     created_at: i64,
     aux_rand: [u8; 32],
 ) -> String {
+    sign_event(sk, url, method, None, created_at, aux_rand)
+}
+
+fn sign_event(
+    sk: &PrivateKey,
+    url: &str,
+    method: &str,
+    body: Option<&[u8]>,
+    created_at: i64,
+    aux_rand: [u8; 32],
+) -> String {
     let secp = Secp256k1::new();
     let secret = SecretKey::from_slice(sk.as_bytes()).expect("PrivateKey enforces 32-byte input");
     let kp = Keypair::from_secret_key(&secp, &secret);
     let xonly = kp.x_only_public_key().0.serialize();
     let pubkey_hex = hex::encode(xonly);
 
-    let tags = vec![
+    let mut tags = vec![
         vec!["u".to_string(), url.to_string()],
         vec!["method".to_string(), method.to_uppercase()],
     ];
+    if let Some(body) = body {
+        tags.push(vec![
+            "payload".to_string(),
+            hex::encode(Sha256::digest(body)),
+        ]);
+    }
     let content = String::new();
 
     let id = compute_id(&pubkey_hex, created_at, NIP98_KIND, &tags, &content);
@@ -154,6 +195,46 @@ mod tests {
         let json_bytes = BASE64.decode(b64).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
         assert_eq!(v["tags"][1][1], "POST");
+    }
+
+    fn decode(header: &str) -> serde_json::Value {
+        serde_json::from_slice(&BASE64.decode(&header[6..]).unwrap()).unwrap()
+    }
+
+    /// `sign_with_body` adds the NIP-98 payload tag — the sha256 of the
+    /// exact body — and the event id covers it.
+    #[test]
+    fn body_signature_carries_payload_tag() {
+        let sk = fixture_sk();
+        let body = br#"{"listing_id":"abc","buyer_note":"hi"}"#;
+        let v = decode(&sign_with_body_at(
+            &sk,
+            "https://example.com/api/v1/orders",
+            "POST",
+            body,
+            1_700_000_000,
+            [0x22u8; 32],
+        ));
+        assert_eq!(v["tags"][2][0], "payload");
+        assert_eq!(v["tags"][2][1], hex::encode(Sha256::digest(body)));
+
+        let tags: Vec<Vec<String>> = serde_json::from_value(v["tags"].clone()).unwrap();
+        let id = compute_id(
+            v["pubkey"].as_str().unwrap(),
+            1_700_000_000,
+            NIP98_KIND,
+            &tags,
+            "",
+        );
+        assert_eq!(v["id"], id);
+    }
+
+    /// Without a body the event is exactly the old two-tag form.
+    #[test]
+    fn signature_without_body_has_no_payload_tag() {
+        let sk = fixture_sk();
+        let v = decode(&sign(&sk, "https://example.com", "GET"));
+        assert_eq!(v["tags"].as_array().unwrap().len(), 2);
     }
 
     /// Two signs of the same `(url, method, ts, aux)` produce identical
