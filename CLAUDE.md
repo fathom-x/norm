@@ -128,6 +128,14 @@ syncs stay cheap:
   of edit/write); norm offers it to all of them, with edit/write kept
   beside it except on GPT. Test in `test/tool/registry.test.ts`.
 
+- **owallet errors stay short** (`Norm.compactOwalletError`, called on
+  text deltas in `src/session/processor.ts` and in `Norm.harnessNote`):
+  owallet streams an upstream failure as reply text with the response
+  body attached, and a firewall in front of Overpay answers with a whole
+  web page (a 403 put 221 KB of HTML into a chat, then into every later
+  request). An HTML body becomes one sentence naming the status and the
+  page's heading; any other error is cut at 2,000 characters.
+
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until

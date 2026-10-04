@@ -343,3 +343,51 @@ test("auto-started serves forward the session id where the marketplace accepts i
     }
   }
 })
+
+test("compactOwalletError keeps a relayed web page out of the chat", () => {
+  const page = [
+    "<!DOCTYPE html>",
+    '<html lang="en">',
+    "  <head>",
+    "    <title>Blocked</title>",
+    `    <style>@font-face { src: url("data:font/woff2;base64,${"A".repeat(200_000)}") }</style>`,
+    "  </head>",
+    '  <body><h1 class="type-heading-04">403 - Forbidden</h1></body>',
+    "</html>",
+  ].join("\n")
+  const compact = Norm.compactOwalletError(`\n\n[owallet error] HTTP 403: ${page}`)
+
+  expect(compact).toBe(
+    '\n\n[owallet error] HTTP 403: the server answered with a web page instead of a reply ("403 - Forbidden"). A firewall in front of Overpay blocked the request. It can mistake text in the conversation, such as shell commands, for an attack, so sending the same conversation again will be blocked again.',
+  )
+  // Still recognised as an owallet error, and what the model said first is kept.
+  expect(Norm.isOwalletErrorText(compact)).toBe(true)
+  expect(Norm.compactOwalletError(`Half a reply.\n\n[owallet error] HTTP 502: ${page}`)).toBe(
+    'Half a reply.\n\n[owallet error] HTTP 502: the server answered with a web page instead of a reply ("403 - Forbidden").',
+  )
+  // A page with no heading falls back to its title, then to nothing.
+  expect(Norm.compactOwalletError("[owallet error] HTTP 503: <html><title>Service Unavailable</title></html>")).toBe(
+    '[owallet error] HTTP 503: the server answered with a web page instead of a reply ("Service Unavailable").',
+  )
+  expect(Norm.compactOwalletError("[owallet error] <html><body>oops</body></html>")).toBe(
+    "[owallet error] the server answered with a web page instead of a reply.",
+  )
+})
+
+test("compactOwalletError leaves ordinary errors and ordinary replies alone", () => {
+  const error = '\n\n[owallet error] HTTP 422: {"error":"No available credits for this seller"}'
+  expect(Norm.compactOwalletError(error)).toBe(error)
+  // A reply that merely contains HTML is not an owallet error.
+  const reply = "Here is the page:\n<!DOCTYPE html><html><body>hi</body></html>"
+  expect(Norm.compactOwalletError(reply)).toBe(reply)
+
+  const long = `[owallet error] ${"x".repeat(5000)}`
+  const cut = Norm.compactOwalletError(long)
+  expect(cut).toBe(`[owallet error] ${"x".repeat(1999)}… (3001 more characters)`)
+})
+
+test("harnessNote does not replay a relayed web page to the model", () => {
+  const note = Norm.harnessNote(`[owallet error] HTTP 403: <!DOCTYPE html><html><h1>403 - Forbidden</h1>${"x".repeat(100_000)}</html>`)
+  expect(note.length).toBeLessThan(1000)
+  expect(note).toContain('HTTP 403: the server answered with a web page instead of a reply ("403 - Forbidden").')
+})
