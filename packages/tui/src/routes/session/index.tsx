@@ -1349,7 +1349,7 @@ export function Session() {
                   )}
                 </For>
                 {/* norm: once, under the queued messages */}
-                <Show when={queuedCount(messages()) > 0}>
+                <Show when={queuedCount(messages(), sync.data.part) > 0}>
                   <box paddingLeft={3} marginTop={1} flexShrink={0}>
                     <text fg={theme.textMuted}>
                       press <span style={{ fg: theme.text }}>esc</span> to send immediately

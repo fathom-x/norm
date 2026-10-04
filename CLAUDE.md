@@ -149,6 +149,15 @@ syncs stay cheap:
   per instance: timers die with the process or a config reload. The scheduling and
   background tools (ScheduleWakeup, Monitor, cron) build on it.
 
+- **The chat history shows only what the human typed.** Everything the
+  wake layer delivers (wakeup and cron prompts, monitor events,
+  background-command exits) is `synthetic` text, which the session view
+  skips, so none of it appears in the transcript, least of all as
+  something the user submitted; the user sees the model's reply and the
+  hints row's `wake 4m · 2 bg`. Such messages also do not count as
+  queued user messages (`tui/src/util/norm-notification.ts`,
+  `norm-queue.ts`), so esc still interrupts while one waits.
+
 - **Claude Code's scheduling tools, under Claude Code's names**
   (`src/norm/tools.ts`, `src/norm/tool/`): models are post-trained on
   their vendor's tool schemas, and only Claude Code has these tools, so
@@ -173,6 +182,26 @@ syncs stay cheap:
   20 minutes later. If that iteration does not reschedule either, the
   loop is over. `stop: true` and esc end the loop outright.
   Tests: `test/norm/schedule-wakeup.test.ts`.
+
+- **Monitor and TaskStop** (`src/norm/tool/monitor.ts`, `task-stop.ts`,
+  engine in `src/norm/background.ts`, `BackgroundTask`): `Monitor` runs a
+  shell command outside any turn; stdout lines (batched over 200 ms)
+  reach the session as `<task-notification>` messages through
+  `SessionWake.deliver`, stderr only reaches the output file (in the
+  tool-output dir, so the read tool can open it). It ends with one
+  notice on exit (exit code), at `timeout_ms` (default 5 min, max 30),
+  or when it floods (more than 30 notifications a minute). Monitor does
+  not spawn anything itself: it calls the shell tool with a `normDetach`
+  handler in the tool context, so `tool/shell.ts` does its usual
+  permission ask (`bash` rules), cwd and env resolution and then hands
+  the prepared command over instead of running it (the one hook-in
+  there). Tasks are `BackgroundJob`s filed under
+  `metadata.ownerSessionId`, deliberately not `sessionId`: Esc cancels
+  jobs filed under `sessionId`, and a monitor must survive Esc. They die
+  on `TaskStop`, session delete (`session/session.ts` matcher), and
+  instance dispose (so also a TUI config reload). Claude Code's
+  WebSocket source (`ws`) is not implemented. Tests: `test/norm/monitor.test.ts`,
+  `packages/tui/test/util/norm-notification.test.ts`.
 
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the

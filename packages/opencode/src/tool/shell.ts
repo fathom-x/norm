@@ -21,6 +21,7 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+import { BackgroundTask } from "@/norm/background"
 
 export { Parameters } from "./shell/prompt"
 
@@ -628,12 +629,21 @@ export const ShellTool = Tool.define(
                 }),
               )
 
+              const env = yield* shellEnv(ctx, cwd)
+              // norm: Monitor reuses everything above (permission, cwd, env)
+              // and takes the command over instead of waiting for it here.
+              const detach = BackgroundTask.detach(ctx)
+              if (detach) {
+                yield* detach({ command: params.command, process: cmd(shell, params.command, cwd, env) })
+                return { title: params.command, metadata: { output: "", exit: null, truncated: false }, output: "" }
+              }
+
               return yield* run(
                 {
                   shell,
                   command: params.command,
                   cwd,
-                  env: yield* shellEnv(ctx, cwd),
+                  env,
                   timeout,
                 },
                 ctx,
