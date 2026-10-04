@@ -451,7 +451,7 @@ fn upsert_and_read_purchase_round_trips_snapshot() {
     assert_eq!(record.seller.as_deref(), Some("weather_bot"));
     assert_eq!(record.fulfillment_status.as_deref(), Some("delivered"));
     assert_eq!(record.delivered_at, Some(1700000000));
-    assert_eq!(record.total_usd_cents, Some(5));
+    assert_eq!(record.total_usd_cents, Some(5.0));
     assert_eq!(
         record.delivered_content_type.as_deref(),
         Some("application/json")
@@ -726,6 +726,11 @@ fn provider_key_scopes_gate_spending() {
     assert!(!owallet_db::scopes_allow_spend(None));
 }
 
+/// Cents → micro-dollars, the key budget's spend unit.
+fn c(cents: i64) -> i64 {
+    cents * owallet_db::MICROS_PER_CENT
+}
+
 #[test]
 fn provider_key_budget_reserve_release_record_lifecycle() {
     use owallet_db::BudgetReservation;
@@ -737,41 +742,41 @@ fn provider_key_budget_reserve_release_record_lifecycle() {
         .create_provider_key(NPUB, "dashboard", "chat spend", Some(1000))
         .unwrap();
     assert_eq!(key.daily_budget_usd_cents, Some(1000));
-    assert_eq!(key.spent_today_usd_cents(), 0);
-    assert_eq!(key.remaining_today_usd_cents(), Some(1000));
+    assert_eq!(key.spent_today_usd_micros(), c(0));
+    assert_eq!(key.remaining_today_usd_micros(), Some(c(1000)));
 
     // Reserve within budget; a second reservation over the remainder
     // refuses atomically and reports the numbers.
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 600).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(600)).unwrap(),
         BudgetReservation::Reserved
     );
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 500).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(500)).unwrap(),
         BudgetReservation::OverBudget {
             daily_budget_usd_cents: 1000,
-            remaining_today_usd_cents: 400,
+            remaining_today_usd_micros: c(400),
         }
     );
 
     // A released reservation restores allowance; the retry then fits.
-    db.release_provider_key_spend(&key.id, 600).unwrap();
+    db.release_provider_key_spend(&key.id, c(600)).unwrap();
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 500).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(500)).unwrap(),
         BudgetReservation::Reserved
     );
 
     // After-the-fact recording may overshoot; remaining floors at 0 and
     // everything refuses from then on.
-    db.record_provider_key_spend(&key.id, 700).unwrap();
+    db.record_provider_key_spend(&key.id, c(700)).unwrap();
     let row = db.read_provider_key(&key.id).unwrap().unwrap();
-    assert_eq!(row.spent_today_usd_cents(), 1200);
-    assert_eq!(row.remaining_today_usd_cents(), Some(0));
+    assert_eq!(row.spent_today_usd_micros(), c(1200));
+    assert_eq!(row.remaining_today_usd_micros(), Some(c(0)));
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 1).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(1)).unwrap(),
         BudgetReservation::OverBudget {
             daily_budget_usd_cents: 1000,
-            remaining_today_usd_cents: 0,
+            remaining_today_usd_micros: c(0),
         }
     );
 
@@ -780,20 +785,20 @@ fn provider_key_budget_reserve_release_record_lifecycle() {
         .update_provider_key_budget(&key.id, NPUB, Some(2000))
         .unwrap());
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 800).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(800)).unwrap(),
         BudgetReservation::Reserved
     );
     // Clearing it makes the key unlimited; spend is still tracked.
     assert!(db.update_provider_key_budget(&key.id, NPUB, None).unwrap());
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 1_000_000)
+        db.try_reserve_provider_key_spend(&key.id, c(1_000_000))
             .unwrap(),
         BudgetReservation::Reserved
     );
     let row = db.read_provider_key(&key.id).unwrap().unwrap();
     assert_eq!(row.daily_budget_usd_cents, None);
-    assert_eq!(row.remaining_today_usd_cents(), None);
-    assert_eq!(row.spent_today_usd_cents(), 1_002_000);
+    assert_eq!(row.remaining_today_usd_micros(), None);
+    assert_eq!(row.spent_today_usd_micros(), c(1_002_000));
 
     // Budget edits are wallet-scoped like delete.
     assert!(!db
@@ -803,7 +808,7 @@ fn provider_key_budget_reserve_release_record_lifecycle() {
     // A revoked key refuses reservations by name.
     db.delete_provider_key(&key.id, NPUB).unwrap();
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 1).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(1)).unwrap(),
         BudgetReservation::KeyMissing
     );
 }
@@ -820,14 +825,14 @@ fn provider_key_budget_window_resets_at_the_day_boundary() {
 
     // Exhaust today's budget.
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 1000).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(1000)).unwrap(),
         BudgetReservation::Reserved
     );
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 1).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(1)).unwrap(),
         BudgetReservation::OverBudget {
             daily_budget_usd_cents: 1000,
-            remaining_today_usd_cents: 0,
+            remaining_today_usd_micros: c(0),
         }
     );
 
@@ -844,16 +849,16 @@ fn provider_key_budget_window_resets_at_the_day_boundary() {
 
     // Reads report a fresh window without any write happening…
     let row = db.read_provider_key(&key.id).unwrap().unwrap();
-    assert_eq!(row.spent_today_usd_cents(), 0);
-    assert_eq!(row.remaining_today_usd_cents(), Some(1000));
+    assert_eq!(row.spent_today_usd_micros(), c(0));
+    assert_eq!(row.remaining_today_usd_micros(), Some(c(1000)));
 
     // …and the reserve UPDATE rolls the row over to today lazily.
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 900).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(900)).unwrap(),
         BudgetReservation::Reserved
     );
     let row = db.read_provider_key(&key.id).unwrap().unwrap();
-    assert_eq!(row.spent_today_usd_cents(), 900);
+    assert_eq!(row.spent_today_usd_micros(), c(900));
     assert_eq!(row.spent_day, Some(db.current_budget_day()));
 
     // A release for a reservation made before the rollover is a no-op —
@@ -865,18 +870,19 @@ fn provider_key_budget_window_resets_at_the_day_boundary() {
     )
     .unwrap();
     drop(conn);
-    db.release_provider_key_spend(&key.id, 900).unwrap();
+    db.release_provider_key_spend(&key.id, c(900)).unwrap();
     // The API normalizes past-day spend to 0, so check the raw column.
     let conn = rusqlite::Connection::open(&t.path).unwrap();
     let raw: i64 = conn
         .query_row(
-            "SELECT spent_usd_cents FROM provider_keys WHERE id = ?1",
+            "SELECT spent_usd_micros FROM provider_keys WHERE id = ?1",
             [&key.id],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(
-        raw, 900,
+        raw,
+        c(900),
         "yesterday's raw spend is untouched by a stale release"
     );
 }
@@ -937,14 +943,14 @@ fn budget_window_follows_the_wallet_timezone() {
     db.write_timezone("Etc/GMT+12").unwrap();
     let west_day = db.current_budget_day();
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 1000).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(1000)).unwrap(),
         BudgetReservation::Reserved
     );
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 1).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(1)).unwrap(),
         BudgetReservation::OverBudget {
             daily_budget_usd_cents: 1000,
-            remaining_today_usd_cents: 0,
+            remaining_today_usd_micros: c(0),
         }
     );
 
@@ -957,14 +963,14 @@ fn budget_window_follows_the_wallet_timezone() {
     // The stored window belongs to another day now: reads show a fresh
     // budget and the next reserve rolls the row into the new window.
     let row = db.read_provider_key(&key.id).unwrap().unwrap();
-    assert_eq!(row.spent_today_usd_cents(), 0);
-    assert_eq!(row.remaining_today_usd_cents(), Some(1000));
+    assert_eq!(row.spent_today_usd_micros(), c(0));
+    assert_eq!(row.remaining_today_usd_micros(), Some(c(1000)));
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 1000).unwrap(),
+        db.try_reserve_provider_key_spend(&key.id, c(1000)).unwrap(),
         BudgetReservation::Reserved
     );
     let row = db.read_provider_key(&key.id).unwrap().unwrap();
-    assert_eq!(row.spent_today_usd_cents(), 1000);
+    assert_eq!(row.spent_today_usd_micros(), c(1000));
     assert_eq!(row.spent_day, Some(db.current_budget_day()));
 }
 
@@ -981,7 +987,7 @@ fn provider_key_rows_predating_the_budget_columns_read_as_unlimited_untouched() 
     let conn = rusqlite::Connection::open(&t.path).unwrap();
     conn.execute(
         "UPDATE provider_keys SET daily_budget_usd_cents = NULL, spent_usd_cents = NULL, \
-         spent_day = NULL WHERE id = ?1",
+         spent_usd_micros = NULL, spent_day = NULL WHERE id = ?1",
         [&key.id],
     )
     .unwrap();
@@ -992,12 +998,79 @@ fn provider_key_rows_predating_the_budget_columns_read_as_unlimited_untouched() 
         row.daily_budget_usd_cents, None,
         "NULL budget means no limit"
     );
-    assert_eq!(row.spent_today_usd_cents(), 0, "NULL spent reads as zero");
     assert_eq!(
-        db.try_reserve_provider_key_spend(&key.id, 100).unwrap(),
+        row.spent_today_usd_micros(),
+        c(0),
+        "NULL spent reads as zero"
+    );
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, c(100)).unwrap(),
         owallet_db::BudgetReservation::Reserved,
         "COALESCE in the guard must treat NULL spent as zero"
     );
     let row = db.read_provider_key(&key.id).unwrap().unwrap();
-    assert_eq!(row.spent_today_usd_cents(), 100);
+    assert_eq!(row.spent_today_usd_micros(), c(100));
+}
+
+#[test]
+fn provider_key_budget_counts_sub_cent_spend() {
+    use owallet_db::BudgetReservation;
+
+    let t = fresh("pw");
+    let db = &t.db;
+    let (key, _) = db
+        .create_provider_key(NPUB, "dashboard", "chat spend", Some(1))
+        .unwrap();
+
+    // A $0.000756 micropayment (756 micro-dollars) counts in full — in
+    // whole cents it would have rounded to 0.
+    db.record_provider_key_spend(&key.id, 756).unwrap();
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.spent_today_usd_micros(), 756);
+    assert_eq!(row.remaining_today_usd_micros(), Some(c(1) - 756));
+
+    // The 1¢ budget admits exactly what's left of it, not a micro more.
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, c(1) - 756 + 1)
+            .unwrap(),
+        BudgetReservation::OverBudget {
+            daily_budget_usd_cents: 1,
+            remaining_today_usd_micros: c(1) - 756,
+        }
+    );
+    assert_eq!(
+        db.try_reserve_provider_key_spend(&key.id, c(1) - 756)
+            .unwrap(),
+        BudgetReservation::Reserved
+    );
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.remaining_today_usd_micros(), Some(0));
+}
+
+#[test]
+fn provider_key_spend_written_in_cents_before_the_upgrade_carries_over() {
+    let t = fresh("pw");
+    let db = &t.db;
+    let (key, _) = db
+        .create_provider_key(NPUB, "dashboard", "chat spend", Some(1000))
+        .unwrap();
+
+    // A row last written by a build that tracked whole cents: today's
+    // spend lives in `spent_usd_cents`, `spent_usd_micros` is NULL.
+    let conn = rusqlite::Connection::open(&t.path).unwrap();
+    conn.execute(
+        "UPDATE provider_keys SET spent_usd_cents = 250, spent_usd_micros = NULL, \
+         spent_day = ?2 WHERE id = ?1",
+        rusqlite::params![&key.id, db.current_budget_day()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.spent_today_usd_micros(), c(250));
+
+    // The next write moves the row onto micros, keeping the legacy spend.
+    db.record_provider_key_spend(&key.id, 1).unwrap();
+    let row = db.read_provider_key(&key.id).unwrap().unwrap();
+    assert_eq!(row.spent_today_usd_micros(), c(250) + 1);
 }

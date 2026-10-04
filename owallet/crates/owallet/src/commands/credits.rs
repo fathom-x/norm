@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use owallet_crypto::derive_from_stored_seed;
 use owallet_db::default_db_path;
 use owallet_overpay::Auth;
 use qrcode::render::unicode;
@@ -20,12 +21,17 @@ pub fn run(amount_cents: i64, wait: bool) -> Result<()> {
         .read_token(&npub, &host_key())?
         .ok_or(CmdError::NotAuthorized)?;
     let overpay = overpay_client()?;
+    // Sign the load with the wallet key too (a spend: Overpay stores the
+    // signature against the credit order). The DB is unlocked here.
+    let key = db
+        .read_seed(&npub)?
+        .and_then(|seed| derive_from_stored_seed(&seed).ok());
+    let auth = match key.as_ref() {
+        Some(sk) => Auth::BearerSigned(&token, sk),
+        None => Auth::Bearer(&token),
+    };
 
-    let resp = block_on(async {
-        overpay
-            .load_core_credits(amount_cents, Auth::Bearer(&token))
-            .await
-    })?;
+    let resp = block_on(async { overpay.load_core_credits(amount_cents, auth).await })?;
 
     let usd = resp.amount_cents as f64 / 100.0;
     println!("Lightning invoice — ${:.2} ({} sats)", usd, resp.sats);

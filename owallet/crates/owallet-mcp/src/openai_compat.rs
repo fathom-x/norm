@@ -571,7 +571,7 @@ struct LongContextPricing {
 }
 
 /// See [`ModelPricing::min_charge`].
-const OPENROUTER_MIN_CHARGE_USD: f64 = 0.01;
+const OPENROUTER_MIN_CHARGE_USD: f64 = 0.0;
 
 #[derive(Serialize)]
 struct ModelList {
@@ -1026,7 +1026,7 @@ pub(crate) async fn run_listing_tool(
     }
     net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
     let mut out = extract_listing_delivered(&order_id, &snap);
-    out["charged_cents"] = json!(net_charged_cents(&snap, redeemed_cents));
+    out["charged_cents"] = cents_json(net_charged_cents(&snap, redeemed_cents));
     Ok(out)
 }
 
@@ -1093,7 +1093,7 @@ async fn poll_one_shot(
 fn pending_order_result(
     order_id: &str,
     snap: &Value,
-    redeemed_cents: i64,
+    redeemed_cents: f64,
     timeout: Duration,
 ) -> Value {
     let status = order_status(snap).unwrap_or("in_progress");
@@ -1102,7 +1102,7 @@ fn pending_order_result(
         "payment_status": "paid",
         "fulfillment_status": status,
         "pending": true,
-        "charged_cents": redeemed_cents,
+        "charged_cents": cents_json(redeemed_cents),
         "error": format!(
             "order {order_id} is paid but the seller has not delivered after {}s (status: {status}) — \
              it may still complete; do not buy again",
@@ -1120,11 +1120,11 @@ fn pending_order_result(
 /// delivery): the error *with* the order id, so the model can follow the
 /// order up instead of buying again. A bare error here once cost a paid
 /// image delivery its id ("internal: delivered content: …").
-fn unreadable_order_result(order_id: &str, redeemed_cents: i64, err: &OpenAiError) -> Value {
+fn unreadable_order_result(order_id: &str, redeemed_cents: f64, err: &OpenAiError) -> Value {
     json!({
         "order_id": order_id,
         "payment_status": "paid",
-        "charged_cents": redeemed_cents,
+        "charged_cents": cents_json(redeemed_cents),
         "error": format!(
             "order {order_id} is paid, but reading its result failed: {} — do not buy again",
             err.message()
@@ -1464,12 +1464,28 @@ impl SpendLedger {
     }
 }
 
-fn usd_to_cents(usd: f64) -> i64 {
-    (usd * 100.0).round() as i64
+/// Key budgets track spend in micro-dollars ($0.000001, the marketplace's
+/// money precision), so a sub-cent purchase still counts.
+fn usd_to_micros(usd: f64) -> i64 {
+    (usd * 1_000_000.0).round() as i64
+}
+
+fn micros_to_usd(micros: i64) -> f64 {
+    micros as f64 / 1_000_000.0
+}
+
+/// Cents that may be fractional → micro-dollars, the key budget's unit.
+fn cents_to_micros(cents: f64) -> i64 {
+    (cents * owallet_db::MICROS_PER_CENT as f64).round() as i64
 }
 
 pub(crate) fn cents_to_usd(cents: i64) -> f64 {
     cents as f64 / 100.0
+}
+
+/// A USD amount that may be sub-cent → `$X.YZ`, or to the micro-dollar.
+fn fmt_usd(usd: f64) -> String {
+    crate::render::fmt_cents((usd * 1_000_000.0).round() / 10_000.0)
 }
 
 /// Read the authenticated key's row for budget display / gating. `None`
@@ -1524,7 +1540,7 @@ fn usd_header(headers: &HeaderMap, name: &str) -> Result<Option<f64>, OpenAiErro
 /// instead — see the loop docs).
 fn exhausted_key_budget(state: &McpState, key_id: Option<&str>) -> Option<OpenAiError> {
     let key = read_key(state, key_id)?;
-    if key.remaining_today_usd_cents() != Some(0) {
+    if key.remaining_today_usd_micros() != Some(0) {
         return None;
     }
     Some(OpenAiError::limit(
@@ -1549,27 +1565,27 @@ pub(crate) fn reserve_key_budget(
     let Some(id) = key_id else {
         return Ok(());
     };
-    let cents = usd_to_cents(amount_usd);
-    if cents <= 0 {
+    let micros = usd_to_micros(amount_usd);
+    if micros <= 0 {
         return Ok(());
     }
     let outcome = state
         .db
         .lock()
         .map_err(|e| format!("db mutex: {e}"))?
-        .try_reserve_provider_key_spend(id, cents)
+        .try_reserve_provider_key_spend(id, micros)
         .map_err(|e| format!("budget check failed: {e}"))?;
     match outcome {
         owallet_db::BudgetReservation::Reserved => Ok(()),
         owallet_db::BudgetReservation::OverBudget {
             daily_budget_usd_cents,
-            remaining_today_usd_cents,
+            remaining_today_usd_micros,
         } => Err(format!(
-            "key budget exceeded: ${:.2} requested but only ${:.2} of this key's ${:.2} \
+            "key budget exceeded: {} requested but only {} of this key's ${:.2} \
              daily budget remains — it resets at the wallet's local midnight, and the \
              wallet owner can raise it from the wallet dashboard",
-            amount_usd,
-            cents_to_usd(remaining_today_usd_cents),
+            fmt_usd(amount_usd),
+            fmt_usd(micros_to_usd(remaining_today_usd_micros)),
             cents_to_usd(daily_budget_usd_cents),
         )),
         owallet_db::BudgetReservation::KeyMissing => {
@@ -1584,12 +1600,12 @@ pub(crate) type ReserveResult = std::result::Result<(), String>;
 /// Best-effort: a failure here strands allowance (safe direction).
 pub(crate) fn release_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) {
     let Some(id) = key_id else { return };
-    let cents = usd_to_cents(amount_usd);
-    if cents <= 0 {
+    let micros = usd_to_micros(amount_usd);
+    if micros <= 0 {
         return;
     }
     if let Ok(db) = state.db.lock() {
-        let _ = db.release_provider_key_spend(id, cents);
+        let _ = db.release_provider_key_spend(id, micros);
     }
 }
 
@@ -1618,12 +1634,12 @@ fn stamp_as_of(state: &McpState, mut out: Value) -> Value {
 
 pub(crate) fn record_key_budget(state: &McpState, key_id: Option<&str>, amount_usd: f64) {
     let Some(id) = key_id else { return };
-    let cents = usd_to_cents(amount_usd);
-    if cents <= 0 {
+    let micros = usd_to_micros(amount_usd);
+    if micros <= 0 {
         return;
     }
     if let Ok(db) = state.db.lock() {
-        let _ = db.record_provider_key_spend(id, cents);
+        let _ = db.record_provider_key_spend(id, micros);
     }
 }
 
@@ -1658,8 +1674,8 @@ fn project_balances(
 fn key_budget_json(key: &owallet_db::ProviderKeyRow) -> Value {
     json!({
         "daily_budget_usd": key.daily_budget_usd_cents.map(cents_to_usd),
-        "spent_today_usd": cents_to_usd(key.spent_today_usd_cents()),
-        "remaining_today_usd": key.remaining_today_usd_cents().map(cents_to_usd),
+        "spent_today_usd": micros_to_usd(key.spent_today_usd_micros()),
+        "remaining_today_usd": key.remaining_today_usd_micros().map(micros_to_usd),
     })
 }
 
@@ -1821,10 +1837,10 @@ fn insert_key_remaining(
     out: &mut serde_json::Map<String, Value>,
     key: Option<&owallet_db::ProviderKeyRow>,
 ) {
-    if let Some(remaining) = key.and_then(|k| k.remaining_today_usd_cents()) {
+    if let Some(remaining) = key.and_then(|k| k.remaining_today_usd_micros()) {
         out.insert(
             "key_budget_remaining_today_usd".into(),
-            json!(cents_to_usd(remaining)),
+            json!(micros_to_usd(remaining)),
         );
     }
 }
@@ -1919,7 +1935,7 @@ async fn execute_wallet_tool(
             // exhausted budget refuses up front and the actual amount is
             // recorded after.
             if let Some(key) = read_key(state, key_id) {
-                if key.remaining_today_usd_cents() == Some(0) {
+                if key.remaining_today_usd_micros() == Some(0) {
                     return json!({
                         "error": format!(
                             "key budget exhausted: this key's ${:.2} daily budget is \
@@ -2367,7 +2383,7 @@ async fn place_and_pay_order(
     buyer_note: &Value,
     key_id: Option<&str>,
     cap: Option<TurnCap>,
-) -> Result<(String, i64), OpenAiError> {
+) -> Result<(String, f64), OpenAiError> {
     // Strings pass through verbatim, matching the MCP `create_order`
     // convention — a `buyer_input :text` listing's bot reads the note as
     // plain text, and JSON-encoding would hand it literal quotes.
@@ -2467,13 +2483,13 @@ async fn place_and_pay_order(
     // metered listing settles below it after delivery, so callers hand
     // the returned cents to [`net_key_budget_from_delivery`] once they
     // hold the terminal snapshot.
-    let mut redeemed_cents: i64 = 0;
+    let mut redeemed_cents = 0.0;
     if let Some(cents) = redeem
         .pointer("/data/amount_redeemed_cents")
         .and_then(Value::as_f64)
     {
         record_key_budget(state, key_id, cents / 100.0);
-        redeemed_cents = cents.round() as i64;
+        redeemed_cents = cents;
     }
 
     Ok((order_id, redeemed_cents))
@@ -2489,7 +2505,7 @@ async fn place_authorized_order(
     note_str: &str,
     authorization_cents: i64,
     key_id: Option<&str>,
-) -> Result<(String, i64), OpenAiError> {
+) -> Result<(String, f64), OpenAiError> {
     let resp = match state
         .overpay
         .create_paid_order_value(listing_id, Some(note_str), authorization_cents, auth.as_auth())
@@ -2523,13 +2539,13 @@ async fn place_authorized_order(
             "{message} — {LOAD_CREDITS_HINT}"
         )));
     }
-    let mut redeemed_cents: i64 = 0;
+    let mut redeemed_cents = 0.0;
     if let Some(cents) = resp
         .pointer("/payment/amount_redeemed_cents")
         .and_then(Value::as_f64)
     {
         record_key_budget(state, key_id, cents / 100.0);
-        redeemed_cents = cents.round() as i64;
+        redeemed_cents = cents;
     }
     Ok((order_id, redeemed_cents))
 }
@@ -2812,19 +2828,20 @@ fn net_key_budget_from_delivery(
     state: &McpState,
     key_id: Option<&str>,
     snap: &Value,
-    redeemed_cents: i64,
+    redeemed_cents: f64,
 ) {
     let Some(id) = key_id else { return };
-    if redeemed_cents <= 0 {
+    if redeemed_cents <= 0.0 {
         return;
     }
     let Ok(inner) = delivered_content_json(snap) else {
         return;
     };
-    let Some(charged) = inner.get("charged_cents").and_then(Value::as_i64) else {
+    let Some(charged) = inner.get("charged_cents").and_then(Value::as_f64) else {
         return;
     };
-    let refund = (redeemed_cents - charged.max(0)).clamp(0, redeemed_cents);
+    // Micro-dollars, the budget's unit: a sub-cent charge nets exactly.
+    let refund = cents_to_micros((redeemed_cents - charged.max(0.0)).clamp(0.0, redeemed_cents));
     if refund <= 0 {
         return;
     }
@@ -2951,15 +2968,31 @@ async fn wait_for_order_terminal(
 /// `charged_cents` when the delivery states one, else the gross deposit.
 /// The mirror image of the refund [`net_key_budget_from_delivery`] hands
 /// back to the key budget, so the two always agree on what a turn cost.
-fn net_charged_cents(snap: &Value, redeemed_cents: i64) -> i64 {
-    if redeemed_cents <= 0 {
-        return 0;
+fn net_charged_cents(snap: &Value, redeemed_cents: f64) -> f64 {
+    if redeemed_cents <= 0.0 {
+        return 0.0;
     }
     delivered_content_json(snap)
         .ok()
-        .and_then(|inner| inner.get("charged_cents").and_then(Value::as_i64))
-        .map(|charged| charged.clamp(0, redeemed_cents))
+        .and_then(|inner| inner.get("charged_cents").and_then(Value::as_f64))
+        .map(|charged| charged.clamp(0.0, redeemed_cents))
         .unwrap_or(redeemed_cents)
+}
+
+/// Cents as a JSON number: an integer when whole (the long-standing shape),
+/// else rounded to the micro-dollar (cents to 4 places), the marketplace's
+/// precision — so float noise from summing turns never leaks out.
+fn cents_json(cents: f64) -> Value {
+    micros_as_cents_json(cents_to_micros(cents))
+}
+
+/// Micro-dollars as a JSON cents number (see [`cents_json`]).
+fn micros_as_cents_json(micros: i64) -> Value {
+    if micros % owallet_db::MICROS_PER_CENT == 0 {
+        json!(micros / owallet_db::MICROS_PER_CENT)
+    } else {
+        json!(micros as f64 / owallet_db::MICROS_PER_CENT as f64)
+    }
 }
 
 /// Everything one chat completion spent and consumed, accumulated across
@@ -2984,22 +3017,24 @@ pub(crate) struct TurnUsage {
     /// miss after the prefix changed / routing moved providers). Same
     /// unknown-vs-zero rule.
     cache_write_tokens: Option<u64>,
-    charged_cents: i64,
+    /// What the turn's orders charged, in micro-dollars — integer, so
+    /// summing many sub-cent turns stays exact.
+    charged_micros: i64,
     /// What the wallet spending tools moved during the request (credit
-    /// purchases and redemptions), separate from `charged_cents` — the
+    /// purchases and redemptions), separate from the charge — the
     /// request's own operating cost. Reported so a client tracking a budget
     /// can count money that left the wallet, not just inference.
-    wallet_spent_cents: i64,
+    wallet_spent_micros: i64,
 }
 
 impl TurnUsage {
     /// Charge one settled order against the turn. Pair every
     /// `net_key_budget_from_delivery` with this: same snapshot, same
     /// deposit, so the budget and the reported cost cannot drift.
-    fn add_order(&mut self, snap: &Value, redeemed_cents: i64) {
-        self.charged_cents = self
-            .charged_cents
-            .saturating_add(net_charged_cents(snap, redeemed_cents));
+    fn add_order(&mut self, snap: &Value, redeemed_cents: f64) {
+        self.charged_micros = self
+            .charged_micros
+            .saturating_add(cents_to_micros(net_charged_cents(snap, redeemed_cents)));
     }
 
     /// Token counts from an OpenRouter delivery. Tool-call orders have no
@@ -3026,7 +3061,8 @@ impl TurnUsage {
 
     /// OpenAI's `usage` shape plus two extensions: `cost` (USD, the
     /// convention OpenRouter set) and `charged_cents`, the authoritative
-    /// integer — real money should not round-trip through a float.
+    /// amount — an integer for whole cents, else cents to 4 places (the
+    /// marketplace's $0.000001 precision; micropayments are real charges).
     fn to_json(self) -> Value {
         json!({
             "prompt_tokens": self.prompt_tokens,
@@ -3037,15 +3073,15 @@ impl TurnUsage {
             // count rides along under OpenRouter's name. Only counts some
             // order actually reported appear — absent means unknown.
             "prompt_tokens_details": self.prompt_tokens_details(),
-            "cost": self.charged_cents as f64 / 100.0,
-            "charged_cents": self.charged_cents,
-            "wallet_spent_cents": self.wallet_spent_cents,
+            "cost": micros_to_usd(self.charged_micros),
+            "charged_cents": micros_as_cents_json(self.charged_micros),
+            "wallet_spent_cents": micros_as_cents_json(self.wallet_spent_micros),
         })
     }
 
     /// Carry the request's wallet-tool spend onto the reported usage.
     fn with_wallet_spend(mut self, ledger: &SpendLedger) -> Self {
-        self.wallet_spent_cents = (ledger.spent_usd * 100.0).round() as i64;
+        self.wallet_spent_micros = usd_to_micros(ledger.spent_usd);
         self
     }
 }
@@ -3387,7 +3423,7 @@ pub(crate) async fn run_python_tool(
         obj.insert("order_id".into(), json!(order_id));
         obj.insert(
             "charged_cents".into(),
-            json!(net_charged_cents(&snap, redeemed_cents)),
+            cents_json(net_charged_cents(&snap, redeemed_cents)),
         );
     }
     Ok(out)
@@ -5023,7 +5059,7 @@ mod tests {
             json!({
                 "input": 0.3, "output": 2.4, "cache_read": 0.03,
                 "long_context": [{"min_input_tokens": 50000, "input": 0.6, "output": 3.6}],
-                "min_charge": 0.01, "min_authorization": 0.03,
+                "min_charge": 0.0, "min_authorization": 0.03,
                 "basis": "list", "as_of": "2026-10-01T00:00:00Z",
             }),
             "USD per Mtok with the 20% markup in"
@@ -5391,7 +5427,7 @@ mod tests {
             "{out}"
         );
         assert_eq!(
-            usage.charged_cents, 5,
+            usage.charged_micros, 50_000,
             "the paid deposit still counts toward the turn"
         );
 
@@ -5531,7 +5567,7 @@ mod tests {
             out["error"].as_str().unwrap().contains("do not buy again"),
             "{out}"
         );
-        assert_eq!(usage.charged_cents, 5);
+        assert_eq!(usage.charged_micros, 50_000);
         let text = crate::render::render(
             "run_python",
             &crate::projection::sanitize("run_python", &out),
@@ -7765,7 +7801,7 @@ mod tests {
             .unwrap()
             .list_provider_keys("npub1abandon")
             .unwrap();
-        assert_eq!(keys[0].spent_today_usd_cents(), 4);
+        assert_eq!(keys[0].spent_today_usd_micros(), 40_000);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7854,11 +7890,11 @@ mod tests {
             .list_provider_keys("npub1abandon")
             .unwrap();
         assert_eq!(
-            keys[0].spent_today_usd_cents(),
-            108,
+            keys[0].spent_today_usd_micros(),
+            1_080_000,
             "the settlement plus four 2¢ chat turns were recorded"
         );
-        assert_eq!(keys[0].remaining_today_usd_cents(), Some(0));
+        assert_eq!(keys[0].remaining_today_usd_micros(), Some(0));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7898,8 +7934,8 @@ mod tests {
             .list_provider_keys("npub1abandon")
             .unwrap();
         assert_eq!(
-            keys[0].spent_today_usd_cents(),
-            2,
+            keys[0].spent_today_usd_micros(),
+            20_000,
             "the turn's own redemption (2¢ mock) counts against the budget"
         );
     }
@@ -7960,15 +7996,83 @@ mod tests {
             .list_provider_keys("npub1abandon")
             .unwrap();
         assert_eq!(
-            body["usage"]["charged_cents"].as_i64(),
-            Some(keys[0].spent_today_usd_cents()),
+            body["usage"]["charged_cents"]
+                .as_f64()
+                .map(|c| (c * 10_000.0).round() as i64),
+            Some(keys[0].spent_today_usd_micros()),
             "reported cost must match the budget's own accounting"
         );
         assert_eq!(
-            keys[0].spent_today_usd_cents(),
-            1,
+            keys[0].spent_today_usd_micros(),
+            10_000,
             "gross 2¢ at pay time, 1¢ handed back once the delivery stated its final charge"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sub_cent_turn_reports_and_budgets_its_exact_charge() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        // Micropayments: the seller settled a 2¢ deposit down to 0.0756¢
+        // ($0.000756) — the turn costs exactly that, not a rounded cent.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "OR-0", "fulfillment_status": "delivered",
+                    "delivered_content": serde_json::to_string(&json!({
+                        "description": "Hi.", "model": "openai/gpt-5-mini",
+                        "error": false, "credits_refunded": false,
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.000756},
+                        "charged_cents": 0.0756,
+                    }))
+                    .unwrap(),
+                }
+            })))
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let s = test_server_with_key(state.clone(), "chat", Some(500));
+
+        let res = s
+            .post("/chat/completions")
+            .json(&json!({
+                "model": "openai/gpt-5-mini",
+                "messages": [{"role": "user", "content": "hello"}],
+            }))
+            .await;
+        res.assert_status_ok();
+
+        let body: Value = res.json();
+        assert_eq!(
+            body["usage"]["charged_cents"],
+            json!(0.0756),
+            "body: {body}"
+        );
+        assert_eq!(body["usage"]["cost"], json!(0.000756), "body: {body}");
+
+        let keys = state
+            .db
+            .lock()
+            .unwrap()
+            .list_provider_keys("npub1abandon")
+            .unwrap();
+        assert_eq!(
+            keys[0].spent_today_usd_micros(),
+            756,
+            "the key budget keeps the sub-cent charge, not 0 or a whole cent"
+        );
+    }
+
+    #[test]
+    fn cents_json_keeps_whole_cents_integral_and_sub_cents_exact() {
+        assert_eq!(cents_json(6.0), json!(6));
+        assert_eq!(cents_json(0.0756), json!(0.0756));
+        // Float noise from summing turns never leaks past the micro-dollar.
+        assert_eq!(cents_json(0.1 + 0.2), json!(0.3));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7983,7 +8087,8 @@ mod tests {
         {
             let db = state.db.lock().unwrap();
             let keys = db.list_provider_keys("npub1abandon").unwrap();
-            db.record_provider_key_spend(&keys[0].id, 100).unwrap();
+            db.record_provider_key_spend(&keys[0].id, 1_000_000)
+                .unwrap();
         }
 
         let res = s
@@ -8571,7 +8676,7 @@ mod tests {
         )
         .await
         .unwrap_or_else(|e| panic!("authorized turn: {}", e.message()));
-        assert_eq!(placed, ("AUTH-1".to_string(), 30));
+        assert_eq!(placed, ("AUTH-1".to_string(), 30.0));
 
         // Not enough credits for the larger hold: Rails cancels it (402);
         // the turn is placed the old way and the seller decides.
@@ -8765,8 +8870,8 @@ mod tests {
             .unwrap();
         let row = keys.iter().find(|k| k.id == key.id).unwrap();
         assert_eq!(
-            row.spent_today_usd_cents(),
-            2,
+            row.spent_today_usd_micros(),
+            20_000,
             "the 2¢ redeem must land on the key's budget"
         );
 
@@ -8824,8 +8929,8 @@ mod tests {
             .unwrap();
         let row = keys.iter().find(|k| k.id == key.id).unwrap();
         assert_eq!(
-            row.spent_today_usd_cents(),
-            2,
+            row.spent_today_usd_micros(),
+            20_000,
             "the redemption records against the key, same as /v1"
         );
     }
@@ -8855,7 +8960,7 @@ mod tests {
             token_prefix: None,
             scopes: Some("chat spend".into()),
             daily_budget_usd_cents: Some(2500),
-            spent_usd_cents: 1000,
+            spent_usd_micros: 10_000_000,
             spent_day: None,
         };
         let projected = project_balances(&json!({}), &ledger, Some(&key));

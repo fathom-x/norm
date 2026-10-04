@@ -4,6 +4,19 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Every request signed by the wallet key
+
+- With a stored Overpay token, owallet now also signs every request with
+  the wallet key (the npub's — the same key as the wallet's EVM address)
+  in an `X-Nostr-Signature` header: NIP-98 (kind 27235, `u` + `method`),
+  plus for POSTs a `payload` tag — the sha256 of the exact body sent — so
+  the signature covers what is bought, not just which URL was called.
+  Overpay verifies it on every spend (orders including credit-paid model
+  turns, merchant-credit redeem / purchase / load), stores it with the
+  order, and rejects a replayed signature. NIP-98-only requests (no token)
+  carry the same payload tag in `Authorization: Nostr`.
+- `owallet credits load` signs its request too.
+
 ### Faster streaming in `/v1`
 
 - Orders in flight are polled every 400 ms instead of every second, and the

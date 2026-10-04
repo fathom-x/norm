@@ -87,13 +87,24 @@ fn list(npub_override: Option<&str>) -> Result<()> {
         let scopes = row.scopes.as_deref().unwrap_or("chat");
         let budget = match row.daily_budget_usd_cents {
             Some(cents) => format!(
-                "${:.2}/day (${:.2} spent today)",
+                "${:.2}/day (${} spent today)",
                 cents as f64 / 100.0,
-                row.spent_today_usd_cents() as f64 / 100.0
+                usd_from_micros(row.spent_today_usd_micros())
             ),
             None => "no limit".to_string(),
         };
         println!("  {prefix}…  {label}  [{scopes}]  {budget}");
     }
     Ok(())
+}
+
+/// Micro-dollars → dollars to the micro-dollar, at least two decimals
+/// (`12.34`, `0.000756`).
+fn usd_from_micros(micros: i64) -> String {
+    let s = format!("{:.6}", micros as f64 / 1_000_000.0);
+    let trimmed = s.trim_end_matches('0');
+    match trimmed.split_once('.') {
+        Some((_, frac)) if frac.len() < 2 => format!("{trimmed}{}", "0".repeat(2 - frac.len())),
+        _ => trimmed.to_string(),
+    }
 }
