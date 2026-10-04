@@ -12,6 +12,7 @@ import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { BackgroundTask } from "@/norm/background"
+import { SessionCron } from "@/norm/cron"
 import { NormTools } from "@/norm/tools"
 import { Plugin } from "@/plugin"
 import { Parameters, ScheduleWakeupTool } from "@/norm/tool/schedule-wakeup"
@@ -53,6 +54,7 @@ const it = testEffect(
       FSUtil.node,
       Plugin.node,
       BackgroundTask.node,
+      SessionCron.node,
       Agent.node,
       BackgroundJob.node,
       Command.node,

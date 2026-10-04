@@ -219,6 +219,23 @@ syncs stay cheap:
   command runs until it exits or is stopped. Tests:
   `test/norm/background-shell.test.ts`.
 
+- **Cron tools** (`CronCreate` / `CronList` / `CronDelete`,
+  `src/norm/tool/cron.ts`; scheduler `src/norm/cron.ts` (`SessionCron`),
+  expression parser `src/norm/cron-expr.ts`): standard 5-field cron in
+  local time, recurring (default) or one-shot. Each job is a fiber that
+  sleeps to its next match and then hands the prompt to
+  `SessionWake.whenIdle` under the key `cron:<id>`, which is what makes a
+  fire wait for idle and several missed fires collapse into one. As in
+  Claude Code: in memory only (gone on exit or config reload), at most
+  50 per session, recurring jobs fire a last time at their first match
+  past 7 days, and a fixed per-job jitter spreads fires (recurring: up
+  to 10% of the period late, max 15 min; one-shots on :00/:30: up to
+  90 s early). Jobs are not wake timers, so stopping the session (esc)
+  drops at most a fire that was waiting for idle, not the job, and a
+  cron job alone does not keep `norm run` open. A job whose session was
+  deleted removes itself at its next fire. Tests:
+  `test/norm/cron.test.ts`, `test/norm/cron-expr.test.ts`.
+
 - **Pending work** (`GET /session/:id/pending`, norm's own route beside
   `send_queued`: `{wakeups, tasks}`). Two readers. `norm run`
   (`src/norm/run-wait.ts`, hooked into `cli/cmd/run.ts`'s event loop)
