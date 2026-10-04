@@ -35,6 +35,8 @@ export type Task = {
   description: string
   command: string
   outputFile: string
+  /** When it is killed if still running. A command started without a timeout has none. */
+  deadline?: number
 }
 
 export type MonitorInput = Launch & {
@@ -253,11 +255,17 @@ const layer = Layer.effect(
     const start = Effect.fnUntraced(function* (
       sessionID: SessionID,
       input: Pick<Task, "type" | "description" | "command">,
+      timeout: Duration.Duration | undefined,
       run: (task: Task) => Effect.Effect<string>,
     ) {
       const id = `${input.type === "monitor" ? "mon" : "sh"}_${crypto.randomUUID().replaceAll("-", "").slice(0, 8)}`
       // Beside truncated tool output, which the read tool may open.
-      const task: Task = { ...input, id, outputFile: path.join(TRUNCATION_DIR, `${id}.log`) }
+      const task: Task = {
+        ...input,
+        id,
+        outputFile: path.join(TRUNCATION_DIR, `${id}.log`),
+        deadline: timeout ? (yield* Clock.currentTimeMillis) + Duration.toMillis(timeout) : undefined,
+      }
       yield* fs.ensureDir(TRUNCATION_DIR).pipe(Effect.orDie)
       yield* fs.writeFileString(task.outputFile, "").pipe(Effect.orDie)
       yield* jobs.start({
@@ -266,7 +274,12 @@ const layer = Layer.effect(
         title: input.description,
         // `ownerSessionId`, not `sessionId`: cancelling a session's run (Esc)
         // cancels jobs filed under `sessionId`, and these must outlive it.
-        metadata: { ownerSessionId: sessionID, command: input.command, outputFile: task.outputFile },
+        metadata: {
+          ownerSessionId: sessionID,
+          command: input.command,
+          outputFile: task.outputFile,
+          deadline: task.deadline,
+        },
         run: run(task),
       })
       return task
@@ -276,6 +289,7 @@ const layer = Layer.effect(
       return yield* start(
         input.sessionID,
         { type: "monitor", description: input.description, command: input.command },
+        input.timeout,
         (task) => watch(input, task),
       )
     })
@@ -327,6 +341,7 @@ const layer = Layer.effect(
       return yield* start(
         input.sessionID,
         { type: "shell", description: summarize(input.command), command: input.command },
+        input.timeout,
         (task) => wait(input, task),
       )
     })
@@ -356,6 +371,7 @@ const layer = Layer.effect(
         description: job.title ?? "",
         command: String(job.metadata?.command ?? ""),
         outputFile: String(job.metadata?.outputFile ?? ""),
+        deadline: typeof job.metadata?.deadline === "number" ? job.metadata.deadline : undefined,
       }))
     })
 

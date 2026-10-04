@@ -236,8 +236,13 @@ syncs stay cheap:
   `waiting` event with `--format json`) and goes on until a turn ends
   with nothing left; `--no-wait` restores exit-at-idle. Work that ends
   without a turn is caught on the server's 10 s heartbeats (two quiet
-  ones in a row). A background command with no timeout that never exits
-  therefore keeps `norm run` open: ctrl+c, or `--no-wait`. The TUI's
+  ones in a row). It waits only for work that is certain to end:
+  wakeups, monitors, and background commands started with a `timeout`
+  (tasks carry a `deadline`; over HTTP a missing one is `null`). A
+  background command with no timeout may be a server that never exits,
+  so `norm run` does not wait for it and says so ("Not waiting for ...",
+  a `not_waiting` event in JSON); without `--attach` it is stopped as
+  the process exits. The TUI's
   prompt hints row shows "wake 4m · 2 bg" (`tui/src/util/norm-pending.ts`,
   re-read on status changes and every 15 s); idle with a wakeup
   scheduled, esc cancels it through the abort route (upstream's esc does

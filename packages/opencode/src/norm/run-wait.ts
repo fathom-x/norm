@@ -2,10 +2,18 @@
 // wakeup scheduled, a monitor armed or a background command running, idle is
 // only a pause: something will start another turn, and (without --attach)
 // exiting would kill it. This decides when a run is really over.
+//
+// It waits only for work that is certain to end: wakeups, monitors (always
+// under a deadline) and background commands started with a timeout. A
+// background command with no timeout may be a server that never exits;
+// waiting on it would hang the run forever.
+
+// `deadline` arrives as null over HTTP when a task has none.
+export type Task = { id: string; type: string; description: string; deadline?: number | null }
 
 export type Pending = {
   wakeups: { key: string; at: number }[]
-  tasks: { id: string; type: string; description: string }[]
+  tasks: Task[]
 }
 
 type Get = (options: { url: string; path: Record<string, string> }) => Promise<{ data?: unknown }>
@@ -20,11 +28,22 @@ export async function pending(client: unknown, sessionID: string): Promise<Pendi
   return { wakeups: data?.wakeups ?? [], tasks: data?.tasks ?? [] }
 }
 
+/** The tasks a run waits for: those that are killed at a known time. */
+export function bounded(input: Pending) {
+  return input.tasks.filter((task) => typeof task.deadline === "number")
+}
+
+/** The tasks a run does not wait for. */
+export function unbounded(input: Pending) {
+  return input.tasks.filter((task) => typeof task.deadline !== "number")
+}
+
 export function describe(input: Pending) {
   const wake = input.wakeups.toSorted((a, b) => a.at - b.at)[0]
+  const tasks = bounded(input).length
   return [
     ...(wake ? [`a wakeup at ${new Date(wake.at).toLocaleTimeString()}`] : []),
-    ...(input.tasks.length ? [`${input.tasks.length} background ${input.tasks.length === 1 ? "task" : "tasks"}`] : []),
+    ...(tasks ? [`${tasks} background ${tasks === 1 ? "task" : "tasks"}`] : []),
   ].join(" and ")
 }
 
@@ -36,9 +55,19 @@ export function describe(input: Pending) {
  * heartbeats in a row: between a timer firing and its turn starting the
  * session is briefly idle with nothing pending.
  */
-export function tracker(input: { check: () => Promise<Pending>; onWait: (pending: Pending) => void }) {
+export function tracker(input: {
+  check: () => Promise<Pending>
+  onWait: (pending: Pending) => void
+  /** The run is ending with these still running, because they have no timeout. */
+  onLeave: (tasks: Task[]) => void
+}) {
   const state = { idle: false, waiting: false, quiet: 0 }
-  const busy = (found: Pending) => found.wakeups.length > 0 || found.tasks.length > 0
+  const busy = (found: Pending) => found.wakeups.length > 0 || bounded(found).length > 0
+  const done = (found: Pending) => {
+    const left = unbounded(found)
+    if (left.length > 0) input.onLeave(left)
+    return "done" as const
+  }
   return {
     async next(event: { type: "idle" | "busy" | "heartbeat" }): Promise<"done" | "continue"> {
       if (event.type === "busy") {
@@ -50,18 +79,19 @@ export function tracker(input: { check: () => Promise<Pending>; onWait: (pending
         state.idle = true
         state.quiet = 0
         const found = await input.check()
-        if (!busy(found)) return "done"
+        if (!busy(found)) return done(found)
         if (!state.waiting) input.onWait(found)
         state.waiting = true
         return "continue"
       }
       if (!state.waiting || !state.idle) return "continue"
-      if (busy(await input.check())) {
+      const found = await input.check()
+      if (busy(found)) {
         state.quiet = 0
         return "continue"
       }
       state.quiet++
-      return state.quiet >= 2 ? "done" : "continue"
+      return state.quiet >= 2 ? done(found) : "continue"
     },
   }
 }

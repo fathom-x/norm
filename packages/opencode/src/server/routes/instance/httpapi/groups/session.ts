@@ -286,7 +286,12 @@ export const SessionApi = HttpApi.make("session")
             Schema.Struct({
               wakeups: Schema.Array(Schema.Struct({ key: Schema.String, at: Schema.Number })),
               tasks: Schema.Array(
-                Schema.Struct({ id: Schema.String, type: Schema.String, description: Schema.String }),
+                Schema.Struct({
+                  id: Schema.String,
+                  type: Schema.String,
+                  description: Schema.String,
+                  deadline: Schema.optional(Schema.Number),
+                }),
               ),
             }),
             "Pending wakeups and background tasks",

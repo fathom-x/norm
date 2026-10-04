@@ -767,6 +767,16 @@ export const RunCommand = effectCmd({
                 UI.Style.TEXT_NORMAL,
               )
             },
+            onLeave: (tasks) => {
+              if (emit("not_waiting", { tasks })) return
+              UI.println(
+                UI.Style.TEXT_DIM +
+                  `Not waiting for ${tasks.length} background ${tasks.length === 1 ? "command" : "commands"} started without a timeout; ${
+                    args.attach ? "still running on the server" : "stopped as norm exits"
+                  }`,
+                UI.Style.TEXT_NORMAL,
+              )
+            },
           })
 
           for await (const event of events.stream) {

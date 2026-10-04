@@ -250,6 +250,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           id: task.id,
           type: task.type,
           description: task.description,
+          deadline: task.deadline,
         })),
       }
     })

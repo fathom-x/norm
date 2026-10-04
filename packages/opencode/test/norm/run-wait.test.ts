@@ -13,16 +13,24 @@ afterEach(async () => {
 
 const nothing: NormRunWait.Pending = { wakeups: [], tasks: [] }
 const wakeup: NormRunWait.Pending = { wakeups: [{ key: "wakeup", at: 1_800_000_000_000 }], tasks: [] }
-const task: NormRunWait.Pending = { wakeups: [], tasks: [{ id: "mon_1", type: "monitor", description: "errors" }] }
+// A monitor: always under a deadline, so a run waits for it.
+const task: NormRunWait.Pending = {
+  wakeups: [],
+  tasks: [{ id: "mon_1", type: "monitor", description: "errors", deadline: 1_800_000_300_000 }],
+}
+// A background command started without a timeout: it may never exit.
+const server: NormRunWait.Task = { id: "sh_1", type: "shell", description: "bun dev" }
 
 // A tracker over a scripted sequence of what the server reports as pending.
 function scripted(...reports: NormRunWait.Pending[]) {
   const announced: NormRunWait.Pending[] = []
+  const left: NormRunWait.Task[][] = []
   const tracker = NormRunWait.tracker({
     check: async () => reports.shift() ?? nothing,
-    onWait: (pending) => announced.push(pending),
+    onWait: (pending) => void announced.push(pending),
+    onLeave: (tasks) => void left.push(tasks),
   })
-  return { tracker, announced }
+  return { tracker, announced, left }
 }
 
 describe("norm run wait", () => {
@@ -73,6 +81,33 @@ describe("norm run wait", () => {
     expect(await tracker.next({ type: "idle" })).toBe("done")
   })
 
+  test("a background command with no timeout does not hold the run open", async () => {
+    const { tracker, announced, left } = scripted({ wakeups: [], tasks: [server] })
+    expect(await tracker.next({ type: "idle" })).toBe("done")
+    expect(announced).toEqual([])
+    // The caller is told what it is walking away from.
+    expect(left).toEqual([[server]])
+  })
+
+  test("a missing deadline arrives as null over HTTP and still means no timeout", async () => {
+    const wire = { ...server, deadline: null }
+    const { tracker, left } = scripted({ wakeups: [], tasks: [wire] })
+    expect(await tracker.next({ type: "idle" })).toBe("done")
+    expect(left).toEqual([[wire]])
+  })
+
+  test("beside bounded work, it is waited out with it and then reported", async () => {
+    const both = { wakeups: [], tasks: [...task.tasks, server] }
+    const { tracker, announced, left } = scripted(both, { wakeups: [], tasks: [server] })
+    expect(await tracker.next({ type: "idle" })).toBe("continue")
+    expect(announced).toHaveLength(1)
+    expect(left).toEqual([])
+
+    await tracker.next({ type: "busy" })
+    expect(await tracker.next({ type: "idle" })).toBe("done")
+    expect(left).toEqual([[server]])
+  })
+
   test("heartbeats before the first turn ends are ignored", async () => {
     const { tracker } = scripted()
     expect(await tracker.next({ type: "heartbeat" })).toBe("continue")
@@ -81,6 +116,8 @@ describe("norm run wait", () => {
 
   test("says what it is waiting for", () => {
     expect(NormRunWait.describe(task)).toBe("1 background task")
+    // Only what it is actually waiting for.
+    expect(NormRunWait.describe({ ...task, tasks: [...task.tasks, server] })).toBe("1 background task")
     expect(NormRunWait.describe({ ...task, tasks: [...task.tasks, ...task.tasks] })).toBe("2 background tasks")
     const text = NormRunWait.describe({ ...wakeup, tasks: task.tasks })
     expect(text).toStartWith("a wakeup at ")
