@@ -25,6 +25,7 @@ import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { Norm } from "@/norm/norm"
 
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
@@ -498,14 +499,17 @@ const layer = Layer.effect(
 
           case "text-delta":
             if (!ctx.currentText) return
-            ctx.currentText.text += value.text
+            // norm: owallet streams an upstream failure as reply text, body
+            // and all; keep a relayed web page out of the chat.
+            const delta = Norm.compactOwalletError(value.text)
+            ctx.currentText.text += delta
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* session.updatePartDelta({
               sessionID: ctx.currentText.sessionID,
               messageID: ctx.currentText.messageID,
               partID: ctx.currentText.id,
               field: "text",
-              delta: value.text,
+              delta,
             })
             return
 

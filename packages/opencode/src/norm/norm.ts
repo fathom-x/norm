@@ -242,8 +242,48 @@ export function splitOwalletError(text: string): { reply: string; error?: string
   return { reply: text.slice(0, at).trimEnd(), error: text.slice(at) }
 }
 
+// An owallet error is one or two sentences. Anything longer is a relayed
+// response body, which nobody should have to read in a chat.
+const OWALLET_ERROR_MAX = 2000
+
+/**
+ * owallet relays an upstream failure's body verbatim, and a firewall or
+ * proxy in front of Overpay answers with a whole web page: a 403 once put
+ * 221 KB of HTML (inline fonts included) into the chat, and then into every
+ * later request of that conversation. This cuts the error down to what a
+ * person can act on. Text without owallet's marker is returned untouched.
+ */
+export function compactOwalletError(text: string): string {
+  const at = text.indexOf(OWALLET_ERROR_MARKER)
+  if (at === -1) return text
+  const head = text.slice(0, at + OWALLET_ERROR_MARKER.length)
+  const reason = text.slice(at + OWALLET_ERROR_MARKER.length)
+  const html = reason.search(/<!doctype html|<html[\s>]/i)
+  if (html === -1) {
+    if (reason.length <= OWALLET_ERROR_MAX) return text
+    return `${head}${reason.slice(0, OWALLET_ERROR_MAX)}… (${reason.length - OWALLET_ERROR_MAX} more characters)`
+  }
+  // "HTTP 403:" as owallet prefixed it, then the page's own heading.
+  const status = reason.slice(0, html).trim()
+  const label = (reason.match(/<h1[^>]*>([^<]{1,120})<\/h1>/i) ?? reason.match(/<title[^>]*>([^<]{1,120})<\/title>/i))?.[1]
+    .replace(/\s+/g, " ")
+    .trim()
+  return [
+    head,
+    status,
+    `the server answered with a web page instead of a reply${label ? ` ("${label}")` : ""}.`,
+    ...(/\b403\b/.test(status)
+      ? [
+          "A firewall in front of Overpay blocked the request. It can mistake text in the conversation, such as shell commands, for an attack, so sending the same conversation again will be blocked again.",
+        ]
+      : []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+}
+
 export function harnessNote(errorText: string): string {
-  const reason = errorText.trim().slice(OWALLET_ERROR_MARKER.length).trim()
+  const reason = compactOwalletError(errorText.trim()).slice(OWALLET_ERROR_MARKER.length).trim()
   return [
     "<system-reminder>",
     "The previous request in this conversation never got a reply from you: norm's wallet (owallet) refused or failed it before or while it reached a model. The user saw this message from the harness — neither you nor the user wrote it:",
