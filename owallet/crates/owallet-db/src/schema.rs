@@ -88,7 +88,8 @@ CREATE TABLE IF NOT EXISTS provider_keys (
     scopes                 TEXT,
     daily_budget_usd_cents INTEGER,
     spent_usd_cents        INTEGER,
-    spent_day              INTEGER
+    spent_day              INTEGER,
+    spent_usd_micros       INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_provider_keys_npub ON provider_keys(npub, created_at DESC);
@@ -156,6 +157,12 @@ const MIGRATIONS: &[&str] = &[
     // Budget chosen on the consent page for a browser-login spend key —
     // rides the auth code to token exchange, where the key is minted.
     "ALTER TABLE auth_codes ADD COLUMN spend_budget_usd_cents INTEGER",
+    // Micropayments: a key's daily spend in micro-dollars ($0.000001), so a
+    // sub-cent purchase counts against its budget instead of rounding to 0.
+    // NULL — rows last written before the column — falls back to
+    // `spent_usd_cents` × 10,000 on read (see provider_keys.rs), and the
+    // next write moves the row onto this column.
+    "ALTER TABLE provider_keys ADD COLUMN spent_usd_micros INTEGER",
 ];
 
 pub(crate) fn create(conn: &Connection) -> rusqlite::Result<()> {

@@ -31,7 +31,7 @@ pub use auth_codes::AuthCodeRow;
 pub use oauth_clients::OAuthClientRow;
 pub use provider_keys::{
     budget_day, scopes_allow_spend, timezone_is_valid, BudgetReservation, ProviderKeyRow,
-    PROVIDER_SCOPE_CHAT, PROVIDER_SCOPE_SPEND,
+    MICROS_PER_CENT, PROVIDER_SCOPE_CHAT, PROVIDER_SCOPE_SPEND,
 };
 pub use purchases::PurchaseRow;
 pub use tokens::TokenRow;
@@ -427,7 +427,7 @@ impl Database {
             token_prefix: Some(token_prefix.to_string()),
             scopes: Some(scopes.to_string()),
             daily_budget_usd_cents,
-            spent_usd_cents: 0,
+            spent_usd_micros: 0,
             spent_day: None,
         };
         provider_keys::insert(&self.conn, &row, &provider_key_hash(&token))?;
@@ -482,26 +482,29 @@ impl Database {
         provider_keys::update_budget(&self.conn, id, npub, daily_budget_usd_cents)
     }
 
-    /// Atomically reserve `amount_cents` against a key's daily budget
+    /// Atomically reserve `amount_micros` (micro-dollars) against a key's
+    /// daily budget
     /// (wallet-timezone day window, rolled over lazily inside the same
     /// UPDATE). See [`BudgetReservation`] for the outcomes; keys without a
     /// budget always reserve (their spend is still tracked).
     pub fn try_reserve_provider_key_spend(
         &self,
         id: &str,
-        amount_cents: i64,
+        amount_micros: i64,
     ) -> Result<BudgetReservation> {
-        provider_keys::try_reserve_spend(&self.conn, id, amount_cents, self.current_budget_day())
+        provider_keys::try_reserve_spend(&self.conn, id, amount_micros, self.current_budget_day())
     }
 
-    /// Hand back a reservation whose payment never moved funds.
-    pub fn release_provider_key_spend(&self, id: &str, amount_cents: i64) -> Result<()> {
-        provider_keys::release_spend(&self.conn, id, amount_cents, self.current_budget_day())
+    /// Hand back (micro-dollars of) a reservation whose payment never moved
+    /// funds.
+    pub fn release_provider_key_spend(&self, id: &str, amount_micros: i64) -> Result<()> {
+        provider_keys::release_spend(&self.conn, id, amount_micros, self.current_budget_day())
     }
 
-    /// Record spend knowable only after the fact (credit redemptions).
-    pub fn record_provider_key_spend(&self, id: &str, amount_cents: i64) -> Result<()> {
-        provider_keys::record_spend(&self.conn, id, amount_cents, self.current_budget_day())
+    /// Record spend (micro-dollars) knowable only after the fact (credit
+    /// redemptions).
+    pub fn record_provider_key_spend(&self, id: &str, amount_micros: i64) -> Result<()> {
+        provider_keys::record_spend(&self.conn, id, amount_micros, self.current_budget_day())
     }
 
     // ---- Wallet timezone ----

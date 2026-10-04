@@ -36,7 +36,9 @@ pub struct PurchaseRow {
     pub fulfillment_status: Option<String>,
     pub delivered_at: Option<i64>,
     pub paid_at: Option<i64>,
-    pub total_usd_cents: Option<i64>,
+    /// Cents — fractional for a sub-cent order (the marketplace's $0.000001
+    /// precision).
+    pub total_usd_cents: Option<f64>,
     pub delivered_content: Option<String>,
     pub delivered_content_url: Option<String>,
     pub delivered_content_type: Option<String>,
@@ -55,6 +57,15 @@ impl PurchaseRow {
 /// Coerce a JSON value into unix seconds. Accepts an integer, a numeric
 /// string, or an ISO-8601 / RFC-3339 timestamp (`…Z` or `…+00:00`).
 /// Mirrors `_coerce_int` in `wallet_mcp/db.py`.
+/// A cents amount, as a JSON number or numeric string.
+fn coerce_cents(v: Option<&Value>) -> Option<f64> {
+    match v {
+        Some(Value::Number(n)) => n.as_f64(),
+        Some(Value::String(s)) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
 fn coerce_unix_secs(v: Option<&Value>) -> Option<i64> {
     match v {
         Some(Value::Number(n)) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
@@ -117,7 +128,7 @@ fn row_from_order(order: &Value, order_id: String, now: i64) -> PurchaseRow {
         fulfillment_status: s(order, "fulfillment_status"),
         delivered_at: coerce_unix_secs(order.get("delivered_at")),
         paid_at: coerce_unix_secs(order.get("paid_at")),
-        total_usd_cents: coerce_unix_secs(order.get("total_usd_cents")),
+        total_usd_cents: coerce_cents(order.get("total_usd_cents")),
         delivered_content: s(order, "delivered_content"),
         delivered_content_url: s(order, "delivered_content_url"),
         delivered_content_type: s(order, "delivered_content_type"),

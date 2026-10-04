@@ -879,7 +879,7 @@ async fn consent_budget_field_bounds_the_browser_minted_key() {
         Some(1250),
         "the consent budget must land on the minted key"
     );
-    assert_eq!(auth.spent_today_usd_cents(), 0);
+    assert_eq!(auth.spent_today_usd_micros(), 0);
 }
 
 /// Tiny base64url(NO_PAD) encoder for the PKCE challenge — mirrors the

@@ -170,9 +170,11 @@ pub struct Listing {
     /// the Python client (`wallet_mcp/cli.py:986-1018`).
     #[serde(default, deserialize_with = "de_opt_stringish")]
     pub price_usd: Option<String>,
-    /// Authoritative integer price in cents, when present.
+    /// Authoritative price in cents, when present — fractional for a
+    /// sub-cent listing (cents to 4 places, the marketplace's $0.000001
+    /// precision).
     #[serde(default)]
-    pub price_cents: Option<i64>,
+    pub price_cents: Option<f64>,
     #[serde(default)]
     pub category: Option<String>,
     /// Opaque, pass-through: the Rails API returns this as a structured object
@@ -240,7 +242,7 @@ pub struct Order {
     #[serde(default)]
     pub total_usd: Option<String>,
     #[serde(default)]
-    pub total_usd_cents: Option<i64>,
+    pub total_usd_cents: Option<f64>,
     #[serde(default)]
     pub product_title: Option<String>,
     #[serde(default)]
@@ -279,7 +281,7 @@ impl<'de> Deserialize<'de> for Order {
                 .or_else(|| opt_string(o, "listing_id")),
             listing_title: listing.and_then(|l| opt_string(l, "title")),
             total_usd: opt_string(o, "total_usd"),
-            total_usd_cents: opt_i64(o, "total_usd_cents"),
+            total_usd_cents: opt_f64(o, "total_usd_cents"),
             product_title: opt_string(o, "product_title"),
             buyer_note: opt_string(o, "buyer_note"),
             order_url: opt_string(o, "order_url"),
@@ -322,12 +324,13 @@ pub struct MerchantCredits {
     pub organization_slug: Option<String>,
     #[serde(default)]
     pub holder_type: Option<String>,
+    /// Cents, to 4 places once sub-cent charges have touched the balance.
     #[serde(default)]
-    pub balance_cents: Option<i64>,
+    pub balance_cents: Option<f64>,
     #[serde(default)]
-    pub total_purchased_cents: Option<i64>,
+    pub total_purchased_cents: Option<f64>,
     #[serde(default)]
-    pub total_redeemed_cents: Option<i64>,
+    pub total_redeemed_cents: Option<f64>,
     #[serde(default)]
     pub currency: Option<String>,
     #[serde(default)]
@@ -342,9 +345,9 @@ impl<'de> Deserialize<'de> for MerchantCredits {
             seller_slug: opt_string(o, "seller_slug"),
             organization_slug: opt_string(o, "organization_slug"),
             holder_type: opt_string(o, "holder_type"),
-            balance_cents: opt_i64(o, "balance_cents"),
-            total_purchased_cents: opt_i64(o, "total_purchased_cents"),
-            total_redeemed_cents: opt_i64(o, "total_redeemed_cents"),
+            balance_cents: opt_f64(o, "balance_cents"),
+            total_purchased_cents: opt_f64(o, "total_purchased_cents"),
+            total_redeemed_cents: opt_f64(o, "total_redeemed_cents"),
             currency: opt_string(o, "currency"),
             formatted_balance: opt_string(o, "formatted_balance"),
         })
@@ -388,7 +391,7 @@ pub struct PurchaseCreditsResponse {
     #[serde(default)]
     pub payment_amount: Option<f64>,
     #[serde(default)]
-    pub total_usd_cents: Option<i64>,
+    pub total_usd_cents: Option<f64>,
     #[serde(default)]
     pub payment_status: Option<String>,
     #[serde(default)]
@@ -436,7 +439,7 @@ impl<'de> Deserialize<'de> for PurchaseCreditsResponse {
             currency: opt_string(o, "currency"),
             crypto_address: opt_string(o, "crypto_address"),
             payment_amount: opt_f64(o, "payment_amount"),
-            total_usd_cents: opt_i64(o, "total_usd_cents"),
+            total_usd_cents: opt_f64(o, "total_usd_cents"),
             payment_status: opt_string(o, "payment_status"),
             order_url: opt_string(o, "order_url"),
             message: opt_string(o, "message"),
@@ -457,9 +460,9 @@ pub struct RedeemCreditsRequest {
 pub struct RedeemCreditsResponse {
     pub status: String,
     #[serde(default)]
-    pub amount_redeemed_cents: i64,
+    pub amount_redeemed_cents: f64,
     #[serde(default)]
-    pub credit_balance_cents: i64,
+    pub credit_balance_cents: f64,
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -472,8 +475,8 @@ impl<'de> Deserialize<'de> for RedeemCreditsResponse {
         Ok(RedeemCreditsResponse {
             status: opt_string(o, "status")
                 .ok_or_else(|| D::Error::custom("redeem response missing `status`"))?,
-            amount_redeemed_cents: opt_i64(o, "amount_redeemed_cents").unwrap_or(0),
-            credit_balance_cents: opt_i64(o, "credit_balance_cents").unwrap_or(0),
+            amount_redeemed_cents: opt_f64(o, "amount_redeemed_cents").unwrap_or(0.0),
+            credit_balance_cents: opt_f64(o, "credit_balance_cents").unwrap_or(0.0),
             message: opt_string(o, "message"),
         })
     }
