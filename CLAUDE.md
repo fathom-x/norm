@@ -219,6 +219,27 @@ syncs stay cheap:
   command runs until it exits or is stopped. Tests:
   `test/norm/background-shell.test.ts`.
 
+- **Pending work** (`GET /session/:id/pending`, norm's own route beside
+  `send_queued`: `{wakeups, tasks}`). Two readers. `norm run`
+  (`src/norm/run-wait.ts`, hooked into `cli/cmd/run.ts`'s event loop)
+  no longer exits at the first idle while a wakeup, monitor or
+  background command is pending: it prints "Waiting for ..." (a
+  `waiting` event with `--format json`) and goes on until a turn ends
+  with nothing left; `--no-wait` restores exit-at-idle. Work that ends
+  without a turn is caught on the server's 10 s heartbeats (two quiet
+  ones in a row). It waits only for work that is certain to end:
+  wakeups, monitors, and background commands started with a `timeout`
+  (tasks carry a `deadline`; over HTTP a missing one is `null`). A
+  background command with no timeout may be a server that never exits,
+  so `norm run` does not wait for it and says so ("Not waiting for ...",
+  a `not_waiting` event in JSON); without `--attach` it is stopped as
+  the process exits. The TUI's
+  prompt hints row shows "wake 4m · 2 bg" (`tui/src/util/norm-pending.ts`,
+  re-read on status changes and every 15 s); idle with a wakeup
+  scheduled, esc cancels it through the abort route (upstream's esc does
+  nothing in an idle session). Tests: `test/norm/run-wait.test.ts`,
+  `packages/tui/test/util/norm-notification.test.ts`.
+
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
 `--<env>` flag for auto-started serves; **defaults to `staging` until

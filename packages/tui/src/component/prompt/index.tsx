@@ -57,6 +57,7 @@ import { readLocalAttachment } from "./local-attachment"
 import { NormBalance } from "../norm-balance"
 import { NormExit } from "../norm-exit"
 import { queuedCount, sendQueued } from "../../util/norm-queue"
+import { fetchPending, pendingLabel, type Pending } from "../../util/norm-pending"
 import { isDefaultTitle } from "../../util/session"
 
 registerOpencodeSpinner()
@@ -301,6 +302,30 @@ export function Prompt(props: PromptProps) {
     return `${money.format(cost)} / ${money.format(core / 100)}`
   })
 
+  // norm: "wake 4m · 2 bg" — what will start a turn on its own (a scheduled
+  // wakeup, monitors, background commands). Re-read when the session's
+  // status changes and every 15 s, which also keeps the countdown moving.
+  const [pending, setPending] = createSignal<{ value: Pending; now: number } | undefined>(undefined)
+  // Idle with a wakeup scheduled, esc cancels it: there is nothing else to
+  // interrupt, and the session would otherwise start up again on its own.
+  const wakeup = createMemo(() => status().type === "idle" && (pending()?.value.wakeups.length ?? 0) > 0)
+  const background = createMemo(() => {
+    const label = pendingLabel(pending()?.value, pending()?.now ?? 0)
+    return label && wakeup() ? `${label} (esc cancels)` : label
+  })
+  const readPending = (sessionID: string) =>
+    fetchPending(sdk.client, sessionID).then((value) => {
+      if (props.sessionID === sessionID) setPending({ value, now: Date.now() })
+    })
+  createEffect(
+    on([() => props.sessionID, () => status().type], ([sessionID]) => {
+      if (!sessionID) return setPending(undefined)
+      void readPending(sessionID)
+      const timer = setInterval(() => void readPending(sessionID), 15_000)
+      onCleanup(() => clearInterval(timer))
+    }),
+  )
+
   const [store, setStore] = createStore<{
     prompt: PromptInfo
     mode: "normal" | "shell"
@@ -414,7 +439,7 @@ export function Prompt(props: PromptProps) {
         name: "session.interrupt",
         category: "Session",
         hidden: true,
-        enabled: status().type !== "idle",
+        enabled: status().type !== "idle" || wakeup(),
         run: () => {
           if (auto()?.visible) return
           if (!input.focused) return
@@ -424,6 +449,17 @@ export function Prompt(props: PromptProps) {
             return
           }
           if (!props.sessionID) return
+
+          // norm: the abort route also drops the session's pending wakeups.
+          if (wakeup()) {
+            const sessionID = props.sessionID
+            void sdk.client.session
+              .abort({ sessionID })
+              .then(() => readPending(sessionID))
+              .catch(() => {})
+            dialog.clear()
+            return
+          }
 
           // norm: with messages queued behind the reply, one esc (text in
           // the prompt or not) interrupts it and answers them right away.
@@ -1693,11 +1729,11 @@ export function Prompt(props: PromptProps) {
                     <Match when={usage()}>
                       {(item) => (
                         <text fg={theme.textMuted} wrapMode="none">
-                          {[item().context, spend()].filter(Boolean).join(" · ")}
+                          {[background(), item().context, spend()].filter(Boolean).join(" · ")}
                         </text>
                       )}
                     </Match>
-                    <Match when={spend()}>
+                    <Match when={[background(), spend()].filter(Boolean).join(" · ")}>
                       {(value) => (
                         <text fg={theme.textMuted} wrapMode="none">
                           {value()}

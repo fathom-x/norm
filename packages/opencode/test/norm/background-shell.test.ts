@@ -144,9 +144,10 @@ describe("bash run_in_background", () => {
       expect(yield* Effect.promise(() => fs.readFile(task.file, "utf8"))).toBe("")
       expect(result.metadata).toMatchObject({ exit: null, output: `Running in the background (task ${task.id})` })
       expect(test.sent).toEqual([])
-      expect((yield* (yield* BackgroundTask.Service).list(test.chat.id)).map((item) => [item.id, item.type])).toEqual([
-        [task.id, "shell"],
-      ])
+      const listed = yield* (yield* BackgroundTask.Service).list(test.chat.id)
+      expect(listed.map((item) => [item.id, item.type])).toEqual([[task.id, "shell"]])
+      // Started without a timeout: nothing says when it will end.
+      expect(listed[0].deadline).toBeUndefined()
 
       yield* eventually(() => test.sent.length === 1)
       expect(test.sent[0]).toBe(
@@ -180,7 +181,11 @@ describe("bash run_in_background", () => {
     Effect.gen(function* () {
       const test = yield* setup()
       const dir = (yield* TestInstance).directory
+      const before = Date.now()
       yield* test.run(`echo $$ > ${path.join(dir, "pid")}; while true; do sleep 0.2; done`, { timeout: 800 })
+      const deadline = (yield* (yield* BackgroundTask.Service).list(test.chat.id))[0].deadline
+      expect(deadline).toBeGreaterThanOrEqual(before + 800)
+      expect(deadline).toBeLessThanOrEqual(Date.now() + 800)
       yield* eventually(() => test.sent.length === 1)
 
       expect(test.sent[0]).toContain("<status>killed</status>")
