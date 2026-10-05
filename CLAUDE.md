@@ -135,6 +135,19 @@ syncs stay cheap:
   web page (a 403 put 221 KB of HTML into a chat, then into every later
   request). An HTML body becomes one sentence naming the status and the
   page's heading; any other error is cut at 2,000 characters.
+  
+- **owallet is restarted when it stops under a running norm**
+  (`src/norm/revive.ts`, hooked in as the overpay provider's `fetch` in
+  `src/provider/provider.ts`). `owallet serve` is one detached process
+  shared by every window on a wallet and was only ever started at launch,
+  so killing it left each request to fail with the AI SDK's "Cannot
+  connect to API" after five blind retries. Now a request that cannot
+  connect while owallet is down calls `Norm.startServer` (the launch
+  path, under a file lock so several windows start one serve between
+  them) and is sent again; the plugin's `onRevive` listener shows a toast
+  and reconnects the owallet MCP server. When it cannot be restarted the
+  request fails at once with an `OwalletDownError` whose message says why
+  and what to do, worded so the session retry does not pick it up.
 - **Dollar signs are money, not math** (`packages/tui/src/util/norm-markdown.ts`):
   the TUI's inline markdown grammar reads everything between two `$` as
   LaTeX and parses nothing inside, so a line naming two prices lost its

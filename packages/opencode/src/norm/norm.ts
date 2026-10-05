@@ -1085,7 +1085,8 @@ function applyAgentModel(config: AgentModelConfig, agent: NormAgentModels.Agent,
 }
 
 /** True if anything answers HTTP at `base` — any status counts, only a network error is "down". */
-async function probe(base: string, timeoutMs = 1500): Promise<boolean> {
+/** Whether anything answers at the owallet address. */
+export async function probe(base: string, timeoutMs = 1500): Promise<boolean> {
   try {
     await fetch(`${base}/`, { signal: AbortSignal.timeout(timeoutMs), redirect: "manual" })
     return true
@@ -1249,25 +1250,33 @@ export function serveEnv(): NodeJS.ProcessEnv {
 }
 
 async function ensureServer(base: string): Promise<boolean> {
+  return (await startServer(base)).ok
+}
+
+/** Why `owallet serve` is not answering after norm tried to bring it up. */
+export type ServerDown = "remote" | "no-binary" | "no-wallet" | "no-password" | "start-failed"
+export type ServerStart = { ok: true } | { ok: false; reason: ServerDown }
+
+export async function startServer(base: string): Promise<ServerStart> {
   if (await probe(base)) {
-    if (!(await restartIfStale(base))) return true
+    if (!(await restartIfStale(base))) return { ok: true }
   }
   if (!isLoopback(base)) {
     debug(`owallet at ${base} is not reachable and not loopback — not spawning`)
-    return false
+    return { ok: false, reason: "remote" }
   }
   const bin = await owalletBinary()
   if (!bin) {
     debug("owallet binary not found — skipping auto-start")
-    return false
+    return { ok: false, reason: "no-binary" }
   }
   if (!existsSync(owalletDbPath())) {
     debug("no owallet wallet database yet — run `owallet init` and `owallet generate` first")
-    return false
+    return { ok: false, reason: "no-wallet" }
   }
   if (!process.env.OWALLET_PASSWORD) {
     debug("OWALLET_PASSWORD not set — cannot start owallet non-interactively; run `owallet serve` yourself")
-    return false
+    return { ok: false, reason: "no-password" }
   }
 
   const port = new URL(base).port || ENV_PORTS[owalletEnv()]
@@ -1283,11 +1292,11 @@ async function ensureServer(base: string): Promise<boolean> {
   // The child unlocks the DB (PBKDF2) before binding; give it a few seconds.
   const deadline = Date.now() + 6000
   while (Date.now() < deadline) {
-    if (await probe(base, 500)) return true
+    if (await probe(base, 500)) return { ok: true }
     await new Promise((resolve) => setTimeout(resolve, 250))
   }
   debug("owallet did not become reachable within 6s")
-  return false
+  return { ok: false, reason: "start-failed" }
 }
 
 /** Records which key norm minted, so it only ever replaces its own. */

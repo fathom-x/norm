@@ -1,5 +1,6 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { Norm } from "@/norm/norm"
+import { OwalletRevive } from "@/norm/revive"
 import { NormBudget } from "@opencode-ai/core/norm-budget"
 import { NormAgentModels } from "@opencode-ai/core/norm-agent-models"
 
@@ -14,6 +15,14 @@ import { NormAgentModels } from "@opencode-ai/core/norm-agent-models"
 export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
   await Norm.bootstrap()
   const sessions = Norm.sessionAccess(input.client)
+  // owallet was restarted under a running norm (norm/revive.ts): say so, and
+  // reconnect its tools, whose MCP session died with the old process.
+  OwalletRevive.onRevive(input.directory, () => {
+    void input.client.tui
+      .showToast({ body: { message: "owallet had stopped. norm restarted it.", variant: "info" } })
+      .catch(() => {})
+    void input.client.mcp.connect({ path: { name: Norm.MCP_NAME } }).catch(() => {})
+  })
   return {
     // Per-conversation budget (/budget): send the conversation's remaining
     // allowance so owallet enforces it server-side for the whole request —
