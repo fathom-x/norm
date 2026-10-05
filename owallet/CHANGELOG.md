@@ -4,6 +4,24 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### Orders are filed under the conversation that placed them
+
+- Every order owallet places now carries a `client_session_id`: an HMAC of
+  the caller's conversation id under the per-install secret (the same
+  derivation as the OpenRouter `session_id`), never the id itself. `/v1`
+  takes the conversation from `x-order-session-id`, else the request's
+  conversation key; MCP tool calls take it from `_meta`
+  (`overpay.com/session-id`), because one MCP connection serves every
+  conversation in a harness. It sits beside the buyer note, not in it, so
+  it applies to every listing and the seller never sees it.
+- `get_wallet_orders` gains `scope`: `"session"` (the default) lists only
+  the calling conversation's orders and ends with what the whole
+  conversation has cost, read across up to 200 orders; `"all"` lists the
+  wallet's. The model passes no id. When the caller named no conversation,
+  or the marketplace predates the field and ignored the filter, every order
+  is listed and the first line says these are all of the wallet's orders,
+  not one conversation's.
+
 ### `get_wallet_orders` answers "what did these cost"
 
 - Each row now shows when the order was placed (`2026-10-05 17:55Z`), and

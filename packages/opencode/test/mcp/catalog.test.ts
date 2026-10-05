@@ -105,3 +105,33 @@ test("preserves output schema validation across paginated tool discovery", async
     await Promise.all([client.close(), server.close()])
   }
 })
+
+// norm: owallet's tools are told which conversation is calling (see
+// Norm.mcpCallMeta). The id has to arrive in `_meta` beside the progress
+// token the SDK adds, not replace it.
+test("sends per-call _meta to the server alongside the progress token", async () => {
+  const seen: unknown[] = []
+  const server = new Server({ name: "meta", version: "1.0.0" }, { capabilities: { tools: {} } })
+  server.setRequestHandler(CallToolRequestSchema, ({ params }) => {
+    seen.push(params._meta)
+    return Promise.resolve({ content: [{ type: "text", text: "ok" }] })
+  })
+  const client = new Client({ name: "meta-test", version: "1.0.0" })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)])
+
+  try {
+    const labelled = McpCatalog.convertTool(mcpTool(), client, undefined, async () => ({
+      "overpay.com/session-id": "ses_root",
+    }))
+    await labelled.execute?.({}, options)
+    const plain = McpCatalog.convertTool(mcpTool(), client)
+    await plain.execute?.({}, options)
+
+    expect(seen[0]).toMatchObject({ "overpay.com/session-id": "ses_root" })
+    expect(seen[0]).toHaveProperty("progressToken")
+    expect(seen[1]).not.toHaveProperty("overpay.com/session-id")
+  } finally {
+    await Promise.all([client.close(), server.close()])
+  }
+})

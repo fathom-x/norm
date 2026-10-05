@@ -544,6 +544,11 @@ pub struct OrderFilters {
     /// against it. Bearer-authenticated requests skip the check, and
     /// passing the address anyway widens the result set.
     pub payer_address: Option<String>,
+    /// Only orders created with this `client_session_id` — the opaque
+    /// label owallet puts on a session's orders. A marketplace that
+    /// predates the field ignores the filter and returns every order, and
+    /// its rows carry no `client_session_id` key: check for it.
+    pub client_session_id: Option<String>,
 }
 
 #[cfg(test)]

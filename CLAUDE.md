@@ -152,6 +152,18 @@ syncs stay cheap:
   and reconnects the owallet MCP server. When it cannot be restarted the
   request fails at once with an `OwalletDownError` whose message says why
   and what to do, worded so the session retry does not pick it up.
+- **Orders know their conversation** (`Norm.orderSessionID`,
+  `Norm.mcpCallMeta`). owallet files each order under the conversation
+  that placed it and `get_wallet_orders` lists that conversation's by
+  default, so "what has this conversation cost" is one tool call. norm
+  names the conversation two ways, always as the *root* session so a
+  subagent's spend rolls up as it does for `/budget`: the
+  `x-order-session-id` header on chat requests (`src/plugin/norm.ts`;
+  `x-session-id` stays the turn's own id for provider routing), and
+  `_meta["overpay.com/session-id"]` on every owallet MCP tool call
+  (`McpCatalog.convertTool`'s `meta` argument, passed from
+  `src/session/tools.ts`), because the MCP connection is shared by every
+  conversation. owallet stores an HMAC of the id, never the id.
 - **Dollar signs are money, not math** (`packages/tui/src/util/norm-markdown.ts`):
   the TUI's inline markdown grammar reads everything between two `$` as
   LaTeX and parses nothing inside, so a line naming two prices lost its

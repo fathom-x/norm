@@ -43,6 +43,11 @@ pub struct McpState {
     /// Whether that provider key's scopes include `spend`. Meaningless
     /// unless [`Self::provider_key_id`] is set.
     pub provider_key_can_spend: bool,
+    /// The opaque label for the session (conversation) this call belongs
+    /// to, when the caller identified one: orders it places carry it as
+    /// `client_session_id`, and `get_wallet_orders` lists by it. Always
+    /// the output of [`Self::order_session_label`], never a client's raw id.
+    pub order_session: Option<String>,
 }
 
 /// An owned auth strategy with its data living long enough for one tool
@@ -98,6 +103,31 @@ impl McpState {
             zcash_network: "mainnet".to_string(),
             provider_key_id: None,
             provider_key_can_spend: false,
+            order_session: None,
+        }
+    }
+
+    /// The label for a client's session id: HMAC-SHA256(per-install secret,
+    /// id), hex. The label lands in Overpay's database (and, as an
+    /// OpenRouter `session_id`, in OpenRouter's logs), so it must be unique
+    /// across buyers, reveal nothing about the wallet, and not be linkable
+    /// to the client's own id — hence keyed by a secret, not a plain hash.
+    /// `None` for a blank id or when the secret cannot be read.
+    pub fn order_session_label(&self, client_session_id: &str) -> Option<String> {
+        let id = client_session_id.trim();
+        if id.is_empty() {
+            return None;
+        }
+        let secret = self.db.lock().ok()?.session_id_secret().ok()?;
+        Some(session_label(&secret, id))
+    }
+
+    /// Returns a clone of this state bound to a session label (see
+    /// [`Self::order_session`]).
+    pub fn with_order_session(&self, label: Option<String>) -> Self {
+        Self {
+            order_session: label,
+            ..self.clone()
         }
     }
 
@@ -147,6 +177,7 @@ impl McpState {
             zcash_network: self.zcash_network.clone(),
             provider_key_id: self.provider_key_id.clone(),
             provider_key_can_spend: self.provider_key_can_spend,
+            order_session: self.order_session.clone(),
         }
     }
 
@@ -224,4 +255,16 @@ impl McpState {
         };
         derive_from_stored_seed(&seed).ok()
     }
+}
+
+/// HMAC-SHA256(secret, id) as hex (64 chars): the one derivation behind
+/// both an order's `client_session_id` and the OpenRouter `session_id`, so
+/// the two always agree for a conversation.
+pub(crate) fn session_label(secret: &[u8], client_session_id: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac =
+        Hmac::<sha2::Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(b"owallet/openrouter-session-id/v1\0");
+    mac.update(client_session_id.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }

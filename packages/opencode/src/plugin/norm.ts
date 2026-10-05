@@ -15,6 +15,7 @@ import { NormAgentModels } from "@opencode-ai/core/norm-agent-models"
 export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
   await Norm.bootstrap()
   const sessions = Norm.sessionAccess(input.client)
+  Norm.trackOrderSessions(sessions)
   // owallet was restarted under a running norm (norm/revive.ts): say so, and
   // reconnect its tools, whose MCP session died with the old process.
   OwalletRevive.onRevive(input.directory, () => {
@@ -36,6 +37,10 @@ export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
       // stays warm from the first turn. owallet never forwards it as-is — it
       // sends an HMAC of it, and only once Overpay accepts the field.
       output.headers["x-session-id"] = hook.sessionID
+      // Which conversation this turn's orders are filed under: the root, so
+      // a subagent's turns are listed (and totalled) with the conversation
+      // that spawned it. See Norm.orderSessionID.
+      output.headers[Norm.ORDER_SESSION_HEADER] = await Norm.orderSessionID(hook.sessionID)
       // Titles, summaries and compaction send no tools, which owallet would
       // otherwise answer with its own server-side loop and whole tool
       // roster: a bigger prompt, and a model that could buy something
