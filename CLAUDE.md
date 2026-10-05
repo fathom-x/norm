@@ -135,6 +135,14 @@ syncs stay cheap:
   web page (a 403 put 221 KB of HTML into a chat, then into every later
   request). An HTML body becomes one sentence naming the status and the
   page's heading; any other error is cut at 2,000 characters.
+- **Dollar signs are money, not math** (`packages/tui/src/util/norm-markdown.ts`):
+  the TUI's inline markdown grammar reads everything between two `$` as
+  LaTeX and parses nothing inside, so a line naming two prices lost its
+  bold. The terminal cannot typeset math, so assistant text is rendered
+  with every `$` outside code escaped (`plainDollars`), and an extra
+  highlight rule (`norm-dollar.scm`, added to opentui's built-in
+  `markdown_inline` parser via `inlineParser`) shows `\$` as `$`. Only
+  while concealment is on; stored text is never changed.
 
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the

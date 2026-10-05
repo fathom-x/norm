@@ -58,6 +58,7 @@ import { queuedCount } from "../../util/norm-queue"
 import { SubagentFooter } from "./subagent-footer.tsx"
 import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
+import { inlineParser, plainDollars } from "../../util/norm-markdown"
 import { errorMessage } from "../../util/error"
 import { Toast, useToast } from "../../ui/toast"
 import { useKV } from "../../context/kv.tsx"
@@ -84,7 +85,7 @@ import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap 
 import { usePathFormatter } from "../../context/path-format"
 import { LocationProvider } from "../../context/location"
 
-addDefaultParsers(parsers.parsers)
+addDefaultParsers([...parsers.parsers, inlineParser])
 
 const GO_UPSELL_FREE_TIER_LAST_SEEN_AT = "go_upsell_last_seen_at"
 const GO_UPSELL_FREE_TIER_DONT_SHOW = "go_upsell_dont_show"
@@ -1720,7 +1721,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
               drawUnstyledText={false}
               streaming={true}
               syntaxStyle={syntax()}
-              content={summary().body}
+              content={ctx.conceal() ? plainDollars(summary().body) : summary().body}
               conceal={ctx.conceal()}
               fg={theme.textMuted}
             />
@@ -1785,7 +1786,7 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
           syntaxStyle={syntax()}
           streaming={true}
           internalBlockMode="top-level"
-          content={props.part.text.trim()}
+          content={ctx.conceal() ? plainDollars(props.part.text.trim()) : props.part.text.trim()}
           tableOptions={{ style: "grid" }}
           conceal={ctx.conceal()}
           fg={theme.markdownText}
