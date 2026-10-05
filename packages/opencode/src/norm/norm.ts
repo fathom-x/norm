@@ -1451,13 +1451,10 @@ export async function bootstrap(): Promise<void> {
   if (disabled()) return
   applySandboxEnv()
   const sandbox = normHome()
-  if (sandbox) {
-    // Loud on purpose: a sandbox is opt-in, and the one thing its user needs
-    // to know is that this norm is nowhere near their real wallet.
-    process.stderr.write(
-      `[norm] NORM_HOME=${sandbox} — wallet db ${owalletDbPath()}, owallet ${owalletUrl()}\n`,
-    )
-  }
+  // Only under NORM_DEBUG: the bootstrap runs while the TUI owns the
+  // terminal, and a line written to stderr then lands on top of it.
+  // `norm debug norm` reports the same paths.
+  if (sandbox) debug(`NORM_HOME=${sandbox} — wallet db ${owalletDbPath()}, owallet ${owalletUrl()}`)
   await applyAutoSetupPassword().catch(() => {})
   await ensureServer(owalletUrl()).catch((error) => {
     debug("owallet auto-start failed:", error)
