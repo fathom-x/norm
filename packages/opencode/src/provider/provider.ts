@@ -31,6 +31,8 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelStatus } from "./model-status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
+import { Norm } from "@/norm/norm"
+import { OwalletRevive } from "@/norm/revive"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
 
@@ -1690,6 +1692,9 @@ const layer = Layer.effect(
         if (model.providerID === "google-vertex" && !model.api.npm.includes("@ai-sdk/openai-compatible")) {
           delete options.fetch
         }
+
+        // norm: requests to owallet restart it when it has stopped (norm/revive.ts).
+        if (model.providerID === Norm.PROVIDER_ID && !Norm.disabled()) options["fetch"] ??= OwalletRevive.fetch
 
         if (model.api.npm.includes("@ai-sdk/openai-compatible") && options["includeUsage"] !== false) {
           options["includeUsage"] = true
