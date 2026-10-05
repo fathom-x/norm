@@ -9,6 +9,7 @@ import { NormBalance } from "../../component/norm-balance"
 import path from "node:path"
 import fs from "node:fs/promises"
 import open from "open"
+import { usd } from "../../util/norm-money"
 
 const id = "internal:sidebar-owallet"
 
@@ -174,9 +175,9 @@ function stateLine(outcome: FetchOutcome | undefined): string | undefined {
   }
 }
 
-function usd(value: number | null | undefined) {
+function dollars(value: number | null | undefined) {
   if (value === null || value === undefined) return undefined
-  return `$${value.toFixed(2)}`
+  return usd(value)
 }
 
 /** The session the TUI is showing, if any. */
@@ -303,8 +304,8 @@ async function openBudgetDialog(api: TuiPluginApi) {
           value: "conversation",
           description:
             current.budget === null
-              ? `no limit · ${usd(current.spent)} spent`
-              : `${usd(current.remaining ?? 0)} left of ${NormBudget.format(current.budget)}`,
+              ? `no limit · ${dollars(current.spent)} spent`
+              : `${dollars(current.remaining ?? 0)} left of ${NormBudget.format(current.budget)}`,
         },
         {
           title: "Per-message limit",
@@ -328,7 +329,7 @@ function openConversationBudgetDialog(api: TuiPluginApi, current: NormBudget.Sta
       title="Conversation budget"
       description={() => (
         <text>
-          Spent {usd(current.spent)} of {NormBudget.format(current.budget)} in this conversation. Enter a new limit
+          Spent {dollars(current.spent)} of {NormBudget.format(current.budget)} in this conversation. Enter a new limit
           in USD, or "off" for none. The ${NormBudget.DEFAULT_DAILY_BUDGET_USD}/day cap on Norm's key still applies.
         </text>
       )}
@@ -495,7 +496,7 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
       </text>
       <Show when={coreCredits()}>
         <text fg={theme().textMuted}>
-          core credits <span style={{ fg: theme().text }}>{usd((coreCredits()!.balance_cents ?? 0) / 100)}</span>
+          core credits <span style={{ fg: theme().text }}>{dollars((coreCredits()!.balance_cents ?? 0) / 100)}</span>
         </text>
       </Show>
       {/* An unlinked wallet can't buy anything — norm's whole point. Say
@@ -513,7 +514,7 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
           when={chatBudget()!.budget !== null && chatBudget()!.remaining === 0}
           fallback={
             <text fg={theme().textMuted}>
-              this chat <span style={{ fg: theme().text }}>{usd(chatBudget()!.spent)}</span> /{" "}
+              this chat <span style={{ fg: theme().text }}>{dollars(chatBudget()!.spent)}</span> /{" "}
               {NormBudget.format(chatBudget()!.budget)} · /budget
             </text>
           }
@@ -545,7 +546,7 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
         {(row) => (
           <text fg={theme().textMuted}>
             {row.seller_slug ?? row.organization_slug ?? "credits"}{" "}
-            <span style={{ fg: theme().text }}>{usd((row.balance_cents ?? 0) / 100)}</span>
+            <span style={{ fg: theme().text }}>{dollars((row.balance_cents ?? 0) / 100)}</span>
           </text>
         )}
       </For>
@@ -554,13 +555,13 @@ function View(props: { api: TuiPluginApi; poller: StatusPoller }) {
           when={budget()!.daily_budget_usd != null}
           fallback={
             <text fg={theme().textMuted}>
-              daily budget <span style={{ fg: theme().text }}>{usd(budget()!.spent_today_usd ?? 0)}</span> · no limit
+              daily budget <span style={{ fg: theme().text }}>{dollars(budget()!.spent_today_usd ?? 0)}</span> · no limit
             </text>
           }
         >
           <text fg={theme().textMuted}>
-            daily budget <span style={{ fg: theme().text }}>{usd(budget()!.spent_today_usd ?? 0)}</span> /{" "}
-            {usd(budget()!.daily_budget_usd)}
+            daily budget <span style={{ fg: theme().text }}>{dollars(budget()!.spent_today_usd ?? 0)}</span> /{" "}
+            {dollars(budget()!.daily_budget_usd)}
           </text>
         </Show>
       </Show>
