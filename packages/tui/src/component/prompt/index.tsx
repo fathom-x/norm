@@ -59,6 +59,7 @@ import { NormExit } from "../norm-exit"
 import { queuedCount, sendQueued } from "../../util/norm-queue"
 import { fetchPending, pendingLabel, type Pending } from "../../util/norm-pending"
 import { isDefaultTitle } from "../../util/session"
+import { usd } from "../../util/norm-money"
 
 registerOpencodeSpinner()
 
@@ -97,11 +98,6 @@ export type PromptRef = {
   focus(): void
   submit(): void
 }
-
-const money = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-})
 
 const DRAFT_RETENTION_MIN_CHARS = 20
 
@@ -298,8 +294,8 @@ export function Prompt(props: PromptProps) {
   const spend = createMemo(() => {
     const cost = props.sessionID ? (sync.session.get(props.sessionID)?.cost ?? 0) : 0
     const core = NormBalance.coreCents()
-    if (core === undefined) return cost > 0 ? money.format(cost) : undefined
-    return `${money.format(cost)} / ${money.format(core / 100)}`
+    if (core === undefined) return cost > 0 ? usd(cost) : undefined
+    return `${usd(cost)} / ${usd(core / 100)}`
   })
 
   // norm: "wake 4m · 2 bg" — what will start a turn on its own (a scheduled

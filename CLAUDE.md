@@ -135,6 +135,7 @@ syncs stay cheap:
   web page (a 403 put 221 KB of HTML into a chat, then into every later
   request). An HTML body becomes one sentence naming the status and the
   page's heading; any other error is cut at 2,000 characters.
+  
 - **owallet is restarted when it stops under a running norm**
   (`src/norm/revive.ts`, hooked in as the overpay provider's `fetch` in
   `src/provider/provider.ts`). `owallet serve` is one detached process
@@ -147,6 +148,14 @@ syncs stay cheap:
   and reconnects the owallet MCP server. When it cannot be restarted the
   request fails at once with an `OwalletDownError` whose message says why
   and what to do, worded so the session retry does not pick it up.
+- **Dollar signs are money, not math** (`packages/tui/src/util/norm-markdown.ts`):
+  the TUI's inline markdown grammar reads everything between two `$` as
+  LaTeX and parses nothing inside, so a line naming two prices lost its
+  bold. The terminal cannot typeset math, so assistant text is rendered
+  with every `$` outside code escaped (`plainDollars`), and an extra
+  highlight rule (`norm-dollar.scm`, added to opentui's built-in
+  `markdown_inline` parser via `inlineParser`) shows `\$` as `$`. Only
+  while concealment is on; stored text is never changed.
 
 - `src/norm/wake.ts` (`SessionWake`) is how anything outside a turn gets
   the model's attention: `deliver` persists a hidden user
