@@ -7,8 +7,10 @@ export * as NormPricing from "./norm-pricing"
 // estimates, the sidebar).
 //
 // Prices are USD per million tokens with the seller's markup already in.
-// They're *list* prices — the priciest provider the seller admitted at its
-// last catalog fetch — so estimates from them run high; the charge is the
+// `input`/`output` are *list* prices — the priciest provider the seller
+// admits, which is what owallet authorizes a turn for — and `typical` (when
+// the seller publishes it) is the cheapest provider's, what a turn usually
+// costs. Estimates use `typical`, limits the list price; the charge is the
 // turn's real cost plus markup, with a per-turn minimum (`min_charge`).
 
 export type Tier = { min_input_tokens: number; input: number; output: number }
@@ -24,6 +26,8 @@ export type Pricing = {
   min_charge: number
   /** The model's minimum commitment: the least a turn may be authorized for. */
   min_authorization?: number
+  /** The cheapest provider's rates: what a turn usually costs. */
+  typical?: { input: number; output: number }
   as_of?: string
 }
 
@@ -64,6 +68,10 @@ function parsePricing(raw: any): Pricing | undefined {
     long_context: tiers.length ? tiers : undefined,
     min_charge: finite(raw.min_charge) ? raw.min_charge : 0.01,
     min_authorization: finite(raw.min_authorization) ? raw.min_authorization : undefined,
+    typical:
+      finite(raw.typical?.input) && finite(raw.typical?.output)
+        ? { input: raw.typical.input, output: raw.typical.output }
+        : undefined,
     as_of: typeof raw.as_of === "string" ? raw.as_of : undefined,
   }
 }
@@ -83,6 +91,28 @@ export function parseModels(body: unknown): Model[] | undefined {
       }),
     )
   return models.length ? models : undefined
+}
+
+/**
+ * The pricing a turn usually pays: the typical rates in place of the list
+ * price, long-context tiers scaled by the same ratio. Unchanged without
+ * `typical`.
+ */
+export function typicalPricing(pricing: Pricing): Pricing {
+  const typical = pricing.typical
+  if (!typical) return pricing
+  const scale = (value: number, typicalBase: number, listBase: number) =>
+    listBase > 0 ? (value * typicalBase) / listBase : value
+  return {
+    ...pricing,
+    input: typical.input,
+    output: typical.output,
+    long_context: pricing.long_context?.map((tier) => ({
+      min_input_tokens: tier.min_input_tokens,
+      input: scale(tier.input, typical.input, pricing.input),
+      output: scale(tier.output, typical.output, pricing.output),
+    })),
+  }
 }
 
 /** The rates in force for a prompt of `inputTokens` (the highest tier reached). */
@@ -141,8 +171,9 @@ export type Turn = {
  * the next prompt's context. On the same model, what the last turn read
  * from or wrote to the prompt cache is billed at the cache rate; on another
  * model nothing is cached yet (`switching`), so the whole context is fresh
- * input once. `least` is what owallet would need to authorize — the number
- * to hold against the per-message limit. Undefined before the first reply.
+ * input once. `usd` is at the typical price; `least` is what owallet
+ * would need to authorize, at the list price — the number to hold against
+ * the per-message limit. Undefined before the first reply.
  */
 export function nextStep(
   pricing: Pricing,
@@ -158,7 +189,7 @@ export function nextStep(
   const outputTokens = Math.round(recent.reduce((sum, turn) => sum + turn.tokens.output, 0) / recent.length)
   const switching = last.modelID !== modelID
   return {
-    usd: estimateStep(pricing, {
+    usd: estimateStep(typicalPricing(pricing), {
       contextTokens,
       cachedTokens: switching ? 0 : t.cache.read + t.cache.write,
       outputTokens: outputTokens || DEFAULT_OUTPUT_TOKENS,
@@ -175,9 +206,17 @@ export function limit(contextLength: number): { context: number; output: number 
   return { context: contextLength, output: Math.min(OUTPUT_TOKEN_MAX, Math.floor(contextLength / 4)) }
 }
 
-/** "$0.30/$2.40 per M" — input/output list price. */
+/**
+ * "$0.30/$2.40 per M" — input/output price; with a typical price well
+ * below the list price, both: "$0.18/$1.44 per M, up to $0.54/$4.32".
+ */
 export function perMillion(pricing: Pricing): string {
-  return `${rate(pricing.input)}/${rate(pricing.output)} per M`
+  const list = `${rate(pricing.input)}/${rate(pricing.output)}`
+  const typical = pricing.typical
+  // Within 10% on both sides they read as one price.
+  if (!typical || (typical.input >= pricing.input * 0.9 && typical.output >= pricing.output * 0.9))
+    return `${list} per M`
+  return `${rate(typical.input)}/${rate(typical.output)} per M, up to ${list}`
 }
 
 function rate(usd: number): string {

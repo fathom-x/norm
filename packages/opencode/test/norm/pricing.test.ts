@@ -95,6 +95,43 @@ describe("NormPricing estimates", () => {
     expect(NormPricing.leastAuthorization(sonnet(), 60_000)).toBe(0.59)
   })
 
+  // DeepSeek V4.1 Flash's shape: list (the priciest admitted provider)
+  // well above typical (the cheapest).
+  const flash: NormPricing.Pricing = {
+    input: 0.54,
+    output: 4.32,
+    long_context: [{ min_input_tokens: 100_000, input: 1.08, output: 8.64 }],
+    min_charge: 0,
+    typical: { input: 0.18, output: 1.44 },
+  }
+
+  test("typical rates parse when owallet sends them", () => {
+    const [entry] = NormPricing.parseModels({
+      data: [{ id: "x/flash", pricing: { input: 0.54, output: 4.32, typical: { input: 0.18, output: 1.44 } } }],
+    })!
+    expect(entry.pricing!.typical).toEqual({ input: 0.18, output: 1.44 })
+    expect(NormPricing.parseModels({ data: [{ id: "x", pricing: { input: 1, output: 1, typical: {} } }] })![0].pricing!
+      .typical).toBeUndefined()
+  })
+
+  test("estimates use the typical price, the refusal floor the list price", () => {
+    const turns: NormPricing.Turn[] = [
+      { modelID: "x/flash", tokens: { input: 30_000, output: 1_000, cache: { read: 0, write: 0 } } },
+    ]
+    const step = NormPricing.nextStep(flash, "x/flash", turns)!
+    // 31k in at $0.18 + 1k out at $1.44 = 0.56¢ + 0.14¢ → 1¢
+    expect(step.usd).toBe(0.01)
+    // 31k × 4/3 ≈ 41.3k in at $0.54 + 256 out at $4.32 → 3¢
+    expect(step.least).toBe(0.03)
+    // Tiers scale with the base: $1.08 × 0.18/0.54 = $0.36.
+    expect(NormPricing.rates(NormPricing.typicalPricing(flash), 100_000).input).toBeCloseTo(0.36)
+  })
+
+  test("perMillion shows a typical price well below the list price beside it", () => {
+    expect(NormPricing.perMillion(flash)).toBe("$0.18/$1.44 per M, up to $0.54/$4.32")
+    expect(NormPricing.perMillion({ ...sonnet(), typical: { input: 3.5, output: 17 } })).toBe("$3.60/$18.00 per M")
+  })
+
   test("perMillion keeps small rates readable", () => {
     expect(NormPricing.perMillion(sonnet())).toBe("$3.60/$18.00 per M")
     expect(NormPricing.perMillion({ input: 0.03, output: 0.12, min_charge: 0.01 })).toBe("$0.03/$0.12 per M")
