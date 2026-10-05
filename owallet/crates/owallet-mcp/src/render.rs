@@ -422,7 +422,12 @@ fn render_schema(schema: &Value) -> String {
     out
 }
 
-/// `get_wallet_orders`: compact one-line-per-order list.
+/// `get_wallet_orders`: compact one-line-per-order list, newest first.
+///
+/// Each row carries what the order finally cost and when it was placed, and
+/// the list ends with a total, so "what did these cost" is answered here: a
+/// model asked what a conversation spent used to open every order with
+/// `get_order_status` just to read the charge and tell the turns apart.
 fn render_orders(data: &Value) -> String {
     let items = data.get("data").and_then(Value::as_array);
     let Some(items) = items else {
@@ -431,7 +436,10 @@ fn render_orders(data: &Value) -> String {
     if items.is_empty() {
         return "No orders found for this wallet. Next: browse with list_marketplace, then create_order.".to_string();
     }
-    let mut out = format!("{} order(s):\n", items.len());
+    let mut out = format!("{} order(s), newest first:\n", items.len());
+    let mut charged_total = 0.0;
+    let mut authorized_total = 0.0;
+    let mut counted = 0usize;
     for o in items {
         let id = field_str(o, &["order_id", "id"]);
         let pay = field_str(o, &["payment_status"]);
@@ -439,10 +447,34 @@ fn render_orders(data: &Value) -> String {
         let title = field_str(o, &["product_title", "title"]);
         let total = order_amount_cell(o);
         let _ = write!(out, "• {id}");
+        if let Some(at) = order_time(o) {
+            let _ = write!(out, " · {at}");
+        }
         if title != "—" {
             let _ = write!(out, " · {title}");
         }
         let _ = writeln!(out, " · payment={pay} · fulfillment={ful} · {total}");
+        let authorized = o.get("total_usd_cents").and_then(Value::as_f64);
+        if let Some(charged) = order_charged_cents(o) {
+            charged_total += charged;
+            authorized_total += authorized.unwrap_or(charged);
+            counted += 1;
+        }
+    }
+    if counted > 0 {
+        let _ = write!(
+            out,
+            "Charged for the {counted} paid order(s) listed: {}",
+            fmt_cents(round_micro_cents(charged_total))
+        );
+        if (authorized_total - charged_total).abs() > f64::EPSILON {
+            let _ = write!(
+                out,
+                " (authorized {})",
+                fmt_cents(round_micro_cents(authorized_total))
+            );
+        }
+        out.push_str(".\n");
     }
     if let Some(c) = data.get("next_cursor").and_then(Value::as_str) {
         let _ = writeln!(
@@ -450,8 +482,40 @@ fn render_orders(data: &Value) -> String {
             "More available — pass cursor=\"{c}\" for the next page."
         );
     }
-    out.push_str("Next: get_order_status(order_id) for detail, or wait_for_order to block until one is delivered.");
+    out.push_str(
+        "Each row shows the amount authorized and, where it differs, what was finally charged; \
+         that charge is the order's cost, so no per-order lookup is needed for costs. \
+         Next: get_order_status(order_id) for an order's content, or wait_for_order to block until one is delivered.",
+    );
     out
+}
+
+/// What a paid order finally cost, in cents: the settled charge when the
+/// marketplace states one (a metered order settles below its deposit, a
+/// rejected one to zero), else the order total. `None` for an order that was
+/// never paid, which cost nothing and has no place in a spend total.
+fn order_charged_cents(o: &Value) -> Option<f64> {
+    if o.get("payment_status").and_then(Value::as_str) != Some("paid") {
+        return None;
+    }
+    o.get("settled_amount_cents")
+        .and_then(Value::as_f64)
+        .or_else(|| o.get("total_usd_cents").and_then(Value::as_f64))
+}
+
+/// Sums of fractional cents pick up float noise; the marketplace's precision
+/// is the micro-dollar (cents to 4 places).
+fn round_micro_cents(cents: f64) -> f64 {
+    (cents * 10_000.0).round() / 10_000.0
+}
+
+/// An order's `created_at` to the minute (`2026-10-05 17:55Z`): enough to
+/// tell one turn's order from the next without the seconds and zone noise.
+fn order_time(o: &Value) -> Option<String> {
+    let at = o.get("created_at").and_then(Value::as_str)?;
+    let (date, time) = at.split_once('T')?;
+    let minute = time.get(..5)?;
+    Some(format!("{date} {minute}Z"))
 }
 
 /// `create_order` / `get_order_status` / `wait_for_order`: single order
@@ -1075,6 +1139,55 @@ mod tests {
             out.contains("free-form") || out.contains("optional"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn orders_show_when_each_was_placed_and_a_total() {
+        let data = json!({"data": [
+            {"order_id": "O1", "payment_status": "paid", "fulfillment_status": "delivered",
+             "total_usd_cents": 15, "settled_amount_cents": 0.0351,
+             "created_at": "2026-10-05T17:58:01.123Z"},
+            {"order_id": "O2", "payment_status": "paid", "fulfillment_status": "rejected",
+             "total_usd_cents": 15, "settled_amount_cents": 0,
+             "created_at": "2026-10-05T17:55:40.000Z"},
+            {"order_id": "O3", "payment_status": "paid", "fulfillment_status": "delivered",
+             "total_usd_cents": 15, "settled_amount_cents": 0.0288},
+            // Never paid: costs nothing, and is left out of the total.
+            {"order_id": "O4", "payment_status": "pending", "fulfillment_status": "pending",
+             "total_usd_cents": 500},
+        ]});
+        let out = render("get_wallet_orders", &data);
+        assert!(out.contains("• O1 · 2026-10-05 17:58Z · "), "{out}");
+        assert!(out.contains("• O2 · 2026-10-05 17:55Z · "), "{out}");
+        assert!(out.contains("• O3 · payment=paid"), "{out}");
+        assert!(
+            out.contains("Charged for the 3 paid order(s) listed: $0.000639 (authorized $0.45)."),
+            "{out}"
+        );
+        assert!(
+            out.contains("no per-order lookup is needed for costs"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn orders_total_leaves_out_the_authorization_when_it_was_charged_in_full() {
+        let data = json!({"data": [
+            {"order_id": "O1", "payment_status": "paid", "fulfillment_status": "delivered",
+             "total_usd_cents": 5, "settled_amount_cents": 5},
+            {"order_id": "O2", "payment_status": "paid", "fulfillment_status": "delivered",
+             "total_usd_cents": 20},
+        ]});
+        let out = render("get_wallet_orders", &data);
+        assert!(
+            out.contains("Charged for the 2 paid order(s) listed: $0.25.\n"),
+            "{out}"
+        );
+        let unpaid = render(
+            "get_wallet_orders",
+            &json!({"data": [{"id": "O1", "payment_status": "pending", "fulfillment_status": "pending"}]}),
+        );
+        assert!(!unpaid.contains("Charged for"), "{unpaid}");
     }
 
     #[test]
