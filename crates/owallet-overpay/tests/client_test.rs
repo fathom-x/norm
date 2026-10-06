@@ -461,7 +461,7 @@ async fn create_order_posts_listing_id_and_note() {
         .await;
 
     let order = client
-        .create_order("L42", Some("for the cat"), Auth::Bearer("tok"))
+        .create_order("L42", Some("for the cat"), None, Auth::Bearer("tok"))
         .await
         .unwrap();
     assert_eq!(order.id, "O1");

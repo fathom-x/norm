@@ -122,6 +122,10 @@ const SESSION_ID_ENV: &str = "OWALLET_V1_SESSION_ID";
 /// Header a client may send its conversation key in (after the body's
 /// `session_id`, before `prompt_cache_key` — OpenRouter's own precedence).
 const SESSION_ID_HEADER: &str = "x-session-id";
+/// Header naming the session a request's orders are filed under, when that
+/// differs from its conversation key (a subagent's turns belong to the
+/// conversation that spawned it). Defaults to the conversation key.
+const ORDER_SESSION_HEADER: &str = "x-order-session-id";
 /// Request header a client (norm's per-conversation `/budget`) sends to
 /// *lower* this request's spending allowance: the wallet spending tools may
 /// move at most this many USD, no single order (chat turn included) may
@@ -1729,6 +1733,13 @@ fn project_orders_list(data: &Value) -> Value {
     if let Some(cursor) = data.get("next_cursor").filter(|c| !c.is_null()) {
         out.insert("next_cursor".into(), cursor.clone());
     }
+    // Which orders these are (this conversation's, or all of the wallet's
+    // and why), and what the conversation cost in all.
+    for key in ["scope", "session_totals"] {
+        if let Some(v) = data.get(key) {
+            out.insert(key.into(), v.clone());
+        }
+    }
     Value::Object(out)
 }
 
@@ -2211,12 +2222,7 @@ fn client_conversation_key(req: &ChatCompletionRequest, headers: &HeaderMap) -> 
 /// across buyers, reveal nothing about the wallet, and not be linkable to
 /// the client's own id — hence keyed by a secret, not a plain hash.
 fn derive_session_id(secret: &[u8], client_key: &str) -> String {
-    use hmac::{Hmac, Mac};
-    let mut mac =
-        Hmac::<sha2::Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
-    mac.update(b"owallet/openrouter-session-id/v1\0");
-    mac.update(client_key.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    crate::state::session_label(secret, client_key)
 }
 
 /// The `session_id` this request's OpenRouter orders should carry, or
@@ -2284,6 +2290,19 @@ async fn chat_completions(
     };
     let client_key = client_conversation_key(&req, &headers);
     ctx.session_id = request_session_id(&ctx, client_key.as_deref(), req.client_tools().is_some());
+    // Label every order this request places with the session it belongs
+    // to, so the session's orders can be listed and totalled later. A
+    // harness whose subagents run under their own conversation keys names
+    // the session they roll up to in [`ORDER_SESSION_HEADER`]. Unlike the
+    // OpenRouter `session_id` this needs no flag: the label is not part of
+    // any buyer note, and a marketplace that predates it ignores it.
+    let order_session = headers
+        .get(ORDER_SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .or(client_key)
+        .and_then(|key| ctx.mcp.order_session_label(&key));
+    ctx.mcp = ctx.mcp.with_order_session(order_session);
     // The client says this request may spend nothing (e.g. a conversation
     // whose budget is used up): refuse before any order — each chat turn is
     // itself a paid order.
@@ -2434,7 +2453,12 @@ async fn place_and_pay_order(
 
     let order = state
         .overpay
-        .create_order_value(listing_id, Some(&note_str), auth.as_auth())
+        .create_order_value(
+            listing_id,
+            Some(&note_str),
+            state.order_session.as_deref(),
+            auth.as_auth(),
+        )
         .await?;
     let order_id = order
         .get("data")
@@ -2508,7 +2532,13 @@ async fn place_authorized_order(
 ) -> Result<(String, f64), OpenAiError> {
     let resp = match state
         .overpay
-        .create_paid_order_value(listing_id, Some(note_str), authorization_cents, auth.as_auth())
+        .create_paid_order_value(
+            listing_id,
+            Some(note_str),
+            authorization_cents,
+            state.order_session.as_deref(),
+            auth.as_auth(),
+        )
         .await
     {
         Ok(resp) => resp,
@@ -4507,6 +4537,80 @@ mod tests {
         // Passthrough without a key sends nothing (OpenRouter hashes instead).
         let bare = passthrough_note(true, None).await;
         assert!(bare.get("session_id").is_none(), "{bare}");
+    }
+
+    /// The `client_session_id` the request's model-turn order was created
+    /// with, for a passthrough request sent with these headers.
+    async fn passthrough_order_label(headers: &[(&'static str, &str)]) -> Option<String> {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router(&overpay).await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/OR-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {
+                "id": "OR-0", "fulfillment_status": "delivered",
+                "delivered_content": delivered_content("ok", "openai/gpt-5-mini", false),
+            }})))
+            .mount(&overpay)
+            .await;
+        let tmp = TempDir::new().unwrap();
+        // The OpenRouter session_id flag is off: the order label needs none.
+        let s = server_with_session_ids(seeded_state(&overpay.uri(), &tmp), false);
+        let mut req = s.post("/chat/completions");
+        for (name, value) in headers {
+            req = req.add_header(*name, *value);
+        }
+        req.json(&json!({
+            "model": "openai/gpt-5-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object"}}}],
+        }))
+        .await
+        .assert_status_ok();
+        let bodies: Vec<Value> = overpay
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/api/v1/orders")
+            .filter_map(|r| serde_json::from_slice::<Value>(&r.body).ok())
+            .collect();
+        let body = bodies.last().expect("an order was placed");
+        // Never inside the buyer note: that is the seller's input.
+        assert!(
+            !body["buyer_note"]
+                .as_str()
+                .unwrap_or("")
+                .contains("client_session_id"),
+            "{body}"
+        );
+        body.get("client_session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn model_turn_orders_are_filed_under_the_requests_session() {
+        // A conversation key labels the order: opaque, never the raw key.
+        let own = passthrough_order_label(&[(SESSION_ID_HEADER, "ses_child")])
+            .await
+            .expect("labelled");
+        assert_eq!(own.len(), 64);
+        assert!(!own.contains("ses_child"));
+
+        // A subagent's turns are filed under the conversation it belongs
+        // to, whatever its own conversation key is.
+        let rolled_up = passthrough_order_label(&[
+            (SESSION_ID_HEADER, "ses_child"),
+            (ORDER_SESSION_HEADER, "ses_root"),
+        ])
+        .await
+        .expect("labelled");
+        assert_eq!(rolled_up.len(), 64);
+        assert_ne!(rolled_up, own);
+
+        // No conversation named: the order carries no label at all.
+        assert_eq!(passthrough_order_label(&[]).await, None);
     }
 
     #[test]

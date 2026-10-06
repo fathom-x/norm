@@ -286,7 +286,14 @@ pub fn sanitize(tool: &str, data: &Value) -> Value {
                 .and_then(Value::as_array)
                 .map(|l| l.iter().map(order_summary_row).collect())
                 .unwrap_or_default();
-            envelope_list(rows, data)
+            let mut out = envelope_list(rows, data);
+            // Which orders these are, and what the session cost in all.
+            for key in ["scope", "session_totals"] {
+                if let Some(v) = data.get(key) {
+                    out[key] = v.clone();
+                }
+            }
+            out
         }
         "create_order" | "get_order_status" | "wait_for_order" => {
             let mut out = Map::new();

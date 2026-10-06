@@ -33,6 +33,254 @@ fn router_with_evm(tmp: &TempDir, overpay_uri: &str, evm: EvmConfig) -> TestServ
     server
 }
 
+// ---------------------------------------------------------------------------
+// Orders are filed under the calling conversation (`_meta` session id)
+// ---------------------------------------------------------------------------
+
+/// A marketplace that knows `client_session_id`: it labels every row with
+/// the label it was asked for (none when unfiltered), in two pages.
+struct LabelledOrders;
+
+impl Respond for LabelledOrders {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let query = |name: &str| {
+            request
+                .url
+                .query_pairs()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.into_owned())
+        };
+        let label = query("client_session_id");
+        let row = |id: &str, settled: f64| {
+            json!({"id": id, "payment_status": "paid", "fulfillment_status": "delivered",
+                   "total_usd_cents": 15, "settled_amount_cents": settled,
+                   "created_at": "2026-10-05T17:58:01.000Z", "client_session_id": label})
+        };
+        ResponseTemplate::new(200).set_body_json(match query("cursor").as_deref() {
+            None => json!({"data": [row("O1", 0.03), row("O2", 0.02)], "next_cursor": "c2"}),
+            _ => json!({"data": [row("O3", 0.01)], "next_cursor": null}),
+        })
+    }
+}
+
+async fn orders_call(s: &TestServer, arguments: Value, session: Option<&str>) -> Value {
+    let mut params = json!({"name": "get_wallet_orders", "arguments": arguments});
+    if let Some(session) = session {
+        params["_meta"] = json!({"overpay.com/session-id": session});
+    }
+    let res = s
+        .post("/mcp")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}))
+        .await;
+    res.assert_status_ok();
+    let body: Value = res.json();
+    assert_eq!(body["result"]["isError"], false, "{body}");
+    body["result"].clone()
+}
+
+fn sent_session_labels(requests: &[Request]) -> Vec<Option<String>> {
+    requests
+        .iter()
+        .filter(|r| r.url.path() == "/api/v1/orders" && r.method == wiremock::http::Method::GET)
+        .map(|r| {
+            r.url
+                .query_pairs()
+                .find(|(k, _)| k == "client_session_id")
+                .map(|(_, v)| v.into_owned())
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orders_default_to_the_calling_conversation_and_total_all_of_it() {
+    let overpay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/orders"))
+        .respond_with(LabelledOrders)
+        .mount(&overpay)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    seed_abandon_wallet(&tmp.path().join("test.db"));
+
+    let result = orders_call(&s, json!({}), Some("ses_abc")).await;
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("2 order(s) from this conversation"),
+        "{text}"
+    );
+    // The total covers the second page too: 0.03 + 0.02 + 0.01 cents.
+    assert!(
+        text.contains(
+            "This conversation so far: 3 order(s), 3 paid, charged $0.0006 (authorized $0.45)."
+        ),
+        "{text}"
+    );
+    assert_eq!(result["structuredContent"]["scope"], "session");
+    assert_eq!(result["structuredContent"]["session_totals"]["orders"], 3);
+
+    // Overpay is asked for one label: opaque, stable, and not the raw id.
+    let labels = sent_session_labels(&overpay.received_requests().await.unwrap());
+    assert_eq!(labels.len(), 2, "first page, then the rest for the total");
+    let label = labels[0].clone().expect("the session filter is sent");
+    assert_eq!(labels[1].as_deref(), Some(label.as_str()));
+    assert_eq!(label.len(), 64);
+    assert!(!label.contains("ses_abc"));
+
+    // Same conversation, same label; another conversation, another.
+    orders_call(&s, json!({}), Some("ses_abc")).await;
+    orders_call(&s, json!({}), Some("ses_other")).await;
+    let labels = sent_session_labels(&overpay.received_requests().await.unwrap());
+    assert_eq!(labels[2].as_deref(), Some(label.as_str()));
+    assert_ne!(labels[4].as_deref(), Some(label.as_str()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orders_scope_all_lists_the_whole_wallet() {
+    let overpay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/orders"))
+        .respond_with(LabelledOrders)
+        .mount(&overpay)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    seed_abandon_wallet(&tmp.path().join("test.db"));
+
+    let result = orders_call(&s, json!({"scope": "all"}), Some("ses_abc")).await;
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("2 order(s) on this wallet"), "{text}");
+    assert!(!text.contains("This conversation so far"), "{text}");
+    assert_eq!(result["structuredContent"]["scope"], "all");
+    assert_eq!(
+        sent_session_labels(&overpay.received_requests().await.unwrap()),
+        vec![None]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orders_from_a_client_that_names_no_conversation_are_labelled_as_all() {
+    let overpay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/orders"))
+        .respond_with(LabelledOrders)
+        .mount(&overpay)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    seed_abandon_wallet(&tmp.path().join("test.db"));
+
+    let result = orders_call(&s, json!({}), None).await;
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("This client did not say which conversation is calling, so these are ALL of the wallet's orders"),
+        "{text}"
+    );
+    assert!(!text.contains("from this conversation"), "{text}");
+    assert!(!text.contains("This conversation so far"), "{text}");
+    assert_eq!(result["structuredContent"]["scope"], "all_unidentified");
+    assert_eq!(
+        sent_session_labels(&overpay.received_requests().await.unwrap()),
+        vec![None]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orders_from_a_marketplace_that_ignores_the_filter_are_labelled_as_all() {
+    let overpay = MockServer::start().await;
+    // An older marketplace: the filter is ignored, every order comes back,
+    // and no row carries a `client_session_id`.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/orders"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "O1", "payment_status": "paid", "fulfillment_status": "delivered", "total_usd_cents": 15},
+                {"id": "O9", "payment_status": "paid", "fulfillment_status": "delivered", "total_usd_cents": 500},
+            ],
+        })))
+        .mount(&overpay)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    seed_abandon_wallet(&tmp.path().join("test.db"));
+
+    let result = orders_call(&s, json!({}), Some("ses_abc")).await;
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("This marketplace cannot filter orders by conversation yet, so these are ALL of the wallet's orders"),
+        "{text}"
+    );
+    assert!(!text.contains("This conversation so far"), "{text}");
+    assert_eq!(result["structuredContent"]["scope"], "all_unsupported");
+    assert!(result["structuredContent"].get("session_totals").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orders_refuse_an_unknown_scope() {
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, "http://127.0.0.1:1");
+    seed_abandon_wallet(&tmp.path().join("test.db"));
+    let res = s
+        .post("/mcp")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                      "params": {"name": "get_wallet_orders", "arguments": {"scope": "mine"}}}))
+        .await;
+    let body: Value = res.json();
+    assert_eq!(body["result"]["isError"], true, "{body}");
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("\"session\" or \"all\""), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_order_files_the_order_under_the_calling_conversation() {
+    let overpay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v1/listings/.+$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"id": "L1", "title": "Demo", "price_cents": 5}
+        })))
+        .mount(&overpay)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/orders"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "data": {"id": "O1", "payment_status": "pending", "fulfillment_status": "pending"}
+        })))
+        .mount(&overpay)
+        .await;
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    seed_abandon_wallet(&tmp.path().join("test.db"));
+
+    let create = |session: Option<&'static str>| {
+        let mut params = json!({"name": "create_order", "arguments": {"listing_id": "L1"}});
+        if let Some(session) = session {
+            params["_meta"] = json!({"overpay.com/session-id": session});
+        }
+        s.post("/mcp")
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params}))
+    };
+    let body: Value = create(Some("ses_abc")).await.json();
+    assert_eq!(body["result"]["isError"], false, "{body}");
+    let body: Value = create(None).await.json();
+    assert_eq!(body["result"]["isError"], false, "{body}");
+
+    let posts: Vec<Value> = overpay
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method == wiremock::http::Method::POST)
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect();
+    assert_eq!(posts.len(), 2);
+    let label = posts[0]["client_session_id"].as_str().expect("labelled");
+    assert_eq!(label.len(), 64);
+    assert!(!label.contains("ses_abc"));
+    // No conversation named: the key is absent, not null.
+    assert!(posts[1].get("client_session_id").is_none(), "{}", posts[1]);
+}
+
 fn seed_abandon_wallet(db_path: &std::path::Path) {
     let mut db = Database::open(db_path).unwrap();
     assert!(db.unlock("master-pw").unwrap());

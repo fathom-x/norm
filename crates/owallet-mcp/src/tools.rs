@@ -100,8 +100,10 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_wallet_orders",
-            description: "Free — a read, no order is placed and nothing is billed. Fetch the active wallet's orders. Requires authorization.",
+            description: "Free — a read, no order is placed and nothing is billed. List orders, newest first. By default only the orders this conversation placed (its model turns and purchases), ending with what the conversation has cost in total; pass scope=\"all\" for every order on the wallet. Each row gives when the order was placed, the amount authorized and what was finally charged, so no per-order lookup is needed for costs. If this client does not identify conversations, all orders are listed and the result says so. Requires authorization.",
             input_schema: schema_object(json!({
+                "scope":              {"type": "string", "enum": ["session", "all"], "default": "session",
+                                       "description": "\"session\" (default): only orders placed by this conversation. \"all\": every order on the wallet."},
                 "status":             {"type": "string", "description": ORDER_STATUS_FILTER_HINT},
                 "fulfillment_status": {"type": "string", "description": ORDER_STATUS_FILTER_HINT},
                 "limit":              {"type": "integer", "default": 20, "minimum": 1, "maximum": 100},
@@ -894,13 +896,32 @@ struct OrderListArgs {
     fulfillment_status: Option<String>,
     limit: Option<u32>,
     cursor: Option<String>,
+    scope: Option<String>,
 }
+
+/// How many pages of a session's orders `get_wallet_orders` reads to total
+/// what the session cost. Rails caps a page at 20, so this covers 200 orders.
+const SESSION_TOTAL_PAGES: usize = 10;
 
 async fn get_wallet_orders(state: &McpState, args: Value) -> Result<Value, ToolError> {
     let args: OrderListArgs = serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
         arg: "arguments",
         reason: e.to_string(),
     })?;
+    // "This session" is the default: what an agent asking about its own
+    // spend means. The caller never passes a session id — owallet knows the
+    // session from the request (state.order_session), or does not.
+    let session_only = match args.scope.as_deref().map(str::trim) {
+        None | Some("") | Some("session") => true,
+        Some("all") => false,
+        Some(other) => {
+            return Err(ToolError::InvalidArg {
+                arg: "scope",
+                reason: format!("unknown scope \"{other}\": use \"session\" or \"all\""),
+            })
+        }
+    };
+    let label = session_only.then(|| state.order_session.clone()).flatten();
     let (_npub, auth) = state.resolve_owned_auth()?;
 
     // Rails's NIP-98-authenticated orders endpoint requires a
@@ -913,23 +934,107 @@ async fn get_wallet_orders(state: &McpState, args: Value) -> Result<Value, ToolE
         OwnedAuth::Nip98(sk) => Some(Address::from_private_key(sk).to_hex_lower()),
         OwnedAuth::Bearer(_) | OwnedAuth::BearerSigned(..) => None,
     };
+    let filters = |cursor: Option<String>| OrderFilters {
+        payment_status: args.status.clone(),
+        fulfillment_status: args.fulfillment_status.clone(),
+        limit: args.limit.or(Some(20)),
+        cursor,
+        payer_address: payer_address.clone(),
+        client_session_id: label.clone(),
+    };
 
     // Raw Rails passthrough — see list_marketplace and
     // fathom-x/overpay#288.
-    state
+    let mut page = state
         .overpay
-        .list_orders_value(
-            auth.as_auth(),
-            &OrderFilters {
-                payment_status: args.status,
-                fulfillment_status: args.fulfillment_status,
-                limit: args.limit.or(Some(20)),
-                cursor: args.cursor,
-                payer_address,
-            },
-        )
-        .await
-        .map_err(Into::into)
+        .list_orders_value(auth.as_auth(), &filters(args.cursor.clone()))
+        .await?;
+
+    // Say which orders these are. Never let every order on the wallet
+    // pass for one session's: without a session to filter by, or against a
+    // marketplace that ignored the filter, the list is labelled as all.
+    let scope = match (&label, session_only) {
+        (_, false) => "all",
+        (None, true) => "all_unidentified",
+        (Some(label), true) if session_rows_only(&page, label) => "session",
+        (Some(_), true) => "all_unsupported",
+    };
+    if scope == "session" && args.cursor.is_none() {
+        let totals = session_totals(state, &auth, &filters, &page).await;
+        page["session_totals"] = totals;
+    }
+    page["scope"] = json!(scope);
+    Ok(page)
+}
+
+/// Whether every listed order carries this session's label. A marketplace
+/// that predates `client_session_id` ignores the filter and returns rows
+/// without the key; an empty list is trivially this session's.
+fn session_rows_only(page: &Value, label: &str) -> bool {
+    page.get("data")
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter()
+                .all(|row| row.get("client_session_id").and_then(Value::as_str) == Some(label))
+        })
+}
+
+/// What the whole session cost, not just the page shown: follow the
+/// cursor from `first` up to [`SESSION_TOTAL_PAGES`]. `complete` is false
+/// when the session has more orders than that, or a later page failed —
+/// the totals are then a lower bound, and say so.
+async fn session_totals(
+    state: &McpState,
+    auth: &OwnedAuth,
+    filters: &impl Fn(Option<String>) -> OrderFilters,
+    first: &Value,
+) -> Value {
+    let mut orders = 0usize;
+    let mut paid = 0usize;
+    let mut charged = 0.0;
+    let mut authorized = 0.0;
+    let mut page = first.clone();
+    let mut pages = 1;
+    let complete = loop {
+        for row in page
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            orders += 1;
+            if let Some(cost) = crate::render::order_charged_cents(row) {
+                paid += 1;
+                charged += cost;
+                authorized += row
+                    .get("total_usd_cents")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(cost);
+            }
+        }
+        let Some(cursor) = page.get("next_cursor").and_then(Value::as_str) else {
+            break true;
+        };
+        if pages >= SESSION_TOTAL_PAGES {
+            break false;
+        }
+        match state
+            .overpay
+            .list_orders_value(auth.as_auth(), &filters(Some(cursor.to_string())))
+            .await
+        {
+            Ok(next) => page = next,
+            Err(_) => break false,
+        }
+        pages += 1;
+    };
+    json!({
+        "orders": orders,
+        "paid_orders": paid,
+        "charged_cents": crate::render::round_micro_cents(charged),
+        "authorized_cents": crate::render::round_micro_cents(authorized),
+        "complete": complete,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1007,7 +1112,12 @@ async fn create_order(state: &McpState, args: Value) -> Result<Value, ToolError>
 
     state
         .overpay
-        .create_order_value(&args.listing_id, note_str.as_deref(), auth.as_auth())
+        .create_order_value(
+            &args.listing_id,
+            note_str.as_deref(),
+            state.order_session.as_deref(),
+            auth.as_auth(),
+        )
         .await
         .map_err(Into::into)
 }
@@ -1601,6 +1711,7 @@ async fn sync_purchases(state: &McpState, args: Value) -> Result<Value, ToolErro
                     limit: None,
                     cursor: cursor.clone(),
                     payer_address: payer_address.clone(),
+                    client_session_id: None,
                 },
             )
             .await
