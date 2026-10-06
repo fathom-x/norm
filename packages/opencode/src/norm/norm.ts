@@ -274,7 +274,7 @@ export function compactOwalletError(text: string): string {
     `the server answered with a web page instead of a reply${label ? ` ("${label}")` : ""}.`,
     ...(/\b403\b/.test(status)
       ? [
-          "A firewall in front of Overpay blocked the request. It can mistake text in the conversation, such as shell commands, for an attack, so sending the same conversation again will be blocked again.",
+          "The request was blocked before it reached Overpay. Sending the same conversation again is likely to be blocked again.",
         ]
       : []),
   ]

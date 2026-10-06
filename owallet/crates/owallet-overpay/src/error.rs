@@ -45,9 +45,8 @@ pub fn describe_body(status: u16, body: &str) -> String {
         message.push('.');
         if status == 403 {
             message.push_str(
-                " A firewall in front of Overpay blocked the request. It can mistake text in \
-                 the request, such as shell commands, for an attack, so sending the same \
-                 request again will be blocked again.",
+                " The request was blocked before it reached Overpay. Sending the same \
+                 request again is likely to be blocked again.",
             );
         }
         return message;
@@ -109,9 +108,8 @@ mod tests {
         assert_eq!(
             text,
             "HTTP 403: the server answered with a web page instead of a reply \
-             (\"403 - Forbidden\"). A firewall in front of Overpay blocked the request. It can \
-             mistake text in the request, such as shell commands, for an attack, so sending \
-             the same request again will be blocked again."
+             (\"403 - Forbidden\"). The request was blocked before it reached Overpay. \
+             Sending the same request again is likely to be blocked again."
         );
     }
 
