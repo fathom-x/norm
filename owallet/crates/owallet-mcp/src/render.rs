@@ -433,10 +433,27 @@ fn render_orders(data: &Value) -> String {
     let Some(items) = items else {
         return format!("Orders returned an unexpected shape.\n{}", compact(data));
     };
+    // Which orders these are (see `tools::get_wallet_orders`). A list of
+    // every order must never read as one conversation's.
+    let scope = data.get("scope").and_then(Value::as_str).unwrap_or("all");
+    let caveat = match scope {
+        "all_unidentified" => "This client did not say which conversation is calling, so these are ALL of the wallet's orders, not one conversation's.\n",
+        "all_unsupported" => "This marketplace cannot filter orders by conversation yet, so these are ALL of the wallet's orders, not one conversation's.\n",
+        _ => "",
+    };
     if items.is_empty() {
-        return "No orders found for this wallet. Next: browse with list_marketplace, then create_order.".to_string();
+        return if scope == "session" {
+            "No orders from this conversation yet. Pass scope=\"all\" to list every order on the wallet.".to_string()
+        } else {
+            format!("{caveat}No orders found for this wallet. Next: browse with list_marketplace, then create_order.")
+        };
     }
-    let mut out = format!("{} order(s), newest first:\n", items.len());
+    let whose = if scope == "session" {
+        "from this conversation"
+    } else {
+        "on this wallet"
+    };
+    let mut out = format!("{caveat}{} order(s) {whose}, newest first:\n", items.len());
     let mut charged_total = 0.0;
     let mut authorized_total = 0.0;
     let mut counted = 0usize;
@@ -461,7 +478,33 @@ fn render_orders(data: &Value) -> String {
             counted += 1;
         }
     }
-    if counted > 0 {
+    let totals = data.get("session_totals").filter(|t| t.is_object());
+    if let Some(totals) = totals {
+        // The whole conversation, beyond the rows shown.
+        let cents = |key: &str| totals.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+        let count = |key: &str| totals.get(key).and_then(Value::as_u64).unwrap_or(0);
+        let complete = totals.get("complete").and_then(Value::as_bool) != Some(false);
+        let _ = write!(
+            out,
+            "This conversation so far: {} order(s), {} paid, charged {}{}",
+            count("orders"),
+            count("paid_orders"),
+            if complete { "" } else { "at least " },
+            fmt_cents(cents("charged_cents"))
+        );
+        if (cents("authorized_cents") - cents("charged_cents")).abs() > f64::EPSILON {
+            let _ = write!(
+                out,
+                " (authorized {})",
+                fmt_cents(cents("authorized_cents"))
+            );
+        }
+        out.push_str(if complete {
+            ".\n"
+        } else {
+            "; it has more orders than were counted.\n"
+        });
+    } else if counted > 0 {
         let _ = write!(
             out,
             "Charged for the {counted} paid order(s) listed: {}",
@@ -494,7 +537,7 @@ fn render_orders(data: &Value) -> String {
 /// marketplace states one (a metered order settles below its deposit, a
 /// rejected one to zero), else the order total. `None` for an order that was
 /// never paid, which cost nothing and has no place in a spend total.
-fn order_charged_cents(o: &Value) -> Option<f64> {
+pub(crate) fn order_charged_cents(o: &Value) -> Option<f64> {
     if o.get("payment_status").and_then(Value::as_str) != Some("paid") {
         return None;
     }
@@ -505,7 +548,7 @@ fn order_charged_cents(o: &Value) -> Option<f64> {
 
 /// Sums of fractional cents pick up float noise; the marketplace's precision
 /// is the micro-dollar (cents to 4 places).
-fn round_micro_cents(cents: f64) -> f64 {
+pub(crate) fn round_micro_cents(cents: f64) -> f64 {
     (cents * 10_000.0).round() / 10_000.0
 }
 
@@ -1188,6 +1231,76 @@ mod tests {
             &json!({"data": [{"id": "O1", "payment_status": "pending", "fulfillment_status": "pending"}]}),
         );
         assert!(!unpaid.contains("Charged for"), "{unpaid}");
+    }
+
+    #[test]
+    fn orders_say_whose_they_are() {
+        let row = json!({"order_id": "O1", "payment_status": "paid", "fulfillment_status": "delivered",
+                         "total_usd_cents": 15, "settled_amount_cents": 0.03});
+        let list =
+            |scope: &str| render("get_wallet_orders", &json!({"data": [row], "scope": scope}));
+
+        let session = list("session");
+        assert!(
+            session.starts_with("1 order(s) from this conversation"),
+            "{session}"
+        );
+
+        let all = list("all");
+        assert!(all.starts_with("1 order(s) on this wallet"), "{all}");
+
+        // Every order on the wallet must never read as one conversation's.
+        for scope in ["all_unidentified", "all_unsupported"] {
+            let out = list(scope);
+            assert!(
+                out.contains("ALL of the wallet's orders, not one conversation's"),
+                "{out}"
+            );
+            assert!(out.contains("1 order(s) on this wallet"), "{out}");
+            assert!(!out.contains("from this conversation"), "{out}");
+        }
+        assert!(list("all_unidentified").contains("did not say which conversation"));
+        assert!(list("all_unsupported").contains("cannot filter orders by conversation"));
+
+        let none = render(
+            "get_wallet_orders",
+            &json!({"data": [], "scope": "session"}),
+        );
+        assert!(
+            none.contains("No orders from this conversation yet"),
+            "{none}"
+        );
+        assert!(none.contains("scope=\"all\""), "{none}");
+    }
+
+    #[test]
+    fn a_session_list_totals_the_whole_conversation_not_the_page() {
+        let data = json!({
+            "data": [{"order_id": "O1", "payment_status": "paid", "fulfillment_status": "delivered",
+                      "total_usd_cents": 15, "settled_amount_cents": 0.03}],
+            "scope": "session",
+            "next_cursor": "c2",
+            "session_totals": {"orders": 57, "paid_orders": 55, "charged_cents": 1.6402,
+                               "authorized_cents": 825, "complete": true},
+        });
+        let out = render("get_wallet_orders", &data);
+        assert!(
+            out.contains("This conversation so far: 57 order(s), 55 paid, charged $0.016402 (authorized $8.25)."),
+            "{out}"
+        );
+        assert!(
+            !out.contains("Charged for the 1 paid order(s) listed"),
+            "{out}"
+        );
+
+        let mut partial = data.clone();
+        partial["session_totals"]["complete"] = json!(false);
+        let out = render("get_wallet_orders", &partial);
+        assert!(out.contains("charged at least $0.016402"), "{out}");
+        assert!(
+            out.contains("it has more orders than were counted"),
+            "{out}"
+        );
     }
 
     #[test]

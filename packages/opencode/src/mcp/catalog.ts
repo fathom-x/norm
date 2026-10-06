@@ -39,7 +39,13 @@ export function defs(client: Client, timeout?: number) {
   return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
 }
 
-export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {
+export function convertTool(
+  mcpTool: MCPToolDef,
+  client: Client,
+  timeout?: number,
+  // norm: per-call `_meta` for the server (the owallet session id).
+  meta?: () => Promise<Record<string, unknown> | undefined>,
+): Tool {
   const inputSchema: JSONSchema7 = {
     ...(mcpTool.inputSchema as JSONSchema7),
     type: "object",
@@ -55,6 +61,7 @@ export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: numbe
         {
           name: mcpTool.name,
           arguments: (args || {}) as Record<string, unknown>,
+          _meta: await meta?.(),
         },
         CallToolResultSchema,
         {

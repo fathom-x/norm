@@ -81,6 +81,55 @@ describe("per-message limit", () => {
   })
 })
 
+describe("order sessions", () => {
+  // root ── child ── grandchild
+  const parents: Record<string, string | undefined> = { ses_child: "ses_root", ses_grand: "ses_child" }
+  const client = {
+    session: {
+      get: async ({ path: { id } }: any) => ({ data: { id, parentID: parents[id] } }),
+      children: async () => ({ data: [] }),
+      messages: async () => ({ data: [] }),
+    },
+  }
+
+  test("a subagent's orders are filed under the conversation's root", async () => {
+    Norm.trackOrderSessions(Norm.sessionAccess(client))
+    expect(await Norm.orderSessionID("ses_root")).toBe("ses_root")
+    expect(await Norm.orderSessionID("ses_grand")).toBe("ses_root")
+  })
+
+  test("owallet tool calls carry the conversation; other servers' do not", async () => {
+    Norm.trackOrderSessions(Norm.sessionAccess(client))
+    delete process.env.NORM_DISABLE
+    try {
+      expect(await Norm.mcpCallMeta("owallet_get_wallet_orders", "ses_grand")).toEqual({
+        [Norm.MCP_SESSION_META]: "ses_root",
+      })
+      expect(await Norm.mcpCallMeta("github_create_issue", "ses_grand")).toBeUndefined()
+      process.env.NORM_DISABLE = "1"
+      expect(await Norm.mcpCallMeta("owallet_get_wallet_orders", "ses_grand")).toBeUndefined()
+    } finally {
+      process.env.NORM_DISABLE = "1"
+    }
+  })
+
+  test("chat requests name the root as the session their orders belong to", async () => {
+    const { NormOwalletPlugin } = await import("@/plugin/norm")
+    process.env.NORM_DISABLE = "1"
+    const hooks = await NormOwalletPlugin({ client } as any)
+    delete process.env.NORM_DISABLE
+    try {
+      const output = { headers: {} as Record<string, string> }
+      await hooks["chat.headers"]!({ sessionID: "ses_grand", model: { providerID: Norm.PROVIDER_ID } } as any, output)
+      // The turn's own id still keys provider routing and the prompt cache.
+      expect(output.headers["x-session-id"]).toBe("ses_grand")
+      expect(output.headers[Norm.ORDER_SESSION_HEADER]).toBe("ses_root")
+    } finally {
+      process.env.NORM_DISABLE = "1"
+    }
+  })
+})
+
 describe("NormBudget.status", () => {
   beforeEach(() => fs.rm(NormBudget.file(), { force: true }))
   afterEach(() => fs.rm(NormBudget.file(), { force: true }))

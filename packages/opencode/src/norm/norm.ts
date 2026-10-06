@@ -1437,6 +1437,47 @@ async function ensureProviderKey(): Promise<void> {
 }
 
 /** Server-side SessionAccess over the plugin's (v1) SDK client. */
+/** `_meta` key owallet reads the calling conversation's id from on a tool call. */
+export const MCP_SESSION_META = "overpay.com/session-id"
+/** Header naming the session a chat request's orders are filed under. */
+export const ORDER_SESSION_HEADER = "x-order-session-id"
+
+let orderSessions: NormBudget.SessionAccess | undefined
+const orderSessionRoots = new Map<string, string>()
+
+/** The norm plugin hands over session lookups once it has a client. */
+export function trackOrderSessions(access: NormBudget.SessionAccess) {
+  orderSessions = access
+}
+
+/**
+ * The session a session's orders are filed under: the conversation's root,
+ * so a subagent's spend counts toward the conversation that spawned it — the
+ * same rollup `/budget` uses. owallet labels each order with an HMAC of this
+ * id (never the id itself) and `get_wallet_orders` lists by it, which is how
+ * the model answers "what has this conversation cost" in one call.
+ */
+export async function orderSessionID(sessionID: string): Promise<string> {
+  const known = orderSessionRoots.get(sessionID)
+  if (known) return known
+  if (!orderSessions) return sessionID
+  // A failed lookup is not cached: file under the session itself this once.
+  const root = await NormBudget.rootOf(orderSessions, sessionID).catch(() => undefined)
+  if (!root) return sessionID
+  orderSessionRoots.set(sessionID, root)
+  return root
+}
+
+/**
+ * `_meta` for one MCP tool call: owallet's tools get the conversation the
+ * call belongs to, since the MCP connection is shared by every conversation
+ * in this process. Other servers get nothing.
+ */
+export async function mcpCallMeta(tool: string, sessionID: string) {
+  if (disabled() || !tool.startsWith(`${MCP_NAME}_`)) return undefined
+  return { [MCP_SESSION_META]: await orderSessionID(sessionID) }
+}
+
 export function sessionAccess(client: any): NormBudget.SessionAccess {
   return {
     async parentOf(id) {

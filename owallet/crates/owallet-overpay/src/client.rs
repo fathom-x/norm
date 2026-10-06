@@ -337,16 +337,23 @@ impl OverpayClient {
         })
     }
 
+    /// `client_session_id` labels the order with the session it belongs to
+    /// (see [`OrderFilters::client_session_id`]). The key is left out of the
+    /// body entirely when there is no label.
     pub async fn create_order(
         &self,
         listing_id: &str,
         buyer_note: Option<&str>,
+        client_session_id: Option<&str>,
         auth: Auth<'_>,
     ) -> Result<Order, OverpayError> {
-        let body = serde_json::json!({
-            "listing_id": listing_id,
-            "buyer_note": buyer_note,
-        });
+        let body = with_client_session(
+            serde_json::json!({
+                "listing_id": listing_id,
+                "buyer_note": buyer_note,
+            }),
+            client_session_id,
+        );
         self.post_json("/api/v1/orders", auth, &body).await
     }
 
@@ -359,12 +366,16 @@ impl OverpayClient {
         &self,
         listing_id: &str,
         buyer_note: Option<&str>,
+        client_session_id: Option<&str>,
         auth: Auth<'_>,
     ) -> Result<Value, OverpayError> {
-        let body = serde_json::json!({
-            "listing_id": listing_id,
-            "buyer_note": buyer_note,
-        });
+        let body = with_client_session(
+            serde_json::json!({
+                "listing_id": listing_id,
+                "buyer_note": buyer_note,
+            }),
+            client_session_id,
+        );
         self.post_json_value("/api/v1/orders", auth, &body).await
     }
 
@@ -380,14 +391,18 @@ impl OverpayClient {
         listing_id: &str,
         buyer_note: Option<&str>,
         authorization_cents: i64,
+        client_session_id: Option<&str>,
         auth: Auth<'_>,
     ) -> Result<Value, OverpayError> {
-        let body = serde_json::json!({
-            "listing_id": listing_id,
-            "buyer_note": buyer_note,
-            "pay": "merchant_credits",
-            "authorization_cents": authorization_cents,
-        });
+        let body = with_client_session(
+            serde_json::json!({
+                "listing_id": listing_id,
+                "buyer_note": buyer_note,
+                "pay": "merchant_credits",
+                "authorization_cents": authorization_cents,
+            }),
+            client_session_id,
+        );
         self.post_json_value("/api/v1/orders", auth, &body).await
     }
 
@@ -549,6 +564,9 @@ impl OverpayClient {
             }
             if let Some(addr) = &filters.payer_address {
                 q.append_pair("payer_address", addr);
+            }
+            if let Some(session) = &filters.client_session_id {
+                q.append_pair("client_session_id", session);
             }
         }
         Ok(url)
@@ -731,6 +749,14 @@ fn is_binary_media_type(media_type: &str) -> bool {
                 | "application/x-tar"
                 | "application/wasm"
         )
+}
+
+/// Add the session label to an order-creation body, when there is one.
+fn with_client_session(mut body: Value, client_session_id: Option<&str>) -> Value {
+    if let Some(session) = client_session_id {
+        body["client_session_id"] = Value::String(session.to_string());
+    }
+    body
 }
 
 #[cfg(test)]

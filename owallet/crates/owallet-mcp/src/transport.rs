@@ -201,6 +201,22 @@ struct ToolCallParams {
 struct CallMeta {
     #[serde(default, rename = "progressToken")]
     progress_token: Option<Value>,
+    /// The harness's id for the conversation making this call, so the
+    /// orders it places can be listed as that conversation's. An MCP
+    /// connection is shared by every conversation in a harness, so this
+    /// has to come with each call. Never forwarded: owallet files orders
+    /// under an HMAC of it ([`McpState::order_session_label`]).
+    #[serde(default, rename = "overpay.com/session-id")]
+    session_id: Option<String>,
+}
+
+/// The state for one `tools/call`: the connection's, bound to the session
+/// the call names in `_meta` (if it names one).
+fn call_state(state: &McpState, meta: Option<&CallMeta>) -> McpState {
+    let label = meta
+        .and_then(|m| m.session_id.as_deref())
+        .and_then(|id| state.order_session_label(id));
+    state.with_order_session(label)
 }
 
 async fn tools_call(state: &McpState, params: Value) -> Result<Value, JrpcError> {
@@ -209,7 +225,8 @@ async fn tools_call(state: &McpState, params: Value) -> Result<Value, JrpcError>
         message: format!("bad tools/call params: {e}"),
     })?;
 
-    let outcome = tools::dispatch_sanitized(state, &params.name, params.arguments, None).await;
+    let state = call_state(state, params.meta.as_ref());
+    let outcome = tools::dispatch_sanitized(&state, &params.name, params.arguments, None).await;
     Ok(tool_result_value(outcome))
 }
 
@@ -286,6 +303,7 @@ fn sse_tools_call(state: McpState, id: Value, params: Value) -> Response {
             }
         };
 
+        let state = call_state(&state, meta.as_ref());
         let token = meta.and_then(|m| m.progress_token);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
         let sink = ProgressSink::new(tx, token);

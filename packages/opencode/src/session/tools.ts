@@ -23,6 +23,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { isRecord } from "@/util/record"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Norm } from "@/norm/norm"
 
 const MCP_RESOURCE_TOOLS = {
   list: "list_mcp_resources",
@@ -388,7 +389,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   if (flags.experimentalCodeMode) return tools
 
   for (const [key, entry] of Object.entries(yield* mcp.tools())) {
-    const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout)
+    const item = McpCatalog.convertTool(entry.def, entry.client, entry.timeout, () =>
+      Norm.mcpCallMeta(key, input.session.id),
+    )
     const execute = item.execute
     if (!execute) continue
 
