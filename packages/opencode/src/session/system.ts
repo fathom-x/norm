@@ -30,7 +30,8 @@ export function provider(model: Provider.Model) {
   // norm: models served by the overpay provider run against owallet's
   // server-side marketplace tool loop — append the addendum that redirects
   // capability questions from the opencode docs to the attached tools.
-  if (model.providerID === Norm.PROVIDER_ID && !Norm.disabled()) parts.push(Norm.systemPrompt())
+  if (model.providerID === Norm.PROVIDER_ID && !Norm.disabled())
+    return [...parts.map(Norm.renameAgent), Norm.systemPrompt()]
   return parts
 }
 

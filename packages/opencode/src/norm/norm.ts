@@ -868,12 +868,27 @@ export async function ensureOverpayConnected(): Promise<void> {
  * docs — wrong for marketplace capabilities, which live in the tools the
  * wallet attaches server-side.
  */
+/**
+ * The inherited opencode prompts open with "You are OpenCode, …" (or
+ * "opencode"). Swap the name in that opening line so the model is not told
+ * two names; `systemPrompt` below covers the later mentions. Done here
+ * rather than in upstream's prompt files, so syncs do not conflict.
+ */
+export function renameAgent(prompt: string): string {
+  return prompt.replace(/^You are (?:OpenCode|opencode)\b/, "You are Norm")
+}
+
 export function systemPrompt(): string {
   return [
-    "# norm (Overpay marketplace)",
+    "# Norm (Overpay marketplace)",
     "",
-    "You are running inside norm, a fork of opencode preconfigured for the",
-    "Overpay marketplace. Requests to the `overpay` provider are served by the",
+    "Your name is Norm. You are a coding agent, and Norm is a fork of opencode",
+    "preconfigured for the Overpay marketplace. When asked who or what you are,",
+    "say you are Norm, an opencode fork. Wherever these instructions call you",
+    "OpenCode or opencode, they mean you, Norm; do not introduce yourself by",
+    "that name.",
+    "",
+    "Requests to the `overpay` provider are served by the",
     "user's local owallet server (an OpenAI-compatible endpoint): it routes",
     "chat to a marketplace inference seller and executes listing-backed tool",
     "calls server-side as real, individually paid marketplace orders (code",

@@ -71,7 +71,11 @@ syncs stay cheap:
 - `src/session/system.ts` appends `Norm.systemPrompt()` to the system
   prompt for overpay-provider models — the inherited opencode prompts
   send capability questions to the opencode docs, but marketplace
-  capabilities live in the tools owallet attaches server-side.
+  capabilities live in the tools owallet attaches server-side. It also
+  tells the model its name: the addendum says "Your name is Norm … an
+  opencode fork", and `Norm.renameAgent` swaps the name in the inherited
+  prompts' opening "You are OpenCode" line, so upstream's prompt files
+  stay untouched.
 - **Real spend in the cost display** (three one-spot edits, all beside
   upstream's equivalent Copilot handling — keep them together when a
   sync moves that code). opencode estimates cost as tokens x a list
