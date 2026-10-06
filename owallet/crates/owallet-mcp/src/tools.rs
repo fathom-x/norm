@@ -100,7 +100,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_wallet_orders",
-            description: "Free — a read, no order is placed and nothing is billed. Fetch the active wallet's orders. Requires authorization.",
+            description: "Free — a read, no order is placed and nothing is billed. List the active wallet's orders, newest first: each row gives when the order was placed, the amount authorized and what was finally charged, and the list ends with the total charged. Use it to answer what recent orders or messages cost; no per-order lookup is needed for that. Requires authorization.",
             input_schema: schema_object(json!({
                 "status":             {"type": "string", "description": ORDER_STATUS_FILTER_HINT},
                 "fulfillment_status": {"type": "string", "description": ORDER_STATUS_FILTER_HINT},

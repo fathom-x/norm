@@ -4,6 +4,15 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### `get_wallet_orders` answers "what did these cost"
+
+- Each row now shows when the order was placed (`2026-10-05 17:55Z`), and
+  the list ends with the total charged for the paid orders listed, beside
+  the total authorized when the two differ. The closing hint and the tool
+  description say the per-row charge is the order's cost. A model asked
+  what a conversation had spent used to open every order with
+  `get_order_status` to read the charge and tell the turns apart.
+
 ### Every request signed by the wallet key
 
 - With a stored Overpay token, owallet now also signs every request with
