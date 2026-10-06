@@ -187,6 +187,35 @@ test("system prompt addendum rides overpay models only", async () => {
 // Claims a live session caught the prompt making falsely: that attached tools
 // are the whole marketplace, that every read carries as_of, and silence on
 // where deposit addresses live.
+test("the model is told its name is Norm, an opencode fork", async () => {
+  expect(Norm.systemPrompt()).toContain("Your name is Norm.")
+  expect(Norm.systemPrompt()).toContain("say you are Norm, an opencode fork")
+
+  // Every inherited prompt opens by naming the agent; none may still say OpenCode.
+  const dir = path.join(import.meta.dir, "../../src/session/prompt")
+  const names = ["anthropic", "beast", "codex", "default", "gemini", "gpt", "kimi", "meta", "trinity"]
+  for (const name of names) {
+    const renamed = Norm.renameAgent(await fs.readFile(path.join(dir, `${name}.txt`), "utf8"))
+    expect(renamed.startsWith("You are Norm"), name).toBe(true)
+  }
+  // Through the real builder, for an overpay model only.
+  const { SystemPrompt } = await import("@/session/system")
+  const saved = process.env.NORM_DISABLE
+  delete process.env.NORM_DISABLE
+  try {
+    const overpay = SystemPrompt.provider({ providerID: Norm.PROVIDER_ID, api: { id: "gpt-5" } } as any)
+    expect(overpay[0].startsWith("You are Norm")).toBe(true)
+    expect(overpay.at(-1)).toContain("Your name is Norm.")
+    const other = SystemPrompt.provider({ providerID: "openai", api: { id: "gpt-5" } } as any)
+    expect(other[0].startsWith("You are OpenCode")).toBe(true)
+  } finally {
+    if (saved === undefined) delete process.env.NORM_DISABLE
+    else process.env.NORM_DISABLE = saved
+  }
+  // Only the opening line changes.
+  expect(Norm.renameAgent("Docs: opencode.ai\nYou are opencode")).toBe("Docs: opencode.ai\nYou are opencode")
+})
+
 test("system prompt describes the catalog, addresses and paid-call retries honestly", () => {
   process.env.NORM_OWALLET_URL = "http://127.0.0.1:9999"
   try {
