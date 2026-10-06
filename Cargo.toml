@@ -48,6 +48,29 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # Dev / test
 tempfile = "3"
 
+# Tests unlock a wallet database, and every unlock runs PBKDF2. Unoptimised,
+# that key derivation alone took ~35 s per test and the suite 20-30 min in CI.
+# Optimise just the crates on that path in dev and test builds; everything
+# else stays unoptimised, so rebuilds of our own code are as quick as before.
+# The generic PBKDF2 loop is instantiated in owallet-crypto (kdf.rs), so the
+# loop itself is compiled there: without this one, the rest buy little.
+[profile.dev.package.owallet-crypto]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.digest]
+opt-level = 3
+[profile.dev.package.block-buffer]
+opt-level = 3
+[profile.dev.package.crypto-common]
+opt-level = 3
+[profile.dev.package.generic-array]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
