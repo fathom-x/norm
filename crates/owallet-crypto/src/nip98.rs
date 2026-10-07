@@ -1,6 +1,7 @@
 //! NIP-98 — HTTP authentication via signed Nostr events.
 //!
-//! Ports `_sign_nip98(url, method)` from `wallet_mcp/server.py:1383-1409`.
+//! A thin wrapper over the standalone `overpay-nip98` crate (shared with
+//! the Overpay SDK) that takes the wallet's [`PrivateKey`].
 //!
 //! Wire format: a kind-27235 Nostr event (with `u` and `method` tags),
 //! signed BIP-340 schnorr against the canonical event JSON, the whole event
@@ -9,44 +10,30 @@
 //!
 //! [`sign_with_body`] adds NIP-98's `payload` tag — the hex SHA-256 of the
 //! exact request body — so the signature covers what is being bought, not
-//! just the URL: Overpay checks it against the body it received and stores
+//! just the URL: Overpay can check it against the body it received and keep
 //! the event as the buyer's authorization of the spend.
-
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use base64::engine::general_purpose::STANDARD as BASE64;
-use base64::Engine;
-use secp256k1::{Keypair, Message, Secp256k1, SecretKey};
-use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::hd::PrivateKey;
 
-const NIP98_KIND: u32 = 27235;
-
-/// JSON shape of a signed Nostr event, including `id` and `sig`.
-#[derive(Debug, Serialize)]
-pub struct SignedEvent {
-    pub id: String,
-    pub pubkey: String,
-    pub created_at: i64,
-    pub kind: u32,
-    pub tags: Vec<Vec<String>>,
-    pub content: String,
-    pub sig: String,
-}
+pub use overpay_nip98::{InvalidKey, Nip98Signer, SignedEvent};
 
 /// Build a NIP-98 event for `(method, url)` and produce the
-/// `Authorization: Nostr <b64>` header value.
-pub fn sign(sk: &PrivateKey, url: &str, method: &str) -> String {
-    sign_at(sk, url, method, now_secs(), rand_aux())
+/// `Authorization: Nostr <b64>` header value. Fails if `sk` is not a valid
+/// secp256k1 secret key (zero, or not below the curve order).
+pub fn sign(sk: &PrivateKey, url: &str, method: &str) -> Result<String, InvalidKey> {
+    overpay_nip98::sign(sk.as_bytes(), url, method)
 }
 
 /// [`sign`] covering a request body too: adds `["payload", sha256(body)]`.
 /// The body must be the exact bytes sent — the server hashes what it
 /// receives.
-pub fn sign_with_body(sk: &PrivateKey, url: &str, method: &str, body: &[u8]) -> String {
-    sign_event(sk, url, method, Some(body), now_secs(), rand_aux())
+pub fn sign_with_body(
+    sk: &PrivateKey,
+    url: &str,
+    method: &str,
+    body: &[u8],
+) -> Result<String, InvalidKey> {
+    overpay_nip98::sign_with_payload(sk.as_bytes(), url, method, body)
 }
 
 /// Deterministic [`sign_with_body`], for tests.
@@ -57,8 +44,8 @@ pub fn sign_with_body_at(
     body: &[u8],
     created_at: i64,
     aux_rand: [u8; 32],
-) -> String {
-    sign_event(sk, url, method, Some(body), created_at, aux_rand)
+) -> Result<String, InvalidKey> {
+    overpay_nip98::sign_with_payload_at(sk.as_bytes(), url, method, body, created_at, aux_rand)
 }
 
 /// Variant of [`sign`] that takes an explicit timestamp + aux randomness so
@@ -69,94 +56,51 @@ pub fn sign_at(
     method: &str,
     created_at: i64,
     aux_rand: [u8; 32],
-) -> String {
-    sign_event(sk, url, method, None, created_at, aux_rand)
+) -> Result<String, InvalidKey> {
+    overpay_nip98::sign_at(sk.as_bytes(), url, method, created_at, aux_rand)
 }
 
-fn sign_event(
-    sk: &PrivateKey,
-    url: &str,
-    method: &str,
-    body: Option<&[u8]>,
-    created_at: i64,
-    aux_rand: [u8; 32],
-) -> String {
-    let secp = Secp256k1::new();
-    let secret = SecretKey::from_slice(sk.as_bytes()).expect("PrivateKey enforces 32-byte input");
-    let kp = Keypair::from_secret_key(&secp, &secret);
-    let xonly = kp.x_only_public_key().0.serialize();
-    let pubkey_hex = hex::encode(xonly);
-
-    let mut tags = vec![
-        vec!["u".to_string(), url.to_string()],
-        vec!["method".to_string(), method.to_uppercase()],
-    ];
-    if let Some(body) = body {
-        tags.push(vec![
-            "payload".to_string(),
-            hex::encode(Sha256::digest(body)),
-        ]);
+/// Lets the Overpay SDK sign requests with a wallet key without seeing
+/// its bytes.
+impl Nip98Signer for PrivateKey {
+    fn sign_nip98_payload(
+        &self,
+        url: &str,
+        method: &str,
+        payload: Option<&[u8]>,
+    ) -> Result<String, InvalidKey> {
+        match payload {
+            Some(body) => sign_with_body(self, url, method, body),
+            None => sign(self, url, method),
+        }
     }
-    let content = String::new();
-
-    let id = compute_id(&pubkey_hex, created_at, NIP98_KIND, &tags, &content);
-    let id_bytes = hex::decode(&id).expect("compute_id returns valid hex");
-    let id_arr: [u8; 32] = id_bytes
-        .as_slice()
-        .try_into()
-        .expect("sha256 always produces 32 bytes");
-    let msg = Message::from_digest(id_arr);
-    let sig = secp.sign_schnorr_with_aux_rand(&msg, &kp, &aux_rand);
-
-    let event = SignedEvent {
-        id,
-        pubkey: pubkey_hex,
-        created_at,
-        kind: NIP98_KIND,
-        tags,
-        content,
-        sig: hex::encode(sig.as_ref()),
-    };
-
-    let json = serde_json::to_string(&event).expect("event serialises");
-    format!("Nostr {}", BASE64.encode(json.as_bytes()))
-}
-
-/// Compute the canonical NIP-01 event id: SHA-256 of the JSON-serialised
-/// array `[0, pubkey, created_at, kind, tags, content]` with no extra
-/// whitespace.
-fn compute_id(
-    pubkey: &str,
-    created_at: i64,
-    kind: u32,
-    tags: &[Vec<String>],
-    content: &str,
-) -> String {
-    // Build the canonical array via serde_json::Value to guarantee the
-    // separator-less, no-extra-whitespace output that NIP-01 mandates.
-    let value = serde_json::json!([0, pubkey, created_at, kind, tags, content]);
-    let canon = serde_json::to_string(&value).expect("Value serialises");
-    let mut hasher = Sha256::new();
-    hasher.update(canon.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn rand_aux() -> [u8; 32] {
-    let mut aux = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut aux);
-    aux
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine;
+    use secp256k1::{Message, Secp256k1};
+    use sha2::{Digest, Sha256};
+
+    /// The NIP-01 event id: sha256 of `[0, pubkey, created_at, kind, tags,
+    /// content]`, hex — recomputed here to check what the signer produced.
+    fn compute_id(
+        pubkey: &str,
+        created_at: i64,
+        kind: u32,
+        tags: &[Vec<String>],
+        content: &str,
+    ) -> String {
+        let canonical = serde_json::to_string(&serde_json::json!([
+            0, pubkey, created_at, kind, tags, content
+        ]))
+        .unwrap();
+        hex::encode(Sha256::digest(canonical.as_bytes()))
+    }
+
+    const NIP98_KIND: u32 = overpay_nip98::KIND;
     use crate::bip39::Mnemonic;
     use crate::hd::{derive_from_mnemonic, EVM_HD_PATH};
 
@@ -171,7 +115,7 @@ mod tests {
     #[test]
     fn header_has_nostr_prefix_and_base64_body() {
         let sk = fixture_sk();
-        let header = sign(&sk, "https://example.com/api", "GET");
+        let header = sign(&sk, "https://example.com/api", "GET").unwrap();
         assert!(header.starts_with("Nostr "));
         let b64 = &header[6..];
         // The base64 body should decode to JSON containing the expected fields.
@@ -190,7 +134,7 @@ mod tests {
     #[test]
     fn method_is_uppercased() {
         let sk = fixture_sk();
-        let header = sign(&sk, "https://example.com", "post");
+        let header = sign(&sk, "https://example.com", "post").unwrap();
         let b64 = &header[6..];
         let json_bytes = BASE64.decode(b64).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
@@ -207,14 +151,17 @@ mod tests {
     fn body_signature_carries_payload_tag() {
         let sk = fixture_sk();
         let body = br#"{"listing_id":"abc","buyer_note":"hi"}"#;
-        let v = decode(&sign_with_body_at(
-            &sk,
-            "https://example.com/api/v1/orders",
-            "POST",
-            body,
-            1_700_000_000,
-            [0x22u8; 32],
-        ));
+        let v = decode(
+            &sign_with_body_at(
+                &sk,
+                "https://example.com/api/v1/orders",
+                "POST",
+                body,
+                1_700_000_000,
+                [0x22u8; 32],
+            )
+            .unwrap(),
+        );
         assert_eq!(v["tags"][2][0], "payload");
         assert_eq!(v["tags"][2][1], hex::encode(Sha256::digest(body)));
 
@@ -233,7 +180,7 @@ mod tests {
     #[test]
     fn signature_without_body_has_no_payload_tag() {
         let sk = fixture_sk();
-        let v = decode(&sign(&sk, "https://example.com", "GET"));
+        let v = decode(&sign(&sk, "https://example.com", "GET").unwrap());
         assert_eq!(v["tags"].as_array().unwrap().len(), 2);
     }
 
@@ -243,8 +190,8 @@ mod tests {
     fn deterministic_with_fixed_aux() {
         let sk = fixture_sk();
         let aux = [0xaau8; 32];
-        let a = sign_at(&sk, "https://example.com", "GET", 1_700_000_000, aux);
-        let b = sign_at(&sk, "https://example.com", "GET", 1_700_000_000, aux);
+        let a = sign_at(&sk, "https://example.com", "GET", 1_700_000_000, aux).unwrap();
+        let b = sign_at(&sk, "https://example.com", "GET", 1_700_000_000, aux).unwrap();
         assert_eq!(a, b);
     }
 
@@ -259,7 +206,8 @@ mod tests {
             "GET",
             1_700_000_000,
             [0x11u8; 32],
-        );
+        )
+        .unwrap();
         let b64 = &header[6..];
         let json_bytes = BASE64.decode(b64).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&json_bytes).unwrap();
@@ -274,5 +222,17 @@ mod tests {
         let sig = secp256k1::schnorr::Signature::from_slice(&sig_bytes).unwrap();
         let pk = secp256k1::XOnlyPublicKey::from_slice(&pubkey_bytes).unwrap();
         secp.verify_schnorr(&sig, &msg, &pk).expect("valid sig");
+    }
+
+    /// `PrivateKey` only checks its length, so a zero key reaches the
+    /// signer: it must come back as an error, not a panic.
+    #[test]
+    fn an_invalid_key_is_an_error() {
+        let zero = PrivateKey([0u8; 32]);
+        assert_eq!(sign(&zero, "https://example.com", "GET"), Err(InvalidKey));
+        assert_eq!(
+            zero.sign_nip98_payload("https://example.com", "POST", Some(b"{}")),
+            Err(InvalidKey)
+        );
     }
 }

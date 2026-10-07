@@ -12,6 +12,9 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt;
+use overpay_sdk::flows::{OrderWaiter, Until, WaitState};
+use overpay_sdk::FulfillmentStatus;
 use owallet_overpay::models::{ListingFilters, OrderFilters};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -164,7 +167,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         ToolSpec {
             name: "wait_for_order",
             description:
-                "Free — a read, no order is placed and nothing is billed. Poll until the order reaches `until_status` (default \"delivered\") or a terminal status (failed / cancelled), then return its final snapshot plus `waited_seconds` and `timed_out`. Caches terminal orders and strips large delivered_content unless `include_delivered_content` is true. When the call is streamed (Accept: text/event-stream plus a `_meta.progressToken`) and the seller publishes its work in progress, each progress notification carries the newly generated text in `data.delta`.",
+                "Free — a read, no order is placed and nothing is billed. Poll until the order reaches `until_status` (default \"delivered\") or a terminal status (delivered / failed / cancelled / rejected), then return its final snapshot plus `waited_seconds` and `timed_out`. Caches terminal orders and strips large delivered_content unless `include_delivered_content` is true. When the call is streamed (Accept: text/event-stream plus a `_meta.progressToken`) and the seller publishes its work in progress, each progress notification carries the newly generated text in `data.delta`.",
             input_schema: schema_with_required(
                 json!({
                     "order_id":                  {"type": "string"},
@@ -265,7 +268,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "load_core_credits",
-            description: "The call itself is not billed and moves no money — the returned invoice moves real money only when paid from a Lightning wallet. Create a Lightning invoice to load Overpay core credits. Returns a BOLT11 invoice with a scannable QR code. Pay from any Lightning wallet; credits are funded automatically once the invoice settles. Call wait_for_order(order_id, until_status=\"paid\") to confirm payment.",
+            description: "The call itself is not billed and moves no money — the returned invoice moves real money only when paid from a Lightning wallet. Create a Lightning invoice to load Overpay core credits. Returns a BOLT11 invoice with a scannable QR code. Pay from any Lightning wallet; credits are funded automatically once the invoice settles. Call wait_for_order(order_id, until_status=\"delivered\") to confirm the credits land.",
             input_schema: schema_with_required(
                 json!({
                     "amount_usd": {"type": "number", "description": "Amount to load in USD (must meet the site minimum)"},
@@ -743,7 +746,8 @@ async fn get_account_info(state: &McpState) -> Result<Value, ToolError> {
         Some(Ok(acct)) => {
             result.insert("account".into(), acct);
         }
-        Some(Err(OverpayError::HttpStatus { status, .. })) => {
+        Some(Err(OverpayError::Api(e))) => {
+            let status = e.status;
             let hint = match status {
                 401 | 403 => {
                     "Not authorized — run `owallet authorize` to link your Overpay account."
@@ -1389,14 +1393,6 @@ fn default_poll() -> u64 {
     5
 }
 
-/// Terminal statuses that short-circuit the polling loop alongside the
-/// caller-supplied `until_status`. Matches `_WAIT_TERMINAL_STATUSES`
-/// referenced by `server.py:2022`. `pub(crate)`: also used by
-/// `openai_compat`'s own order-polling loop. `rejected` is a seller's
-/// refusal of a paid order before fulfilling it (metered pricing: the
-/// credits are released in full, the reason is in `rejection`).
-pub(crate) const WAIT_TERMINAL_STATUSES: &[&str] = &["failed", "cancelled", "rejected"];
-
 async fn wait_for_order(
     state: &McpState,
     args: Value,
@@ -1413,60 +1409,52 @@ async fn wait_for_order(
     let poll = args.poll_interval_seconds.clamp(1, 60);
 
     let (_npub, auth) = state.resolve_owned_auth()?;
-    let start = std::time::Instant::now();
+    // Raw Rails passthrough — each snapshot is `{"data": {...}}` so the tool
+    // output shape matches Python (fathom-x/overpay#288). Offloaded content
+    // is not fetched here; the result points at it instead.
+    let waiter = OrderWaiter::new(state.overpay.sdk(), &args.order_id, auth.as_auth())
+        .until(Until::Status(FulfillmentStatus::from(
+            args.until_status.as_str(),
+        )))
+        .resolve_delivered(false)
+        .stop_before_overrun()
+        .timeout(Duration::from_secs(timeout))
+        .poll_interval(Duration::from_secs(poll));
+    let mut events = std::pin::pin!(waiter.events());
     // Counts polls that found the order still in flight — the `progress`
     // value on each streamed `notifications/progress`.
     let mut tick = 0u64;
-    // Bytes of the seller's in-flight output already forwarded to the
-    // client, so each poll emits only what is new.
-    let mut streamed = 0usize;
-    loop {
-        // Raw Rails passthrough — `snap` is `{"data": {...}}` so the
-        // tool output shape matches Python (fathom-x/overpay#288).
-        let snap = state
-            .overpay
-            .get_order_value(&args.order_id, auth.as_auth())
-            .await?;
-        let status = snap
-            .get("data")
-            .and_then(|d| d.get("fulfillment_status"))
-            .or_else(|| snap.get("fulfillment_status"))
-            .and_then(|v| v.as_str());
-
-        let elapsed = start.elapsed().as_secs();
-        let target_hit = status == Some(args.until_status.as_str());
-        let terminal_hit = status
-            .map(|s| WAIT_TERMINAL_STATUSES.contains(&s))
-            .unwrap_or(false);
-
-        if target_hit || terminal_hit {
+    while let Some(event) = events.next().await {
+        let event = event?;
+        let elapsed = event.elapsed.as_secs();
+        if event.state != WaitState::Pending {
+            let mut snap = event.snapshot;
             maybe_cache_purchase(state, &snap);
-            let mut snap = snap;
             strip_content_if_url_present(&mut snap);
             if !args.include_delivered_content {
                 strip_large_delivered_content(state, &mut snap);
             }
-            return Ok(splice_wait_meta(snap, elapsed, false));
-        }
-        if elapsed + poll >= timeout {
-            maybe_cache_purchase(state, &snap);
-            let mut snap = snap;
-            strip_content_if_url_present(&mut snap);
-            if !args.include_delivered_content {
-                strip_large_delivered_content(state, &mut snap);
-            }
-            return Ok(splice_wait_meta(snap, elapsed, true));
+            return Ok(splice_wait_meta(
+                snap,
+                elapsed,
+                event.state == WaitState::TimedOut,
+            ));
         }
 
         // Still in flight — stream a progress update to SSE clients that
-        // opted in, then wait out the poll interval. Inert (no allocation
-        // sent) when the call is buffered or no `progressToken` was given.
+        // opted in. Inert (no allocation sent) when the call is buffered or
+        // no `progressToken` was given.
         if let Some(sink) = progress {
             if sink.wants_progress() {
                 tick += 1;
+                let status = event
+                    .snapshot
+                    .get("data")
+                    .and_then(|d| d.get("fulfillment_status"))
+                    .or_else(|| event.snapshot.get("fulfillment_status"))
+                    .and_then(|v| v.as_str());
                 let status_label = status.unwrap_or("unknown");
-                let (partial, seq) = partial_output(&snap);
-                let delta = new_output_since(partial, &mut streamed);
+                let delta = event.delta.as_deref();
 
                 // When the seller is producing text, the delta *is* the
                 // news — send it as the message so a client rendering the
@@ -1488,50 +1476,16 @@ async fn wait_for_order(
                         "fulfillment_status": status,
                         "waited_seconds": elapsed,
                         "delta": delta,
-                        "partial_seq": seq,
+                        "partial_seq": event.partial_seq,
                     }),
                 );
             }
         }
-        tokio::time::sleep(Duration::from_secs(poll)).await;
     }
-}
-
-/// Read a seller's in-flight output out of an order snapshot: the
-/// accumulated text and the marketplace's sequence number for it. Both are
-/// absent until a seller streams something. `pub(crate)`: also used by
-/// `openai_compat`'s streaming chat-completions path.
-pub(crate) fn partial_output(snap: &Value) -> (Option<&str>, Option<u64>) {
-    let data = snap.get("data").unwrap_or(snap);
-    (
-        data.get("partial_content").and_then(Value::as_str),
-        data.get("partial_seq").and_then(Value::as_u64),
-    )
-}
-
-/// The part of `partial` not yet forwarded, advancing `streamed` past it.
-///
-/// The buffer is an append-only prefix, so the new text is whatever sits
-/// past the offset we last sent. Two cases break that assumption and both
-/// resynchronize rather than emitting garbage: the buffer shrinking (the
-/// marketplace clears it on delivery) and the offset landing mid-character
-/// (the buffer is capped on a character boundary, which can move it).
-pub(crate) fn new_output_since<'a>(
-    partial: Option<&'a str>,
-    streamed: &mut usize,
-) -> Option<&'a str> {
-    let partial = partial?;
-    if partial.len() <= *streamed {
-        *streamed = partial.len();
-        return None;
-    }
-    if !partial.is_char_boundary(*streamed) {
-        *streamed = partial.len();
-        return None;
-    }
-    let delta = &partial[*streamed..];
-    *streamed = partial.len();
-    Some(delta)
+    Err(ToolError::InvalidArg {
+        arg: "order_id",
+        reason: format!("stopped polling order {} before it finished", args.order_id),
+    })
 }
 
 /// Splice Python's `waited_seconds` + `timed_out` extra fields onto the
@@ -1752,7 +1706,7 @@ async fn sync_purchases(state: &McpState, args: Value) -> Result<Value, ToolErro
                 .ok()
                 .and_then(|db| db.read_purchase(&npub, oid).ok().flatten())
                 .and_then(|p| p.fulfillment_status)
-                .is_some_and(|s| s == "delivered" || WAIT_TERMINAL_STATUSES.contains(&s.as_str()));
+                .is_some_and(|s| FulfillmentStatus::from(s.as_str()).is_terminal());
             if cached_terminal {
                 skipped += 1;
                 continue;
@@ -2248,6 +2202,7 @@ fn schema_with_required(properties: Value, required: &[&str]) -> Value {
 #[cfg(test)]
 mod partial_output_tests {
     use super::*;
+    use overpay_sdk::flows::{new_output_since, partial_output};
 
     #[test]
     fn reads_the_buffer_out_of_the_rails_envelope() {

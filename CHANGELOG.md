@@ -21,6 +21,11 @@ All notable changes to the Rust port of `owallet` are documented here.
   or the marketplace predates the field and ignored the filter, every order
   is listed and the first line says these are all of the wallet's orders,
   not one conversation's.
+- In `overpay-sdk`: `CreateOrder::client_session_id`, the
+  `OrderQuery::client_session_id` filter, `Order::client_session_id`, and
+  the `invalid_client_session_id` error code. The pay flows
+  (`create_unpaid_order`, `create_paid_order`, `place_and_pay`) now take a
+  `CreateOrder`, so a label, variant or idempotency key rides along.
 
 ### `get_wallet_orders` answers "what did these cost"
 
@@ -37,7 +42,9 @@ All notable changes to the Rust port of `owallet` are documented here.
   front of Overpay answering with its own 403) used to be quoted in full
   in the error owallet returned: 221 KB of HTML reached a chat. The error
   now names the status and the page's title or heading; other bodies are
-  cut at 2,000 characters.
+  cut at 2,000 characters. This lives in `overpay-sdk` (`ApiError`'s
+  message, `describe_body`), so every SDK client gets it; the error keeps
+  the whole body in `ApiError::body`.
 
 ### Every request signed by the wallet key
 
@@ -50,7 +57,104 @@ All notable changes to the Rust port of `owallet` are documented here.
   turns, merchant-credit redeem / purchase / load), stores it with the
   order, and rejects a replayed signature. NIP-98-only requests (no token)
   carry the same payload tag in `Authorization: Nostr`.
-- `owallet credits load` signs its request too.
+- `owallet credits load` signs its request too, and so does `owallet
+  account` when the wallet key is available.
+- `overpay-sdk` does the signing: `Auth::BearerSigned(token, signer)` sends
+  the token plus `X-Nostr-Signature`, and the transport serialises each
+  body once, signs those bytes (the NIP-98 `payload` tag, for `Nip98` too)
+  and sends them unchanged, re-signing every retry. `Nip98Signer` gains a
+  required `sign_nip98_payload(url, method, payload)`; `sign_nip98` is now
+  provided, so outside implementors must add the new method.
+- Signing is fallible: `Nip98Signer` methods and `overpay-nip98`'s
+  raw-key functions return `Result<_, InvalidKey>` instead of panicking on
+  a key that isn't a valid secp256k1 scalar (owallet's `PrivateKey` only
+  checks length). The SDK reports it as `Error::Sign` without sending the
+  request. `Pkce`'s `Debug` no longer prints the verifier.
+
+### `overpay-sdk`: a client SDK for the Overpay API
+
+- New crates: `overpay-sdk` (the marketplace API client), `overpay-nip98`
+  (standalone NIP-98 signing, now behind `owallet-crypto::nip98`) and
+  `overpay-sdk-codegen` (generates the SDK's enums and operation table
+  from the API's OpenAPI spec).
+- The SDK carries the API's spec and contract fixtures (`spec/`, synced
+  from the Overpay repo by `bin/sync-openapi`); its tests round-trip every
+  fixture through the typed models and check that every buyer operation
+  is implemented.
+- Typed models that keep every field the API sends, raw JSON on demand,
+  machine-readable error codes, safe retries (GETs, and order creation
+  under an automatic `Idempotency-Key`), and the buyer flows: place and
+  pay with credits, wait for and stream an order's output, offloaded
+  deliverables, spend sessions, provider-tool discovery, pagination and
+  the OAuth PKCE login.
+
+### owallet runs on `overpay-sdk`
+
+- Every Overpay request goes through the SDK; `owallet-overpay` is now a
+  thin adapter keeping owallet's call shapes and output.
+- Order polling (MCP `wait_for_order`, `/v1` turns and tool runs) is the
+  SDK's `OrderWaiter`; paying is its pay flows; the `/v1` tool registry,
+  listing lookups, `install`'s catalog fetch and both OAuth logins use its
+  discovery, resolver and `PkceFlow`.
+- The `/v1` tool registry now sees every marked listing, not just those
+  on the catalog's first page (Rails caps a page at 20).
+- GETs are retried through transient failures (connection errors, 429,
+  502, 503, 504), and order creation carries an `Idempotency-Key` and is
+  retried where it certainly wasn't acted on (connection refused, 429,
+  503).
+- "No credits" errors are recognized by the API's error code rather than
+  by the word "credits" in the response.
+- `OrderWaiter` fills a streaming buffer the marketplace left out as
+  unchanged (a conditional `since_seq` poll) back into each snapshot, so
+  MCP `wait_for_order`'s final snapshot — timed out included — keeps the
+  output so far. `Until::Status` takes a `FulfillmentStatus` and also stops
+  on `delivered`, which an order can reach without passing the target.
+- `OrderWaiter` keeps to its timeout: a poll after the first that is
+  still unanswered about one poll interval past the timeout ends the wait
+  as timed out (with the previous snapshot); the last sleep is cut short
+  so the final poll lands on the timeout; and `stop_before_overrun`
+  compares exact durations rather than whole seconds.
+- The SDK's pay flows are typed: `pay_with_credits` returns the
+  `Redemption`, `Settled`/`PayError::NotSettled` carry a
+  `PaymentOutcomeStatus` and `Settled.amount_redeemed_cents` is `Cents`.
+  A created order without an id is `Error::Json` (it was the empty
+  string, and `place_and_pay` redeemed against it), and
+  `create_paid_order` reports `InsufficientCredits` by the error's code,
+  not for every 402.
+- Cursor walks (`paginate`, `list_all`, provider-tool discovery, listing
+  lookups) stop at a cursor the server already handed out instead of
+  looping forever; discovery and lookups now share `paginate`. New
+  `flows::find_listing_id` for a one-off lookup, which `/v1` and
+  `install` use (each built a throwaway `ListingResolver`, so its cache
+  never helped). `ListingResolver` evicts expired hits and survives a
+  poisoned lock.
+- `owallet-overpay`'s `Auth` and `OverpayError` are now the SDK's
+  `Auth` and `Error`: an API error keeps its machine-readable code and
+  details (`OverpayError::Api(ApiError)`) instead of flattening to
+  `HttpStatus { status, body }`, and no call converts between the two.
+  owallet-overpay no longer re-exports `overpay_sdk` or `Pkce`.
+- `owallet-overpay` is now thin: every call it keeps is the SDK resource
+  call (`sdk.orders().get(..)`, `sdk.credits().redeem(..)`, …) read into
+  its raw `Value` or compat model; the hand-built requests and the ten
+  methods only its own tests called are gone. `with_public_url` (which
+  rebuilt the client) is `OverpayClient::with_urls(base, public)`. Two
+  wire changes: an order created without a note no longer sends
+  `"buyer_note": null`, and ids and seller slugs in paths are
+  percent-encoded.
+- The SDK's public types are `#[non_exhaustive]` — its errors, the
+  generated enums (a new error code or status in the spec is no longer a
+  breaking change), `Auth`, `Until`, `Body`, `DeliveredContent`, the
+  request options and the response models — so it can grow without
+  breaking callers. Build options with their constructors or
+  default-then-assign (`RetryPolicy::new`, `CreateSpendAuthorization::new`);
+  match errors with a wildcard arm. `WaitState` stays exhaustive: a wait
+  has exactly those outcomes. `OrderQuery`'s status filters take
+  `PaymentStatus` / `FulfillmentStatus`. reqwest's types are part of the
+  SDK's API (`Error::Transport`, `ClientBuilder::http_client`), and its
+  docs now say so.
+- `load_core_credits` now says to wait for `until_status="delivered"`:
+  `"paid"` is a payment status and never matched, so that wait could only
+  time out.
 
 ### Faster streaming in `/v1`
 

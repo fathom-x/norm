@@ -1,8 +1,5 @@
-//! OAuth 2.0 PKCE helpers (RFC 7636).
-//!
-//! Mirrors the verifier/challenge/state generation in `wallet_mcp/cli.py` and
-//! `wallet_mcp/server.py:746-826`. We use the `S256` challenge method
-//! exclusively — `plain` is rejected by modern OAuth servers.
+//! OAuth 2.0 PKCE helpers (RFC 7636). Only the `S256` challenge method:
+//! the marketplace rejects `plain`.
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -17,12 +14,23 @@ const VERIFIER_BYTES: usize = 32;
 const STATE_BYTES: usize = 16;
 
 /// One PKCE session: the verifier (kept secret), the challenge (sent to the
-/// authorization server), and an opaque CSRF-style state.
-#[derive(Debug, Clone)]
+/// authorization server), and an opaque CSRF-style state. `Debug` leaves
+/// the verifier out.
+#[derive(Clone)]
 pub struct Pkce {
     pub verifier: String,
     pub challenge: String,
     pub state: String,
+}
+
+impl std::fmt::Debug for Pkce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pkce")
+            .field("verifier", &"..")
+            .field("challenge", &self.challenge)
+            .field("state", &self.state)
+            .finish()
+    }
 }
 
 impl Pkce {
@@ -97,5 +105,13 @@ mod tests {
         hasher.update(verifier.as_bytes());
         let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
         assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    }
+
+    #[test]
+    fn debug_leaves_the_verifier_out() {
+        let pkce = Pkce::generate();
+        let debug = format!("{pkce:?}");
+        assert!(!debug.contains(&pkce.verifier), "{debug}");
+        assert!(debug.contains(&pkce.challenge));
     }
 }

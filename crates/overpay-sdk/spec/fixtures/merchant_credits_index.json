@@ -1,0 +1,27 @@
+{
+  "data": [
+    {
+      "id": "ead2b479-2d9f-43d8-b5a9-d043399b0791",
+      "holder_type": "seller",
+      "seller_slug": "alice-shop",
+      "seller_name": "aliceuser",
+      "balance_cents": 700,
+      "formatted_balance": "$7.00",
+      "total_purchased_cents": 700,
+      "total_redeemed_cents": 0,
+      "updated_at": "2026-10-02T21:00:22.746Z"
+    },
+    {
+      "id": "b0aa4ecf-b8c1-43e1-927c-e80183506b30",
+      "holder_type": "organization",
+      "organization_slug": "acme",
+      "organization_name": "Acme",
+      "core": false,
+      "balance_cents": 300,
+      "formatted_balance": "$3.00",
+      "total_purchased_cents": 300,
+      "total_redeemed_cents": 0,
+      "updated_at": "2026-10-02T21:00:22.756Z"
+    }
+  ]
+}

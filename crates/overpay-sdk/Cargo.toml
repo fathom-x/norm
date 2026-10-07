@@ -1,0 +1,36 @@
+[package]
+name = "overpay-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client SDK for the Overpay marketplace API: typed models, NIP-98/Bearer auth, retries with idempotency keys, and the buyer flows (place and pay, wait for delivery, spend sessions)."
+include = ["src/**", "spec/**", "tests/**", "Cargo.toml"]
+
+[features]
+# FakeOverpay: a wiremock marketplace serving the contract fixtures, for
+# tests of code built on this SDK.
+testing = ["dep:wiremock"]
+
+[dependencies]
+overpay-nip98 = { workspace = true }
+
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = "2"
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+base64 = "0.22"
+rand = { workspace = true }
+tokio = { version = "1", features = ["time"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+wiremock = { version = "0.6", optional = true }
+
+[dev-dependencies]
+# Turns the `testing` feature on for this crate's own tests.
+overpay-sdk = { path = ".", features = ["testing"] }
+overpay-sdk-codegen = { path = "../overpay-sdk-codegen" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "test-util"] }
+wiremock = "0.6"

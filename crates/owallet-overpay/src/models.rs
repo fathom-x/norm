@@ -27,27 +27,6 @@ fn unwrap_data_envelope(v: &serde_json::Value) -> &serde_json::Value {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OAuthRegisterRequest {
-    pub client_name: String,
-    pub redirect_uris: Vec<String>,
-    #[serde(default)]
-    pub grant_types: Vec<String>,
-    #[serde(default)]
-    pub response_types: Vec<String>,
-    #[serde(default)]
-    pub scope: Option<String>,
-    #[serde(default)]
-    pub token_endpoint_auth_method: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct OAuthRegisterResponse {
-    pub client_id: String,
-    #[serde(default)]
-    pub client_secret: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OAuthTokenResponse {
     pub access_token: String,
     #[serde(default)]
@@ -150,75 +129,6 @@ impl<'de> Deserialize<'de> for WebSessionResponse {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct Listing {
-    pub id: String,
-    /// Flat seller slug, as carried by some payloads. The Rails API instead
-    /// nests it under [`Listing::seller`]; the CLI prefers the nested object
-    /// and falls back to this.
-    #[serde(default)]
-    pub seller_slug: Option<String>,
-    /// Nested seller object as returned by the Rails API
-    /// (`{"name": ..., "slug": ...}`).
-    #[serde(default)]
-    pub seller: Option<Seller>,
-    #[serde(default)]
-    pub title: Option<String>,
-    /// Display price exactly as the API formats it (e.g. `"$0.01"`). The Rails
-    /// API sends this as a *string*, not a number, so we accept either form
-    /// and keep it as a string — mirroring the dynamically-typed tolerance of
-    /// the Python client (`wallet_mcp/cli.py:986-1018`).
-    #[serde(default, deserialize_with = "de_opt_stringish")]
-    pub price_usd: Option<String>,
-    /// Authoritative price in cents, when present — fractional for a
-    /// sub-cent listing (cents to 4 places, the marketplace's $0.000001
-    /// precision).
-    #[serde(default)]
-    pub price_cents: Option<f64>,
-    #[serde(default)]
-    pub category: Option<String>,
-    /// Opaque, pass-through: the Rails API returns this as a structured object
-    /// (e.g. `{"p50_seconds": 8, "p90_seconds": 16}`), not a string. Typed as
-    /// `Value` so a shape change here can't break the whole listings parse.
-    #[serde(default)]
-    pub delivery_eta: Option<serde_json::Value>,
-    #[serde(default)]
-    pub listing_type: Option<String>,
-}
-
-/// Seller sub-object on a [`Listing`].
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct Seller {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub slug: Option<String>,
-}
-
-/// Deserialize a field the API may send as a string *or* a number into an
-/// `Option<String>`. Absent/null → `None`. This keeps the client robust to the
-/// Rails API formatting prices as strings (`"$0.01"`) while still accepting a
-/// bare number, matching the Python client's `.get()` tolerance.
-fn de_opt_stringish<'de, D>(de: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    match Option::<serde_json::Value>::deserialize(de)? {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(s)) => Ok(Some(s)),
-        Some(serde_json::Value::Number(n)) => Ok(Some(n.to_string())),
-        Some(other) => Ok(Some(other.to_string())),
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct ListingsPage {
-    #[serde(default)]
-    pub data: Vec<Listing>,
-    #[serde(default)]
-    pub next_cursor: Option<String>,
-}
-
 /// Order summary returned by the buyer order endpoints. The Rails
 /// `orders_controller#order_json` emits `payment_status` /
 /// `tracking_number`, formats `total_usd` as a `"$0.12"` string, and
@@ -296,14 +206,6 @@ impl<'de> Deserialize<'de> for Order {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-pub struct OrdersPage {
-    #[serde(default)]
-    pub data: Vec<Order>,
-    #[serde(default)]
-    pub next_cursor: Option<String>,
-}
-
 /// One merchant-credit balance row. Rails emits two shapes
 /// (`api/v1/merchant_credits_controller.rb#credit_json`):
 ///
@@ -358,11 +260,6 @@ impl<'de> Deserialize<'de> for MerchantCredits {
 pub struct MerchantCreditsList {
     #[serde(default)]
     pub data: Vec<MerchantCredits>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct PurchaseCreditsRequest {
-    pub amount_cents: i64,
 }
 
 /// Response from `POST /api/v1/merchant_credits/{slug}/purchase`. The
@@ -445,46 +342,6 @@ impl<'de> Deserialize<'de> for PurchaseCreditsResponse {
             message: opt_string(o, "message"),
         })
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RedeemCreditsRequest {
-    pub order_id: String,
-}
-
-/// Response from `POST /api/v1/merchant_credits/{slug}/redeem`. The
-/// Rails controller wraps the body in a `{data: {...}}` envelope and
-/// emits `status` either as the string `"already_paid"` or as one of
-/// the redemption-service status symbols.
-#[derive(Debug, Clone, Serialize, Default)]
-pub struct RedeemCreditsResponse {
-    pub status: String,
-    #[serde(default)]
-    pub amount_redeemed_cents: f64,
-    #[serde(default)]
-    pub credit_balance_cents: f64,
-    #[serde(default)]
-    pub message: Option<String>,
-}
-
-impl<'de> Deserialize<'de> for RedeemCreditsResponse {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        use serde::de::Error;
-        let v = serde_json::Value::deserialize(d)?;
-        let o = unwrap_data_envelope(&v);
-        Ok(RedeemCreditsResponse {
-            status: opt_string(o, "status")
-                .ok_or_else(|| D::Error::custom("redeem response missing `status`"))?,
-            amount_redeemed_cents: opt_f64(o, "amount_redeemed_cents").unwrap_or(0.0),
-            credit_balance_cents: opt_f64(o, "credit_balance_cents").unwrap_or(0.0),
-            message: opt_string(o, "message"),
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct LoadCoreCreditsRequest {
-    pub amount_cents: i64,
 }
 
 /// Response from `POST /api/v1/merchant_credits/load`. The Rails controller

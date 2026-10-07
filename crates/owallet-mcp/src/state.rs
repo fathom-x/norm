@@ -62,6 +62,21 @@ pub enum OwnedAuth {
 }
 
 impl OwnedAuth {
+    /// The auth a wallet has on hand: its stored Overpay bearer, signed by
+    /// the wallet key when the seed is readable ([`Self::BearerSigned`]),
+    /// else a NIP-98 key derived from its seed. `None` when it has neither.
+    /// [`McpState::resolve_owned_auth`] is the same choice with its
+    /// failures spelled out.
+    #[must_use]
+    pub fn from_stored(token: Option<String>, seed: Option<&str>) -> Option<Self> {
+        let key = seed.and_then(|s| derive_from_stored_seed(s).ok());
+        match (token, key) {
+            (Some(token), Some(key)) => Some(Self::BearerSigned(token, key)),
+            (Some(token), None) => Some(Self::Bearer(token)),
+            (None, key) => key.map(Self::Nip98),
+        }
+    }
+
     pub fn as_auth(&self) -> Auth<'_> {
         match self {
             Self::Bearer(t) => Auth::Bearer(t),

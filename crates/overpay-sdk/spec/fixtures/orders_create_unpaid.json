@@ -1,0 +1,43 @@
+{
+  "data": {
+    "id": "459a52b5-791e-412c-bd90-bdbad19af0b2",
+    "payment_status": "pending",
+    "fulfillment_status": "pending",
+    "product_title": "Metered inference",
+    "free": false,
+    "product_price_cents": 25,
+    "product_price_usd": "$0.2500",
+    "total_usd_cents": 25,
+    "total_usd": "$0.2500",
+    "settled_amount_cents": 25,
+    "refunded_cents": 0,
+    "refund_status": "none",
+    "fulfillment_error": null,
+    "authorized_cents": null,
+    "captured_cents": null,
+    "released_cents": 0,
+    "rejection": null,
+    "spend_authorization_id": null,
+    "seller_revenue_cents": 25,
+    "platform_fee_cents": 0,
+    "platform_fee_usd": "$0.0000",
+    "buyer_note": "hello",
+    "variant_key": null,
+    "client_session_id": null,
+    "order_url": "http://www.example.com/orders/459a52b5-791e-412c-bd90-bdbad19af0b2",
+    "delivered_content_type": null,
+    "tracking_number": null,
+    "carrier": null,
+    "tracking_url": null,
+    "created_at": "2026-10-02T21:00:28.887Z",
+    "paid_at": null,
+    "delivered_at": null,
+    "expected_delivered_at": null,
+    "delivery_skew_seconds": null,
+    "settlement_tx_hash": null,
+    "listing": {
+      "id": "e090af4e-bdd1-4269-a5d2-d9cf517a4ee0",
+      "title": "Metered inference"
+    }
+  }
+}

@@ -26,6 +26,7 @@ bech32 = "0.11"
 tiny-keccak = { version = "2", features = ["keccak"] }
 
 # NIP-98 envelope
+overpay-nip98 = { workspace = true }
 base64 = "0.22"
 serde = { workspace = true }
 serde_json = { workspace = true }

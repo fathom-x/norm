@@ -3625,6 +3625,47 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
+name = "overpay-nip98"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "hex",
+ "rand 0.8.6",
+ "secp256k1 0.29.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroize",
+]
+
+[[package]]
+name = "overpay-sdk"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "futures-util",
+ "overpay-nip98",
+ "overpay-sdk",
+ "overpay-sdk-codegen",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "overpay-sdk-codegen"
+version = "0.0.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "owallet"
 version = "0.0.1"
 dependencies = [
@@ -3636,11 +3677,13 @@ dependencies = [
  "jsonc-parser",
  "libc",
  "open",
+ "overpay-sdk",
  "owallet-config",
  "owallet-crypto",
  "owallet-db",
  "owallet-evm",
  "owallet-http",
+ "owallet-mcp",
  "owallet-overpay",
  "owallet-zcash",
  "predicates",
@@ -3682,6 +3725,7 @@ dependencies = [
  "bip39",
  "hex",
  "hmac 0.12.1",
+ "overpay-nip98",
  "pbkdf2",
  "rand 0.8.6",
  "secp256k1 0.29.1",
@@ -3738,6 +3782,7 @@ dependencies = [
  "dashmap",
  "hex",
  "http-body-util",
+ "overpay-sdk",
  "owallet-crypto",
  "owallet-db",
  "owallet-evm",
@@ -3768,9 +3813,11 @@ dependencies = [
  "async-stream",
  "axum",
  "axum-test",
+ "futures-util",
  "hex",
  "hmac 0.12.1",
  "jsonschema",
+ "overpay-sdk",
  "owallet-crypto",
  "owallet-db",
  "owallet-evm",
@@ -3795,13 +3842,11 @@ name = "owallet-overpay"
 version = "0.0.1"
 dependencies = [
  "base64",
+ "overpay-sdk",
  "owallet-crypto",
- "rand 0.8.6",
- "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "thiserror 1.0.69",
  "tokio",
  "url",
  "wiremock",

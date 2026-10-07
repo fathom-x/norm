@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "id": "50b98650-adb4-4fcb-8550-1599a7bcf1c1",
+      "type": "spend",
+      "label": "Order Payment",
+      "created_at": "2026-10-02T21:00:24.557Z",
+      "amount_cents": 25,
+      "balance_before_cents": 1000,
+      "balance_after_cents": 975,
+      "credit_id": "410b47fd-be29-4ce0-a9a5-226d5d5e310f",
+      "holder_type": "seller",
+      "order_id": "1326fcde-aed4-430a-90de-7dcdd9d07783",
+      "order_title": "Metered inference",
+      "seller_slug": "alice-shop"
+    }
+  ],
+  "next_cursor": null
+}

@@ -9,7 +9,7 @@
 
 use owallet_crypto::{bip39_seed_from_stored, derive_from_stored_seed, Address};
 use owallet_db::{default_db_path, Database, WalletRow};
-use owallet_overpay::Auth;
+use owallet_mcp::state::OwnedAuth;
 
 use super::overpay::{block_on, client as overpay_client, host_key};
 use super::{open_unlock, zcash, CmdError, Result};
@@ -85,26 +85,14 @@ fn print_wallet_table(db: &Database, w: &WalletRow) -> Result<()> {
     // Fetch Overpay account info + merchant credits (best-effort).
     let stored_token = db.read_token(npub, &host_key())?;
     let seed = db.read_seed(npub)?;
-    let (overpay_info, credits_list) = if let Ok(client) = overpay_client() {
-        if let Some(t) = stored_token.as_deref() {
-            let info = block_on(async { client.account(Auth::Bearer(t)).await }).ok();
-            let credits =
-                block_on(async { client.list_merchant_credits(Auth::Bearer(t)).await }).ok();
-            (info, credits)
-        } else if let Some(s) = seed.as_deref() {
-            let maybe_sk = derive_from_stored_seed(s).ok();
-            let info = maybe_sk
-                .as_ref()
-                .and_then(|sk| block_on(async { client.account(Auth::Nip98(sk)).await }).ok());
-            let credits = maybe_sk.as_ref().and_then(|sk| {
-                block_on(async { client.list_merchant_credits(Auth::Nip98(sk)).await }).ok()
-            });
-            (info, credits)
-        } else {
-            (None, None)
-        }
-    } else {
-        (None, None)
+    // The same bearer-or-wallet-key choice the MCP tools make.
+    let auth = OwnedAuth::from_stored(stored_token, seed.as_deref());
+    let (overpay_info, credits_list) = match (overpay_client(), &auth) {
+        (Ok(client), Some(auth)) => (
+            block_on(async { client.account(auth.as_auth()).await }).ok(),
+            block_on(async { client.list_merchant_credits(auth.as_auth()).await }).ok(),
+        ),
+        _ => (None, None),
     };
 
     if let Some(info) = &overpay_info {

@@ -52,20 +52,12 @@ pub(crate) struct ProviderEntry {
     pub models: Vec<String>,
 }
 
-/// Matches `owallet_mcp::openai_compat::DEFAULT_MODEL` — kept as a plain
-/// literal rather than a cross-crate import since `install` has no other
-/// reason to depend on `owallet-mcp`. Used as the sole model in a
-/// provider entry when the live catalog can't be fetched (see
-/// `build_provider_entries`); a request against it works without a live
-/// catalog either, so the entry `install` writes is never a dead end.
-const DEFAULT_MODEL: &str = "default";
-
-/// The OpenRouter Inference listing — matches the `OPENROUTER_SELLER_SLUG`
-/// / `OPENROUTER_LISTING_TITLE` constants in `openai_compat.rs` (same
-/// reason as `DEFAULT_MODEL`: `install` deliberately doesn't depend on
-/// `owallet-mcp`). Keep the two in sync by hand if these ever change.
-const OPENROUTER_SELLER_SLUG: &str = "openrouter-bot";
-const OPENROUTER_LISTING_TITLE: &str = "OpenRouter Inference";
+// `DEFAULT_MODEL` is the sentinel model a provider entry falls back to when
+// the live catalog can't be fetched (see `build_provider_entries`); a
+// request against it works without a live catalog too, so the entry
+// `install` writes is never a dead end. Shared with `/v1`, as is how the
+// OpenRouter listing is found, so the two can't drift.
+use owallet_mcp::openai_compat::{DEFAULT_MODEL, OPENROUTER_LISTING_TITLE, OPENROUTER_SELLER_SLUG};
 
 pub fn run(args: InstallArgs<'_>) -> Result<()> {
     let entries = build_entries(args.cli, args.port)?;
@@ -335,28 +327,18 @@ fn fetch_models(rails_url: &str) -> std::result::Result<Vec<String>, String> {
     })
 }
 
-/// Resolve the OpenRouter Inference listing id by seller + title, mirroring
-/// `resolve_listing_id_cached` in `openai_compat.rs`.
+/// Resolve the OpenRouter Inference listing id by seller + title — the
+/// SDK's `find_listing_id`, as `/v1` uses.
 async fn resolve_openrouter_listing_id(
     client: &owallet_overpay::OverpayClient,
 ) -> std::result::Result<String, String> {
-    let page = client
-        .list_listings_value(&owallet_overpay::models::ListingFilters {
-            seller_slug: Some(OPENROUTER_SELLER_SLUG.to_string()),
-            limit: Some(20),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-
-    page.get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|l| l.get("title").and_then(Value::as_str) == Some(OPENROUTER_LISTING_TITLE))
-        .and_then(|l| l.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
+    overpay_sdk::flows::find_listing_id(
+        client.sdk(),
+        OPENROUTER_SELLER_SLUG,
+        OPENROUTER_LISTING_TITLE,
+    )
+    .await
+        .map_err(|e| e.to_string())?
         .ok_or_else(|| {
             format!(
                 "could not find a '{OPENROUTER_LISTING_TITLE}' listing from seller '{OPENROUTER_SELLER_SLUG}' — is its bot registered?"

@@ -863,7 +863,7 @@ fn render_load_credits(data: &Value) -> String {
 
     out.push_str(
         "Next: scan the QR code with any Lightning wallet, \
-         then call wait_for_order(order_id, until_status=\"paid\") to confirm payment.",
+         then call wait_for_order(order_id, until_status=\"delivered\") to confirm the credits land.",
     );
     out
 }
