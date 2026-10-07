@@ -1894,6 +1894,73 @@ async fn mcp_wait_for_order_timeout_returns_snap_with_timed_out_true() {
     assert!(text.contains("Timed out after"), "rendered text: {text}");
 }
 
+/// A streaming seller that stalls: the second poll is conditional
+/// (`since_seq=1`), so the marketplace leaves the unchanged buffer out. The
+/// timed-out snapshot must still carry the output so far — a client that
+/// didn't stream progress sees nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_wait_for_order_timeout_keeps_partial_output() {
+    let overpay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v1/orders/[A-Za-z0-9_-]+$"))
+        .respond_with(|req: &wiremock::Request| {
+            let conditional = req.url.query().is_some_and(|q| q.contains("since_seq=1"));
+            let mut data = json!({
+                "id": "ord_wait_3", "fulfillment_status": "processing", "partial_seq": 1,
+            });
+            if !conditional {
+                data["partial_content"] = json!("Once upon");
+            }
+            ResponseTemplate::new(200).set_body_json(json!({ "data": data }))
+        })
+        .mount(&overpay)
+        .await;
+
+    let tmp = TempDir::new().unwrap();
+    let s = router(&tmp, &overpay.uri());
+    let path = tmp.path().join("test.db");
+    let mut db = Database::open(&path).unwrap();
+    assert!(db.unlock("master-pw").unwrap());
+    db.write_wallet(
+        "npub1abandon",
+        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        Some("0xabc"),
+    )
+    .unwrap();
+    db.write_default_npub("npub1abandon").unwrap();
+    drop(db);
+
+    let res = s
+        .post("/mcp")
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "wait_for_order",
+                "arguments": {
+                    "order_id": "ord_wait_3",
+                    // Two polls: the second one times out (1s + 1s >= 2s).
+                    "timeout_seconds": 2,
+                    "poll_interval_seconds": 1,
+                }
+            }
+        }))
+        .await;
+    res.assert_status_ok();
+    let body: Value = res.json();
+    let snap = &body["result"]["structuredContent"];
+    assert_eq!(snap["timed_out"], true);
+    assert_eq!(snap["data"]["partial_content"], "Once upon");
+    let queries: Vec<Option<String>> = overpay
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.query().map(str::to_string))
+        .collect();
+    assert_eq!(queries, vec![None, Some("since_seq=1".into())]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_buy_no_usdc_seller_returns_error_dict_not_iserror() {
     let overpay = MockServer::start().await;

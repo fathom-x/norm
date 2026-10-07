@@ -81,12 +81,18 @@ use tokio::sync::OnceCell;
 
 use crate::progress::ProgressSink;
 use crate::state::{McpState, OwnedAuth, ResolveAuthError};
-use crate::tools::{new_output_since, partial_output, WAIT_TERMINAL_STATUSES};
-use owallet_overpay::models::ListingFilters;
-use owallet_overpay::{DeliveredContent, OverpayError};
+use futures_util::StreamExt;
+use overpay_sdk::flows::{
+    discover_provider_tools_where, find_listing_id, OrderWaiter, PayError, WaitState,
+};
+use overpay_sdk::models::Cents;
+use overpay_sdk::CreateOrder;
+use owallet_overpay::OverpayError;
 
-const OPENROUTER_SELLER_SLUG: &str = "openrouter-bot";
-const OPENROUTER_LISTING_TITLE: &str = "OpenRouter Inference";
+/// The OpenRouter Inference listing's seller and title — how `/v1` (and
+/// `owallet install`) find it in the catalog.
+pub const OPENROUTER_SELLER_SLUG: &str = "openrouter-bot";
+pub const OPENROUTER_LISTING_TITLE: &str = "OpenRouter Inference";
 const PYTHON_SELLER_SLUG: &str = "exec";
 const PYTHON_LISTING_TITLE: &str = "Run Python Code";
 pub(crate) const RUN_PYTHON_TOOL_NAME: &str = "run_python";
@@ -162,7 +168,7 @@ pub const TOOLS_HEADER: &str = "x-owallet-tools";
 /// `owallet install --opencode-*` write a working provider entry even when
 /// it couldn't reach a live server to fetch the real curated list — see
 /// `commands::install::build_provider_entries` in the `owallet` crate.
-const DEFAULT_MODEL: &str = "default";
+pub const DEFAULT_MODEL: &str = "default";
 
 /// Hard cap on OpenRouter turns per chat completion request. Was 4 when
 /// the only tool was `run_python` and every iteration implied a second
@@ -474,12 +480,12 @@ impl From<OverpayError> for OpenAiError {
         // ":free" ones included, is paid from credits — so turn it into a
         // payment error that says what to do instead of an opaque upstream
         // failure.
-        if let OverpayError::HttpStatus { status, body } = &e {
-            if (*status == 422 || *status == 402) && body.to_ascii_lowercase().contains("credits") {
-                return Self::PaymentRequired(format!(
-                    "no Overpay credits to pay for this request — {LOAD_CREDITS_HINT}"
-                ));
-            }
+        // The API's error code says so (`no_credits` / `insufficient_credits`);
+        // a server from before codes is matched on its message instead.
+        if e.is_insufficient_credits() {
+            return Self::PaymentRequired(format!(
+                "no Overpay credits to pay for this request — {LOAD_CREDITS_HINT}"
+            ));
         }
         Self::UpstreamFailure(e.to_string())
     }
@@ -741,29 +747,13 @@ async fn resolve_listing_id_cached(
         return Ok(id.clone());
     }
 
-    let page = state
-        .overpay
-        .list_listings_value(&ListingFilters {
-            seller_slug: Some(seller_slug.to_string()),
-            limit: Some(20),
-            ..Default::default()
-        })
-        .await?;
-
-    let id = page
-        .get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|l| l.get("title").and_then(Value::as_str) == Some(title))
-        .and_then(|l| l.get("id"))
-        .and_then(Value::as_str)
+    let id = find_listing_id(state.overpay.sdk(), seller_slug, title)
+        .await?
         .ok_or_else(|| {
             OpenAiError::internal(format!(
                 "could not find a '{title}' listing from seller '{seller_slug}' — is its bot registered?"
             ))
-        })?
-        .to_string();
+        })?;
 
     // Best-effort: a concurrent racer just resolves the same id again.
     let _ = cache.set(id.clone());
@@ -871,52 +861,38 @@ async fn listing_tools(ctx: &Ctx) -> Vec<ListingTool> {
 }
 
 pub(crate) async fn fetch_listing_tools(state: &McpState) -> Result<Vec<ListingTool>, OpenAiError> {
-    let page = state
-        .overpay
-        .list_listings_value(&ListingFilters {
-            limit: Some(100),
-            ..Default::default()
-        })
-        .await?;
+    // The SDK walks the whole catalog (Rails pages it 20 at a time) and
+    // fetches each marked listing's detail: the index deliberately omits
+    // the per-listing schemas and truncates descriptions (browsing stays
+    // cheap). Rails exposes the marker as a curated top-level field
+    // (`Listing#provider_tool`), like `delivery_eta` — the raw metadata
+    // hash never rides the public JSON. Propagating a failure means the
+    // registry is not cached and the next request retries whole.
+    // The hardcoded run_python path stays authoritative for its name, and
+    // nothing may shadow a wallet tool. First marked listing wins a
+    // within-registry collision. Candidates are filtered before their
+    // detail is fetched, so a skipped one costs no request.
+    let mut claimed = std::collections::HashSet::new();
+    let discovered = discover_provider_tools_where(state.overpay.sdk(), |name, row| {
+        valid_tool_name(name)
+            && name != RUN_PYTHON_TOOL_NAME
+            && !is_wallet_tool(name)
+            && row
+                .pointer("/seller/slug")
+                .and_then(Value::as_str)
+                .is_some()
+            && claimed.insert(name.to_string())
+    })
+    .await?;
     let mut tools: Vec<ListingTool> = Vec::new();
-    for listing in page
-        .get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        // Rails exposes the marker as a curated top-level field
-        // (`Listing#provider_tool`), like `delivery_eta` — the raw
-        // metadata hash never rides the public JSON.
-        let Some(name) = listing
-            .pointer("/provider_tool/name")
-            .and_then(Value::as_str)
-        else {
+    for found in &discovered {
+        let name = found.name.as_str();
+        let listing = &found.summary;
+        let listing_id = found.listing_id.as_str();
+        let Some(seller_slug) = found.seller_slug.as_deref() else {
             continue;
         };
-        // The hardcoded run_python path stays authoritative for its name,
-        // and nothing may shadow a wallet tool. First marked listing wins
-        // a within-registry collision.
-        if !valid_tool_name(name)
-            || name == RUN_PYTHON_TOOL_NAME
-            || is_wallet_tool(name)
-            || tools.iter().any(|t| t.name == name)
-        {
-            continue;
-        }
-        let (Some(listing_id), Some(seller_slug)) = (
-            listing.get("id").and_then(Value::as_str),
-            listing.pointer("/seller/slug").and_then(Value::as_str),
-        ) else {
-            continue;
-        };
-        // The index deliberately omits the per-listing schemas and
-        // truncates descriptions (browsing stays cheap), so fetch the
-        // full listing for the function parameters — same as
-        // `run_python_tool_def`. Propagating a failure means the registry
-        // is not cached and the next request retries whole.
-        let detail = state.overpay.get_listing_value(listing_id).await?;
-        let inner = detail.get("data").unwrap_or(&detail);
+        let inner = &found.detail;
         let schema = inner
             .get("buyer_note_schema")
             .cloned()
@@ -1054,29 +1030,24 @@ async fn poll_one_shot(
     poll: Duration,
     progress: Option<&ProgressSink>,
 ) -> Result<(Value, bool), OpenAiError> {
-    let start = Instant::now();
+    let mut events = std::pin::pin!(order_waiter(state, auth, order_id, timeout, poll).events());
     let mut tick = 0u64;
-    let mut streamed = 0usize;
-    let mut seen = None;
-    loop {
-        let polled = Instant::now();
-        let snap = poll_order(state, auth, order_id, &mut seen).await?;
-        let status = order_status(&snap);
-        if is_terminal(status) {
-            return Ok((snap, true));
-        }
-        if start.elapsed() >= timeout {
-            return Ok((snap, false));
+    while let Some(event) = events.next().await {
+        let event = event?;
+        match event.state {
+            WaitState::Done => return Ok((event.snapshot, true)),
+            WaitState::TimedOut => return Ok((event.snapshot, false)),
+            WaitState::Pending => {}
         }
         if let Some(sink) = progress.filter(|s| s.wants_progress()) {
             tick += 1;
-            let (partial, _seq) = partial_output(&snap);
-            let message = match new_output_since(partial, &mut streamed) {
+            let status = order_status(&event.snapshot);
+            let message = match event.delta.as_deref() {
                 Some(delta) => delta.to_string(),
                 None => format!(
                     "order {order_id} paid, {} — waited {}s",
                     status.unwrap_or("in flight"),
-                    start.elapsed().as_secs()
+                    event.elapsed.as_secs()
                 ),
             };
             sink.emit(
@@ -1086,8 +1057,29 @@ async fn poll_one_shot(
                 json!({"order_id": order_id, "fulfillment_status": status}),
             );
         }
-        pace(polled, poll).await;
     }
+    Err(wait_ended_early(order_id))
+}
+
+/// Polls `order_id` to a terminal status with an offloaded deliverable
+/// inlined (see [`get_order_resolved`]) — the SDK's [`OrderWaiter`], timed
+/// by the caller.
+fn order_waiter<'a>(
+    state: &'a McpState,
+    auth: &'a OwnedAuth,
+    order_id: &str,
+    timeout: Duration,
+    poll: Duration,
+) -> OrderWaiter<'a> {
+    OrderWaiter::new(state.overpay.sdk(), order_id, auth.as_auth())
+        .timeout(timeout)
+        .poll_interval(poll)
+}
+
+/// An [`OrderWaiter`] always ends on `Done` or `TimedOut`; this covers the
+/// impossible case without a panic in a request handler.
+fn wait_ended_early(order_id: &str) -> OpenAiError {
+    OpenAiError::UpstreamFailure(format!("order {order_id} stopped being polled"))
 }
 
 /// The tool result for a one-shot order that is paid but not yet
@@ -2451,14 +2443,10 @@ async fn place_and_pay_order(
         }
     }
 
-    let order = state
-        .overpay
-        .create_order_value(
-            listing_id,
-            Some(&note_str),
-            state.order_session.as_deref(),
-            auth.as_auth(),
-        )
+    let sdk = state.overpay.sdk();
+    let sdk_auth = auth.as_auth();
+    let order = sdk
+        .create_unpaid_order(&new_order(state, listing_id, &note_str), sdk_auth)
         .await?;
     let order_id = order
         .get("data")
@@ -2478,25 +2466,10 @@ async fn place_and_pay_order(
         }
     }
 
-    let redeem = state
-        .overpay
-        .redeem_merchant_credits_value(seller_slug, &order_id, auth.as_auth())
-        .await?;
-    let status = redeem
-        .get("data")
-        .and_then(|d| d.get("status"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if status != "fully_paid" && status != "already_paid" {
-        let message = redeem
-            .get("data")
-            .and_then(|d| d.get("message"))
-            .and_then(Value::as_str)
-            .unwrap_or("insufficient Overpay merchant credits");
-        return Err(OpenAiError::PaymentRequired(format!(
-            "{message} — {LOAD_CREDITS_HINT}"
-        )));
-    }
+    let redemption = sdk
+        .pay_with_credits(seller_slug, &order_id, sdk_auth)
+        .await
+        .map_err(pay_error)?;
 
     // The endpoint's own operating spend counts against the key's daily
     // budget too — a budget is a bound on what the key costs per day, not
@@ -2507,16 +2480,40 @@ async fn place_and_pay_order(
     // metered listing settles below it after delivery, so callers hand
     // the returned cents to [`net_key_budget_from_delivery`] once they
     // hold the terminal snapshot.
-    let mut redeemed_cents = 0.0;
-    if let Some(cents) = redeem
-        .pointer("/data/amount_redeemed_cents")
-        .and_then(Value::as_f64)
-    {
-        record_key_budget(state, key_id, cents / 100.0);
-        redeemed_cents = cents;
-    }
+    let redeemed = Some(redemption.amount_redeemed_cents.as_f64());
+    Ok((order_id, record_redeemed(state, key_id, redeemed)))
+}
 
-    Ok((order_id, redeemed_cents))
+/// Count a redemption against the key's daily budget; returns it in cents,
+/// sub-cent fractions kept (0 when the API didn't say).
+fn record_redeemed(state: &McpState, key_id: Option<&str>, redeemed: Option<f64>) -> f64 {
+    match redeemed {
+        Some(cents) => {
+            record_key_budget(state, key_id, cents / 100.0);
+            cents
+        }
+        None => 0.0,
+    }
+}
+
+/// An order that couldn't be paid, as the error the caller relays: what
+/// happened and how to load credits.
+fn pay_error(e: PayError) -> OpenAiError {
+    match e {
+        PayError::InsufficientCredits {
+            authorization_cents,
+            body,
+        } => OpenAiError::PaymentRequired(format!(
+            "not enough merchant credits to authorize {} for this turn ({body}) — {LOAD_CREDITS_HINT}",
+            fmt_usd_cents(authorization_cents)
+        )),
+        PayError::NotSettled { message, .. } => OpenAiError::PaymentRequired(format!(
+            "{} — {LOAD_CREDITS_HINT}",
+            message.as_deref().unwrap_or("insufficient Overpay merchant credits")
+        )),
+        PayError::Api(e) => e.into(),
+        other => OpenAiError::UpstreamFailure(other.to_string()),
+    }
 }
 
 /// Create and pay an order with a buyer-set authorization in one request
@@ -2530,54 +2527,27 @@ async fn place_authorized_order(
     authorization_cents: i64,
     key_id: Option<&str>,
 ) -> Result<(String, f64), OpenAiError> {
-    let resp = match state
+    let settled = state
         .overpay
-        .create_paid_order_value(
-            listing_id,
-            Some(note_str),
+        .sdk()
+        .create_paid_order(
+            &new_order(state, listing_id, note_str),
             authorization_cents,
-            state.order_session.as_deref(),
             auth.as_auth(),
         )
         .await
-    {
-        Ok(resp) => resp,
-        Err(OverpayError::HttpStatus { status: 402, body }) => {
-            return Err(OpenAiError::PaymentRequired(format!(
-                "not enough merchant credits to authorize {} for this turn ({body}) — {LOAD_CREDITS_HINT}",
-                fmt_usd_cents(authorization_cents)
-            )))
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let order_id = resp
-        .pointer("/data/id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| OpenAiError::internal("create_order response missing id"))?
-        .to_string();
-    let status = resp
-        .pointer("/payment/status")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if status != "fully_paid" && status != "already_paid" {
-        let message = resp
-            .pointer("/payment/error")
-            .or_else(|| resp.pointer("/payment/message"))
-            .and_then(Value::as_str)
-            .unwrap_or("insufficient Overpay merchant credits");
-        return Err(OpenAiError::PaymentRequired(format!(
-            "{message} — {LOAD_CREDITS_HINT}"
-        )));
-    }
-    let mut redeemed_cents = 0.0;
-    if let Some(cents) = resp
-        .pointer("/payment/amount_redeemed_cents")
-        .and_then(Value::as_f64)
-    {
-        record_key_budget(state, key_id, cents / 100.0);
-        redeemed_cents = cents;
-    }
-    Ok((order_id, redeemed_cents))
+        .map_err(pay_error)?;
+    let redeemed = settled.amount_redeemed_cents.as_ref().map(Cents::as_f64);
+    let redeemed_cents = record_redeemed(state, key_id, redeemed);
+    Ok((settled.order_id, redeemed_cents))
+}
+
+/// The order a request places: its listing and note, filed under the
+/// request's conversation (`client_session_id`) when it named one.
+fn new_order(state: &McpState, listing_id: &str, note: &str) -> CreateOrder {
+    let mut order = CreateOrder::new(listing_id).buyer_note(note);
+    order.client_session_id.clone_from(&state.order_session);
+    order
 }
 
 /// `$X.YZ` for whole cents.
@@ -2614,6 +2584,16 @@ const LISTING_RATES_TTL: Duration = Duration::from_secs(300);
 
 static LISTING_RATES: std::sync::Mutex<Option<(String, Instant, Value)>> =
     std::sync::Mutex::new(None);
+
+/// Forget the cached listing. Tests share this process-wide slot, and a
+/// mock server can reuse a port another test's server just released — so
+/// its key — and be answered with that test's listing.
+#[cfg(test)]
+fn clear_listing_rates() {
+    if let Ok(mut c) = LISTING_RATES.lock() {
+        *c = None;
+    }
+}
 
 /// The most one order may authorize or cost in this request: the buyer's
 /// per-message limit ([`REQUEST_MAX_HEADER`]) or the conversation's
@@ -2885,82 +2865,16 @@ fn net_key_budget_from_delivery(
 /// Storage link) instead of the content itself. Every /v1 parser reads
 /// inline `delivered_content`, so fetch the file and put it there — before,
 /// these replies failed as "order has no delivered_content". Pending,
-/// failed and already-inline snapshots pass through untouched.
-async fn inline_delivered_file(state: &McpState, mut snap: Value) -> Result<Value, OverpayError> {
-    let data = if snap.get("data").is_some() {
-        &mut snap["data"]
-    } else {
-        &mut snap
-    };
-    let delivered = data.get("fulfillment_status").and_then(Value::as_str) == Some("delivered");
-    let inline = data
-        .get("delivered_content")
-        .and_then(Value::as_str)
-        .is_some();
-    if delivered && !inline {
-        if let Some(url) = data
-            .get("delivered_content_url")
-            .and_then(Value::as_str)
-            .filter(|u| !u.is_empty())
-            .map(str::to_string)
-        {
-            match state.overpay.fetch_delivered_content(&url).await? {
-                DeliveredContent::Text(content) => data["delivered_content"] = json!(content),
-                // An image (or other binary) delivery stays a link: the
-                // caller hands on `delivered_content_url` and its type
-                // rather than bytes nobody can read as text.
-                DeliveredContent::Binary {
-                    content_type,
-                    bytes,
-                } => {
-                    if let Some(ct) = content_type {
-                        if data
-                            .get("delivered_content_type")
-                            .and_then(Value::as_str)
-                            .is_none()
-                        {
-                            data["delivered_content_type"] = json!(ct);
-                        }
-                    }
-                    // Rails states the blob's size too (overpay#466).
-                    let rails_size = data
-                        .get("delivered_content_byte_size")
-                        .and_then(Value::as_u64);
-                    if let Some(n) = bytes.or(rails_size) {
-                        data["delivered_content_bytes"] = json!(n);
-                    }
-                }
-            }
-        }
-    }
-    Ok(snap)
-}
-
-/// One poll of an order in flight: conditional on the `partial_seq` already
-/// seen (`seen`, updated here), so the marketplace only sends the streaming
-/// buffer when it has grown — a long reply polled every few hundred ms
-/// would otherwise be re-downloaded in full each time.
-async fn poll_order(
+/// failed and already-inline snapshots pass through untouched. That logic
+/// now lives in the SDK (`overpay_sdk::flows::resolve_delivered`, used by
+/// every `OrderWaiter` here); this wrapper keeps the tests that pin it.
+#[cfg(test)]
+async fn get_order_resolved(
     state: &McpState,
     auth: &OwnedAuth,
     order_id: &str,
-    seen: &mut Option<u64>,
 ) -> Result<Value, OverpayError> {
-    let snap = state
-        .overpay
-        .get_order_value_since(order_id, *seen, auth.as_auth())
-        .await?;
-    if let (_, Some(seq)) = partial_output(&snap) {
-        *seen = Some(seq);
-    }
-    inline_delivered_file(state, snap).await
-}
-
-/// Waits out the rest of a poll interval that began at `started`: the
-/// cadence is start-to-start, so a slow request doesn't add its own time on
-/// top of the interval (it used to: 1 s sleep + ~0.6 s request per poll).
-async fn pace(started: Instant, poll: Duration) {
-    tokio::time::sleep(poll.saturating_sub(started.elapsed())).await;
+    overpay_sdk::flows::get_order_resolved(state.overpay.sdk(), order_id, auth.as_auth()).await
 }
 
 /// Poll an order silently until it reaches a terminal status. Used by the
@@ -2976,22 +2890,16 @@ async fn wait_for_order_terminal(
     timeout: Duration,
     poll: Duration,
 ) -> Result<Value, OpenAiError> {
-    let start = Instant::now();
-    let mut seen = None;
-    loop {
-        let polled = Instant::now();
-        let snap = poll_order(state, auth, order_id, &mut seen).await?;
-        if is_terminal(order_status(&snap)) {
-            return Ok(snap);
-        }
-        if start.elapsed() >= timeout {
-            return Err(OpenAiError::UpstreamFailure(format!(
-                "order {order_id} did not complete within {}s",
-                timeout.as_secs()
-            )));
-        }
-        pace(polled, poll).await;
+    let last = order_waiter(state, auth, order_id, timeout, poll)
+        .wait()
+        .await?;
+    if last.state == WaitState::Done {
+        return Ok(last.snapshot);
     }
+    Err(OpenAiError::UpstreamFailure(format!(
+        "order {order_id} did not complete within {}s",
+        timeout.as_secs()
+    )))
 }
 
 /// What one order actually cost the wallet: the seller's metered
@@ -3321,11 +3229,9 @@ fn order_status(snap: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+#[cfg(test)]
 fn is_terminal(status: Option<&str>) -> bool {
-    status == Some("delivered")
-        || status
-            .map(|s| WAIT_TERMINAL_STATUSES.contains(&s))
-            .unwrap_or(false)
+    status.is_some_and(|s| overpay_sdk::FulfillmentStatus::from(s).is_terminal())
 }
 
 // ---- tool execution: run_python, backed by a real second paid order ----
@@ -3913,34 +3819,38 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             };
             yield Ok(chunk_event(&order_id, &requested_model, json!({"role": "assistant"}), None));
 
-            let mut streamed = 0usize;
-            let mut seen = None;
-            let start = Instant::now();
+            let streamed;
+            let mut events = std::pin::pin!(order_waiter(&ctx.mcp, &auth, &order_id, ctx.timeout, ctx.poll).events());
             let snap = loop {
-                let polled = Instant::now();
-                let snap = match poll_order(&ctx.mcp, &auth, &order_id, &mut seen).await {
-                    Ok(s) => s,
-                    Err(e) => {
+                let event = match events.next().await {
+                    Some(Ok(event)) => event,
+                    Some(Err(e)) => {
                         for ev in error_events(&order_id, &requested_model, OpenAiError::from(e)) { yield Ok(ev); }
                         return;
                     }
+                    None => {
+                        for ev in error_events(&order_id, &requested_model, wait_ended_early(&order_id)) { yield Ok(ev); }
+                        return;
+                    }
                 };
-                let (partial, _seq) = partial_output(&snap);
-                match new_output_since(partial, &mut streamed) {
+                match event.delta.as_deref() {
                     Some(delta) => yield Ok(chunk_event(&order_id, &requested_model, json!({"content": delta}), None)),
                     None => yield Ok(Event::default().comment("owallet: waiting on the model")),
                 }
-                if is_terminal(order_status(&snap)) {
-                    break snap;
+                match event.state {
+                    WaitState::Done => {
+                    streamed = event.streamed;
+                    break event.snapshot;
                 }
-                if start.elapsed() >= ctx.timeout {
-                    let err = OpenAiError::UpstreamFailure(format!(
-                        "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
-                    ));
-                    for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
-                    return;
+                    WaitState::TimedOut => {
+                        let err = OpenAiError::UpstreamFailure(format!(
+                            "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
+                        ));
+                        for ev in error_events(&order_id, &requested_model, err) { yield Ok(ev); }
+                        return;
+                    }
+                    WaitState::Pending => {}
                 }
-                pace(polled, ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             let mut usage = TurnUsage::default();
@@ -4020,36 +3930,38 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 yield Ok(chunk_event(&response_id, &last_model, json!({"role": "assistant"}), None));
             }
 
-            let mut streamed = 0usize;
-            let mut seen = None;
-            let start = Instant::now();
+            let streamed;
+            let mut events = std::pin::pin!(order_waiter(&ctx.mcp, &auth, &order_id, ctx.timeout, ctx.poll).events());
             let snap = loop {
-                let polled = Instant::now();
-                let snap = match poll_order(&ctx.mcp, &auth, &order_id, &mut seen).await {
-                    Ok(s) => s,
-                    Err(e) => {
+                let event = match events.next().await {
+                    Some(Ok(event)) => event,
+                    Some(Err(e)) => {
                         for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
                         return;
                     }
+                    None => {
+                        for ev in error_events(&response_id, &last_model, wait_ended_early(&order_id)) { yield Ok(ev); }
+                        return;
+                    }
                 };
-
-                let (partial, _seq) = partial_output(&snap);
-                match new_output_since(partial, &mut streamed) {
+                match event.delta.as_deref() {
                     Some(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
                     None => yield Ok(Event::default().comment("owallet: waiting on the model")),
                 }
-
-                if is_terminal(order_status(&snap)) {
-                    break snap;
+                match event.state {
+                    WaitState::Done => {
+                    streamed = event.streamed;
+                    break event.snapshot;
                 }
-                if start.elapsed() >= ctx.timeout {
-                    let err = OpenAiError::UpstreamFailure(format!(
-                        "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
-                    ));
-                    for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
-                    return;
+                    WaitState::TimedOut => {
+                        let err = OpenAiError::UpstreamFailure(format!(
+                            "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
+                        ));
+                        for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
+                        return;
+                    }
+                    WaitState::Pending => {}
                 }
-                pace(polled, ctx.poll).await;
             };
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             usage.add_order(&snap, redeemed_cents);
@@ -4140,22 +4052,18 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                             continue 'tool_calls;
                         }
                     };
-                    let started = Instant::now();
-                    let mut lt_streamed = 0usize;
-                    let mut seen = None;
                     let mut lt_emitted = false;
+                    let mut events = std::pin::pin!(order_waiter(&ctx.mcp, &auth, &order_id, ctx.timeout, ctx.poll).events());
                     let result_text = loop {
-                        let polled = Instant::now();
-                        let snap = match poll_order(&ctx.mcp, &auth, &order_id, &mut seen).await {
-                            Ok(s) => s,
-                            Err(e) => break json!({"error": OpenAiError::from(e).message()}).to_string(),
+                        let event = match events.next().await {
+                            Some(Ok(event)) => event,
+                            Some(Err(e)) => break json!({"error": OpenAiError::from(e).message()}).to_string(),
+                            None => break json!({"error": wait_ended_early(&order_id).message()}).to_string(),
                         };
 
-                        // Forward whatever is new before checking for the
-                        // end, so the final flush of the preview is never
-                        // dropped on the delivering poll.
-                        let (partial, _seq) = partial_output(&snap);
-                        match new_output_since(partial, &mut lt_streamed) {
+                        // Forward whatever is new before checking for the end, so the
+                        // final flush of the preview is never dropped on the delivering poll.
+                        match event.delta.as_deref() {
                             Some(delta) => {
                                 if !lt_emitted {
                                     yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n\n"}), None));
@@ -4166,18 +4074,20 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                             None => yield Ok(Event::default().comment(format!("owallet: {} still running", tool.name))),
                         }
 
-                        if is_terminal(order_status(&snap)) {
-                            net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
-                            usage.add_order(&snap, redeemed_cents);
-                            break extract_listing_delivered(&order_id, &snap).to_string();
+                        match event.state {
+                            WaitState::Done => {
+                                net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &event.snapshot, redeemed_cents);
+                                usage.add_order(&event.snapshot, redeemed_cents);
+                                break extract_listing_delivered(&order_id, &event.snapshot).to_string();
+                            }
+                            WaitState::TimedOut => {
+                                break json!({
+                                    "error": format!("order {order_id} did not reach a terminal status in time"),
+                                    "order_id": order_id,
+                                }).to_string();
+                            }
+                            WaitState::Pending => {}
                         }
-                        if started.elapsed() >= ctx.timeout {
-                            break json!({
-                                "error": format!("order {order_id} did not reach a terminal status in time"),
-                                "order_id": order_id,
-                            }).to_string();
-                        }
-                        pace(polled, ctx.poll).await;
                     };
                     if lt_emitted {
                         yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n\n"}), None));
@@ -4195,24 +4105,25 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                     }
                 };
 
-                let mut py_streamed = 0usize;
-                let mut seen = None;
                 let mut fence_open = false;
-                let py_start = Instant::now();
+                let mut events = std::pin::pin!(order_waiter(&ctx.mcp, &auth, &python_order_id, ctx.timeout, ctx.poll).events());
                 let python_snap;
                 loop {
-                    let polled = Instant::now();
-                    let snap = match poll_order(&ctx.mcp, &auth, &python_order_id, &mut seen).await {
-                        Ok(s) => s,
-                        Err(e) => {
+                    let event = match events.next().await {
+                        Some(Ok(event)) => event,
+                        Some(Err(e)) => {
                             let result_text = json!({"error": OpenAiError::from(e).message()}).to_string();
+                            messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
+                            continue 'tool_calls;
+                        }
+                        None => {
+                            let result_text = json!({"error": wait_ended_early(&python_order_id).message()}).to_string();
                             messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
                             continue 'tool_calls;
                         }
                     };
 
-                    let (partial, _seq) = partial_output(&snap);
-                    match new_output_since(partial, &mut py_streamed) {
+                    match event.delta.as_deref() {
                         Some(delta) => {
                             if !fence_open {
                                 yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n```\n"}), None));
@@ -4223,18 +4134,20 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                         None => yield Ok(Event::default().comment("owallet: run_python still running")),
                     }
 
-                    if is_terminal(order_status(&snap)) {
-                        python_snap = snap;
-                        break;
+                    match event.state {
+                        WaitState::Done => {
+                            python_snap = event.snapshot;
+                            break;
+                        }
+                        WaitState::TimedOut => {
+                            let result_text = json!({"error": format!(
+                                "run_python order {python_order_id} did not complete within {}s", ctx.timeout.as_secs()
+                            )}).to_string();
+                            messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
+                            continue 'tool_calls;
+                        }
+                        WaitState::Pending => {}
                     }
-                    if py_start.elapsed() >= ctx.timeout {
-                        let result_text = json!({"error": format!(
-                            "run_python order {python_order_id} did not complete within {}s", ctx.timeout.as_secs()
-                        )}).to_string();
-                        messages.push(json!({ "role": "tool", "tool_call_id": tool_call_id, "content": result_text }));
-                        continue 'tool_calls;
-                    }
-                    pace(polled, ctx.poll).await;
                 }
                 if fence_open {
                     yield Ok(chunk_event(&response_id, &last_model, json!({"content": "\n```\n"}), None));
@@ -4271,34 +4184,38 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             response_id = order_id.clone();
             yield Ok(chunk_event(&response_id, &last_model, json!({"role": "assistant"}), None));
         }
-        let mut streamed = 0usize;
-        let mut seen = None;
-        let start = Instant::now();
+        let streamed;
+        let mut events = std::pin::pin!(order_waiter(&ctx.mcp, &auth, &order_id, ctx.timeout, ctx.poll).events());
         let snap = loop {
-            let polled = Instant::now();
-            let snap = match poll_order(&ctx.mcp, &auth, &order_id, &mut seen).await {
-                Ok(s) => s,
-                Err(e) => {
+            let event = match events.next().await {
+                Some(Ok(event)) => event,
+                Some(Err(e)) => {
                     for ev in error_events(&response_id, &last_model, OpenAiError::from(e)) { yield Ok(ev); }
                     return;
                 }
+                None => {
+                    for ev in error_events(&response_id, &last_model, wait_ended_early(&order_id)) { yield Ok(ev); }
+                    return;
+                }
             };
-            let (partial, _seq) = partial_output(&snap);
-            match new_output_since(partial, &mut streamed) {
+            match event.delta.as_deref() {
                 Some(delta) => yield Ok(chunk_event(&response_id, &last_model, json!({"content": delta}), None)),
                 None => yield Ok(Event::default().comment("owallet: waiting on the model")),
             }
-            if is_terminal(order_status(&snap)) {
-                break snap;
+            match event.state {
+                WaitState::Done => {
+                    streamed = event.streamed;
+                    break event.snapshot;
+                }
+                WaitState::TimedOut => {
+                    let err = OpenAiError::UpstreamFailure(format!(
+                        "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
+                    ));
+                    for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
+                    return;
+                }
+                WaitState::Pending => {}
             }
-            if start.elapsed() >= ctx.timeout {
-                let err = OpenAiError::UpstreamFailure(format!(
-                    "order {order_id} did not complete within {}s", ctx.timeout.as_secs()
-                ));
-                for ev in error_events(&response_id, &last_model, err) { yield Ok(ev); }
-                return;
-            }
-            pace(polled, ctx.poll).await;
         };
         net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
         usage.add_order(&snap, redeemed_cents);
@@ -4656,10 +4573,10 @@ mod tests {
 
     #[test]
     fn no_credits_422_becomes_actionable_payment_error() {
-        let err: OpenAiError = OverpayError::HttpStatus {
-            status: 422,
-            body: r#"{"error":"No available credits for this seller"}"#.into(),
-        }
+        let err: OpenAiError = OverpayError::Api(overpay_sdk::ApiError::from_response(
+            422,
+            br#"{"error":"No available credits for this seller"}"#,
+        ))
         .into();
         assert!(matches!(err, OpenAiError::PaymentRequired(_)));
         assert!(err.message().contains("owallet credits load"));
@@ -4667,10 +4584,10 @@ mod tests {
 
     #[test]
     fn other_422s_stay_upstream_failures() {
-        let err: OpenAiError = OverpayError::HttpStatus {
-            status: 422,
-            body: r#"{"error":"listing is paused"}"#.into(),
-        }
+        let err: OpenAiError = OverpayError::Api(overpay_sdk::ApiError::from_response(
+            422,
+            br#"{"error":"listing is paused"}"#,
+        ))
         .into();
         assert!(matches!(err, OpenAiError::UpstreamFailure(_)));
     }
@@ -4918,6 +4835,9 @@ mod tests {
             .unwrap();
         db.write_default_npub("npub1abandon").unwrap();
         let overpay = Arc::new(OverpayClient::new(overpay_uri).unwrap());
+        // This test's mock server is already bound: a cached listing keyed
+        // to its port can only be a previous server's, gone stale.
+        clear_listing_rates();
         McpState::new(Arc::new(Mutex::new(db)), overpay)
     }
 
@@ -5584,7 +5504,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let state = seeded_state(&overpay.uri(), &tmp);
         let (_npub, auth) = state.resolve_owned_auth().unwrap();
-        let snap = poll_order(&state, &auth, "G1", &mut None)
+        let snap = get_order_resolved(&state, &auth, "G1")
             .await
             .unwrap_or_else(|e| panic!("an image is a delivery, not an error: {e}"));
         let out = extract_listing_delivered("G1", &snap);
@@ -5613,7 +5533,7 @@ mod tests {
             )
             .mount(&overpay)
             .await;
-        let snap = poll_order(&state, &auth, "G2", &mut None).await.unwrap();
+        let snap = get_order_resolved(&state, &auth, "G2").await.unwrap();
         let out = extract_listing_delivered("G2", &snap);
         assert_eq!(out["delivered_content_type"], "application/octet-stream");
         assert_eq!(out["delivered_content_bytes"], 3);

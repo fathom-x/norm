@@ -106,13 +106,10 @@ pub fn run_with_cli(
     let db = Arc::new(std::sync::Mutex::new(db));
     let mut per_server: Vec<(ServerConfig, AppState)> = Vec::with_capacity(configs.len());
     for cfg in &configs {
-        let mut overpay = OverpayClient::new(&cfg.rails_url)?;
-        if let Some(p) = cfg.public_url.as_deref() {
-            if p != cfg.rails_url {
-                overpay = overpay.with_public_url(p)?;
-            }
-        }
-        let overpay = Arc::new(overpay);
+        let overpay = Arc::new(OverpayClient::with_urls(
+            &cfg.rails_url,
+            cfg.public_url.as_deref(),
+        )?);
 
         let evm = EvmConfig {
             rpc_url: cfg.evm_rpc_url.clone(),

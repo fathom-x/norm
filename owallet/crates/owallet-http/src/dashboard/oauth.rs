@@ -22,8 +22,8 @@ use axum::http::header::{COOKIE, LOCATION, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use cookie::{Cookie, SameSite};
-use owallet_overpay::models::OAuthRegisterRequest;
-use owallet_overpay::{Auth, Pkce};
+use overpay_sdk::flows::PkceFlow;
+use owallet_overpay::Auth;
 use rand::RngCore;
 use serde::Deserialize;
 
@@ -73,43 +73,32 @@ pub async fn authorize_get(
         return Ok(Redirect::to("/wallet?notice=no-wallet").into_response());
     };
 
-    let pkce = Pkce::generate();
     let redirect_uri = format!("{}/wallet/authorize/callback", state.public_base_url);
 
-    let reg = state
-        .overpay
-        .register_oauth_client(&OAuthRegisterRequest {
-            client_name: "owallet-dashboard".into(),
-            redirect_uris: vec![redirect_uri.clone()],
-            grant_types: vec!["authorization_code".into()],
-            response_types: vec!["code".into()],
-            scope: Some("wallet".into()),
-            token_endpoint_auth_method: Some("none".into()),
-        })
-        .await?;
+    // Registers an ephemeral public client and builds the authorize URL;
+    // the callback below finishes the exchange.
+    let flow = PkceFlow::start(
+        state.overpay.sdk(),
+        "owallet-dashboard",
+        &redirect_uri,
+        "wallet",
+    )
+    .await?;
 
     let pending_id = rand_id();
     state.pending_auth.0.insert(
         pending_id.clone(),
         PendingDashboardAuth {
-            pkce: pkce.clone(),
-            client_id: reg.client_id.clone(),
+            pkce: flow.pkce.clone(),
+            client_id: flow.client_id.clone(),
             redirect_uri: redirect_uri.clone(),
             started_npub: npub,
             expires_at: Instant::now() + PENDING_TTL,
         },
     );
 
-    let auth_url = state.overpay.authorize_url(
-        &reg.client_id,
-        &redirect_uri,
-        &pkce.state,
-        &pkce.challenge,
-        "wallet",
-    )?;
-
     Ok(redirect_with_cookie(
-        auth_url.as_str(),
+        flow.authorize_url.as_str(),
         pending_auth_set_cookie(&pending_id),
     ))
 }

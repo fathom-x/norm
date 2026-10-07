@@ -1,0 +1,46 @@
+{
+  "data": [
+    {
+      "id": "e72159d4-faa9-4d06-8d99-072d1b642272",
+      "payment_status": "paid",
+      "fulfillment_status": "delivered",
+      "product_title": "Wireless Headphones",
+      "free": false,
+      "product_price_cents": 4999,
+      "product_price_usd": "$49.9900",
+      "total_usd_cents": 5249,
+      "total_usd": "$52.4900",
+      "settled_amount_cents": 5249,
+      "refunded_cents": 0,
+      "refund_status": "none",
+      "fulfillment_error": null,
+      "authorized_cents": 5249,
+      "captured_cents": null,
+      "released_cents": 0,
+      "rejection": null,
+      "spend_authorization_id": null,
+      "seller_revenue_cents": 4999,
+      "platform_fee_cents": 250,
+      "platform_fee_usd": "$2.5000",
+      "buyer_note": null,
+      "variant_key": null,
+      "client_session_id": null,
+      "order_url": "http://www.example.com/orders/e72159d4-faa9-4d06-8d99-072d1b642272",
+      "delivered_content_type": "text/plain",
+      "tracking_number": null,
+      "carrier": null,
+      "tracking_url": null,
+      "created_at": "2026-08-19T15:17:08.205Z",
+      "paid_at": "2026-08-19T15:17:08.204Z",
+      "delivered_at": "2026-08-19T15:17:08.212Z",
+      "expected_delivered_at": null,
+      "delivery_skew_seconds": null,
+      "settlement_tx_hash": "0x893ad8c956d2ee1a3912134f72b581c6e893d6540d873623ed82064b6260b890",
+      "listing": {
+        "id": "6922b886-d672-555e-b45a-4fe569125d7b",
+        "title": "Wireless Headphones"
+      }
+    }
+  ],
+  "next_cursor": null
+}

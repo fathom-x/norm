@@ -1,0 +1,8 @@
+{
+  "error": "Unknown or inactive variant \"nope\"",
+  "code": "unknown_variant",
+  "variants": [
+    "cheap",
+    "premium"
+  ]
+}

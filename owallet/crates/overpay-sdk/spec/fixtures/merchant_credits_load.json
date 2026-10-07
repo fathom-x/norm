@@ -1,0 +1,11 @@
+{
+  "data": {
+    "order_id": "4648dabb-84f2-4324-bd65-1d4ab260d886",
+    "bolt11": "lntb20000n1mock4c5b403e5896d7c773e30201",
+    "payment_hash": "4c5b403e5896d7c773e30201d34af13646f45bd574205c14b235cb0cd4fd279b",
+    "sats": 20000,
+    "amount_cents": 1000,
+    "expires_at": "2026-10-02T22:00:23.664Z",
+    "order_url": "http://www.example.com/orders/4648dabb-84f2-4324-bd65-1d4ab260d886"
+  }
+}

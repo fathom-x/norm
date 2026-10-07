@@ -1,0 +1,16 @@
+{
+  "data": {
+    "name": "aliceuser",
+    "slug": "alice-shop",
+    "wallets": [
+      {
+        "crypto_currency": "usdc_base",
+        "crypto_address": "0x1111111111111111111111111111111111111111"
+      },
+      {
+        "crypto_currency": "zcash",
+        "crypto_address": "u1testselleraddress1234567890abcdef"
+      }
+    ]
+  }
+}

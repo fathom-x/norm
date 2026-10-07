@@ -15,10 +15,9 @@ use axum::http::StatusCode;
 use axum::response::Html;
 use axum::routing::get;
 use axum::Router;
+use overpay_sdk::flows::PkceFlow;
 use owallet_crypto::{derive_from_mnemonic, Mnemonic, PrivateKey, EVM_HD_PATH};
 use owallet_db::default_db_path;
-use owallet_overpay::models::OAuthRegisterRequest;
-use owallet_overpay::Pkce;
 use serde::Deserialize;
 use tokio::sync::{oneshot, Mutex};
 
@@ -42,8 +41,6 @@ pub fn run() -> Result<()> {
     let host = host_key();
 
     block_on(async move {
-        let pkce = Pkce::generate();
-
         // Bind first to learn the port; then we know what redirect_uri to
         // register with the OAuth provider.
         let listener =
@@ -53,25 +50,10 @@ pub fn run() -> Result<()> {
         let local_addr = listener.local_addr().map_err(CmdError::Io)?;
         let redirect_uri = format!("http://127.0.0.1:{}/callback", local_addr.port());
 
-        // Register an ephemeral public OAuth client.
-        let reg = overpay
-            .register_oauth_client(&OAuthRegisterRequest {
-                client_name: "owallet".into(),
-                redirect_uris: vec![redirect_uri.clone()],
-                grant_types: vec!["authorization_code".into()],
-                response_types: vec!["code".into()],
-                scope: Some("wallet".into()),
-                token_endpoint_auth_method: Some("none".into()),
-            })
-            .await?;
-
-        let auth_url = overpay.authorize_url(
-            &reg.client_id,
-            &redirect_uri,
-            &pkce.state,
-            &pkce.challenge,
-            "wallet",
-        )?;
+        // Register an ephemeral public OAuth client and build the
+        // authorize URL.
+        let flow = PkceFlow::start(overpay.sdk(), "owallet", &redirect_uri, "wallet").await?;
+        let (pkce, auth_url) = (&flow.pkce, &flow.authorize_url);
 
         // One-shot channel for the callback to hand back the (code, state).
         let (tx, rx) = oneshot::channel::<CallbackResult>();
@@ -123,7 +105,7 @@ pub fn run() -> Result<()> {
         };
 
         let token = overpay
-            .exchange_code(&reg.client_id, &code, &pkce.verifier, &redirect_uri)
+            .exchange_code(&flow.client_id, &code, &pkce.verifier, &redirect_uri)
             .await?;
         db.write_token(&npub, &host, &token.access_token, "overpay-oauth")?;
 

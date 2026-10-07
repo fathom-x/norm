@@ -1,0 +1,13 @@
+{
+  "data": {
+    "order_id": "5fc15d2e-9f85-4116-b204-d677d3f05d86",
+    "order_type": "credit_purchase",
+    "total_usd_cents": "500.0",
+    "payment_status": "pending",
+    "payment_expires_at": "2026-08-19T16:17:07.908Z",
+    "order_url": "http://www.example.com/orders/5fc15d2e-9f85-4116-b204-d677d3f05d86",
+    "message": "Credit purchase order created. Pay to complete.",
+    "payment_address": "0x1111111111111111111111111111111111111111",
+    "payment_amount_usdc": 5.0
+  }
+}

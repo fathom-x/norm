@@ -1,0 +1,28 @@
+{
+  "data": [
+    {
+      "id": "8af0bb18-58e4-5d80-b016-86e8c4426145",
+      "title": "Buy Anything with a Personal Shopper",
+      "description": "We'll buy anything you want",
+      "price_cents": 500,
+      "price_usd": "$5.00",
+      "free": false,
+      "currency": "USD",
+      "category": "services",
+      "condition": null,
+      "quantity": -1,
+      "main_image_url": null,
+      "delivered_content_type": "text/plain",
+      "seller": {
+        "name": "aliceuser",
+        "slug": "alice-shop"
+      },
+      "checkout_url": "http://localhost:4030/checkout/8af0bb18-58e4-5d80-b016-86e8c4426145",
+      "delivery_eta": null,
+      "provider_tool": null,
+      "published_at": "2026-10-02T21:00:18.000Z",
+      "created_at": "2026-10-02T21:00:18.000Z"
+    }
+  ],
+  "next_cursor": "eyJwdWJsaXNoZWRfYXQiOiIyMDI2LTEwLTAyVDIxOjAwOjE4LjAwMDAwMFoiLCJpZCI6IjhhZjBiYjE4LTU4ZTQtNWQ4MC1iMDE2LTg2ZThjNDQyNjE0NSJ9"
+}

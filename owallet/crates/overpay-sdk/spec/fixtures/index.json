@@ -1,0 +1,118 @@
+{
+  "account_show.json": {
+    "operation": "getAccount",
+    "status": 200
+  },
+  "merchant_credit_purchase.json": {
+    "operation": "purchaseMerchantCredits",
+    "status": 201
+  },
+  "orders_index.json": {
+    "operation": "listOrders",
+    "status": 200
+  },
+  "orders_show_delivered.json": {
+    "operation": "getOrder",
+    "status": 200
+  },
+  "buyer_register.json": {
+    "operation": "registerBuyer",
+    "status": 201
+  },
+  "error_insufficient_credits.json": {
+    "operation": "createOrder",
+    "status": 402
+  },
+  "error_not_found.json": {
+    "operation": "getListing",
+    "status": 404
+  },
+  "error_unauthorized.json": {
+    "operation": "getAccount",
+    "status": 401
+  },
+  "error_unknown_variant.json": {
+    "operation": "createOrder",
+    "status": 422
+  },
+  "listings_index.json": {
+    "operation": "listListings",
+    "status": 200
+  },
+  "listings_show_variants.json": {
+    "operation": "getListing",
+    "status": 200
+  },
+  "merchant_credit_transactions.json": {
+    "operation": "listMerchantCreditTransactions",
+    "status": 200
+  },
+  "merchant_credits_index.json": {
+    "operation": "listMerchantCredits",
+    "status": 200
+  },
+  "merchant_credits_load.json": {
+    "operation": "loadCoreCredits",
+    "status": 201
+  },
+  "merchant_credits_redeem.json": {
+    "operation": "redeemMerchantCredits",
+    "status": 200
+  },
+  "merchant_credits_show.json": {
+    "operation": "getMerchantCreditBalance",
+    "status": 200
+  },
+  "oauth_client.json": {
+    "operation": "registerOAuthClient",
+    "status": 201
+  },
+  "oauth_metadata.json": {
+    "operation": "getOAuthMetadata",
+    "status": 200
+  },
+  "oauth_token.json": {
+    "operation": "exchangeOAuthToken",
+    "status": 200
+  },
+  "orders_create_paid.json": {
+    "operation": "createOrder",
+    "status": 201
+  },
+  "orders_create_unpaid.json": {
+    "operation": "createOrder",
+    "status": 201
+  },
+  "orders_show_offloaded.json": {
+    "operation": "getOrder",
+    "status": 200
+  },
+  "orders_show_partial.json": {
+    "operation": "getOrder",
+    "status": 200
+  },
+  "orders_show_rejected.json": {
+    "operation": "getOrder",
+    "status": 200
+  },
+  "sellers_show.json": {
+    "operation": "getSeller",
+    "status": 200
+  },
+  "spend_authorization_close.json": {
+    "operation": "closeSpendAuthorization",
+    "status": 200
+  },
+  "spend_authorization_create.json": {
+    "operation": "createSpendAuthorization",
+    "status": 201
+  },
+  "spend_authorization_show.json": {
+    "operation": "getSpendAuthorization",
+    "status": 200
+  },
+  "web_session.json": {
+    "operation": "createWebSession",
+    "status": 201
+  }
+}

@@ -1,0 +1,4846 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Overpay Marketplace API",
+    "version": "1.0",
+    "description": "Privacy-focused marketplace API. Buyers browse listings, place orders and\npay with merchant credits (or x402 via the gateway); sellers' bots fulfill\nthem through the Seller API.\n\nThis document is the single source of truth for the API. The Rails test\nsuite validates every buyer request and response against it, and the SDKs\n(owallet-rs/crates/overpay-sdk, and later TypeScript/Python) are built\nfrom it. Change it together with the controllers.\n\nConventions:\n- Successful bodies are wrapped: `{\"data\": {...}}` for one object,\n  `{\"data\": [...], \"next_cursor\": \"...\"|null}` for a page.\n- Errors are `{\"error\": \"<human message>\", \"code\": \"<machine code>\", ...}`.\n  Match on `code`, never on the message. Clients must tolerate codes they\n  don't know.\n- Money fields named `*_cents` are numbers: whole cents are integers, but\n  sub-cent prices render as fractions (e.g. `0.25`).\n"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Current server (rewritten to the serving host by GET /api/v1/docs)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Listings",
+      "description": "Browse the marketplace (no auth)."
+    },
+    {
+      "name": "Orders",
+      "description": "Place, pay for and track orders."
+    },
+    {
+      "name": "Merchant Credits",
+      "description": "Prepaid credit balances held by a seller or an organization. Credits are\nthe API's way to pay for an order: `POST /api/v1/orders` with\n`pay: \"merchant_credits\"`, or create then `POST .../redeem`. When a\nseller belongs to an organization, redemption draws the buyer's\nseller-level balance first, then the organization's.\n"
+    },
+    {
+      "name": "Spend Authorizations",
+      "description": "Session spending caps across many orders on one metered listing."
+    },
+    {
+      "name": "Account",
+      "description": "The authenticated buyer."
+    },
+    {
+      "name": "Auth",
+      "description": "Getting an API token — NIP-98 registration or OAuth 2.0 with PKCE."
+    },
+    {
+      "name": "Meta",
+      "description": "API index and this document."
+    },
+    {
+      "name": "Registration",
+      "description": "Seller onboarding via NIP-98 Nostr auth."
+    },
+    {
+      "name": "Seller",
+      "description": "Authenticated seller operations (Bearer token)."
+    },
+    {
+      "name": "Organization",
+      "description": "Bot organization membership reconciliation."
+    }
+  ],
+  "x-overpay-error-codes-note": "components.schemas.ErrorCode lists every `code` the API emits; it is kept equal to ApiErrors::CODES by test/openapi/enum_parity_test.rb.",
+  "paths": {
+    "/api/v1": {
+      "get": {
+        "tags": [
+          "Meta"
+        ],
+        "operationId": "getApiIndex",
+        "security": [],
+        "summary": "API index (human-readable endpoint list)",
+        "responses": {
+          "200": {
+            "description": "Index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/docs": {
+      "get": {
+        "tags": [
+          "Meta"
+        ],
+        "operationId": "getOpenApiDocument",
+        "security": [],
+        "summary": "This OpenAPI document, as JSON",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/docs/ui": {
+      "get": {
+        "tags": [
+          "Meta"
+        ],
+        "operationId": "getApiDocsUi",
+        "security": [],
+        "summary": "Swagger UI for this document",
+        "responses": {
+          "200": {
+            "description": "HTML page",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/listings": {
+      "get": {
+        "tags": [
+          "Listings"
+        ],
+        "operationId": "listListings",
+        "security": [],
+        "summary": "Browse active public listings, newest first",
+        "description": "Returns a lightweight summary per listing. The per-listing schemas and\nthe full description come from `GET /api/v1/listings/{id}`.\n",
+        "parameters": [
+          {
+            "name": "category",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "seller",
+            "in": "query",
+            "description": "Seller slug (case-insensitive).",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 10, max 20).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of listings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "next_cursor"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Listing"
+                      }
+                    },
+                    "next_cursor": {
+                      "$ref": "#/components/schemas/NextCursor"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/listings/{id}": {
+      "get": {
+        "tags": [
+          "Listings"
+        ],
+        "operationId": "getListing",
+        "security": [],
+        "summary": "One listing in full, with the schemas needed to order it",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ListingId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The listing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Listing"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/sellers/{slug}": {
+      "get": {
+        "tags": [
+          "Listings"
+        ],
+        "operationId": "getSeller",
+        "security": [],
+        "summary": "Public seller profile and settlement wallets",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The seller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Seller"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/orders": {
+      "get": {
+        "tags": [
+          "Orders"
+        ],
+        "operationId": "listOrders",
+        "summary": "The caller's orders, newest first",
+        "description": "With a Bearer token: the token owner's orders (plus x402 orders settled\nby `payer_address`, when given). With NIP-98: the x402 orders of\n`payer_address`, which must be an EVM address derived from the signing\nkey. Passing `ids[]` returns exactly those orders in detail form\n(including delivered content) and no cursor.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "nostrAuth": []
+          },
+          {
+            "gatewayAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "payment_status",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/PaymentStatus"
+            }
+          },
+          {
+            "name": "fulfillment_status",
+            "in": "query",
+            "schema": {
+              "$ref": "#/components/schemas/FulfillmentStatus"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default and max 20).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "payer_address",
+            "in": "query",
+            "description": "EVM payer address. Required unless authenticated with a Bearer token.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "client_session_id",
+            "in": "query",
+            "description": "Only orders created with this client_session_id (exact match). An unknown label returns an empty list.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ids[]",
+            "in": "query",
+            "style": "form",
+            "explode": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of orders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Order"
+                      }
+                    },
+                    "next_cursor": {
+                      "$ref": "#/components/schemas/NextCursor"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "operationId": "createOrder",
+        "summary": "Place an order, optionally paying for it with merchant credits",
+        "description": "`pay: \"merchant_credits\"` settles the new order in the same request;\nthe outcome is reported in the top-level `payment` key. A redemption\nfailure does not fail the create: the order is returned pending.\n\nMetered listings accept a buyer-set `authorization_cents` (within the\nlisting's bounds) or a `spend_authorization_id`; both require\n`pay: \"merchant_credits\"` and are all-or-nothing — if credits don't\ncover them the order is cancelled and the call answers 402\n`insufficient_credits`.\n\nSend an `Idempotency-Key` to make retries safe: a retry with the same\nkey and body replays the first response (marked\n`Idempotent-Replayed: true`) instead of placing a second order.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The order (and, with `pay`, how paying went)",
+            "headers": {
+              "Idempotent-Replayed": {
+                "$ref": "#/components/headers/IdempotentReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateOrderResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "402": {
+            "description": "Credits don't cover the authorization (`insufficient_credits`)",
+            "headers": {
+              "Idempotent-Replayed": {
+                "$ref": "#/components/headers/IdempotentReplayed"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "A request with this Idempotency-Key is still running (`idempotency_request_in_progress`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/orders/{id}": {
+      "get": {
+        "tags": [
+          "Orders"
+        ],
+        "operationId": "getOrder",
+        "summary": "One order in detail, including delivered or in-progress output",
+        "description": "Delivered output is inline in `delivered_content`, or — when large or\nbinary — offloaded: `delivered_content_url` (+ byte size and filename)\ninstead. While a seller streams, `partial_content`/`partial_seq` carry\nthe work in progress; pass back the last `partial_seq` you hold as\n`since_seq` and an unchanged buffer is omitted.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "nostrAuth": []
+          },
+          {
+            "gatewayAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "name": "payer_address",
+            "in": "query",
+            "description": "EVM payer address. Required unless authenticated with a Bearer token.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since_seq",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Order"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/orders/x402": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "operationId": "createX402Order",
+        "summary": "Record an order settled on-chain through the x402 gateway",
+        "description": "Called by the x402 gateway after it settles a payment on-chain; the\norder is born paid. This path does NOT consult merchant credits. Not\nfor buyer clients.\n",
+        "x-overpay-audience": "gateway",
+        "security": [
+          {
+            "gatewayAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/X402OrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The recorded order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/X402Order"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "This settlement transaction was already recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/spend_authorizations": {
+      "post": {
+        "tags": [
+          "Spend Authorizations"
+        ],
+        "operationId": "createSpendAuthorization",
+        "summary": "Open a session spending cap on a metered listing",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSpendAuthorizationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new spend authorization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SpendAuthorization"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/spend_authorizations/{id}": {
+      "get": {
+        "tags": [
+          "Spend Authorizations"
+        ],
+        "operationId": "getSpendAuthorization",
+        "summary": "A spend authorization with what's spent and what's left",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SpendAuthorizationId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The spend authorization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SpendAuthorization"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/spend_authorizations/{id}/close": {
+      "post": {
+        "tags": [
+          "Spend Authorizations"
+        ],
+        "operationId": "closeSpendAuthorization",
+        "summary": "Close a spend authorization (idempotent)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SpendAuthorizationId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The closed spend authorization",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SpendAuthorization"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/merchant_credits": {
+      "get": {
+        "tags": [
+          "Merchant Credits"
+        ],
+        "operationId": "listMerchantCredits",
+        "summary": "The buyer's credit balances (only those with a balance)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credit balances",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MerchantCredit"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/merchant_credits/transactions": {
+      "get": {
+        "tags": [
+          "Merchant Credits"
+        ],
+        "operationId": "listMerchantCreditTransactions",
+        "summary": "The buyer's credit ledger (loads, spends, refunds), newest first",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "description": "Only movements at or after this ISO 8601 time.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "credit_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 50, max 100).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of ledger entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "next_cursor"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MerchantCreditTransaction"
+                      }
+                    },
+                    "next_cursor": {
+                      "$ref": "#/components/schemas/NextCursor"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/merchant_credits/load": {
+      "post": {
+        "tags": [
+          "Merchant Credits"
+        ],
+        "operationId": "loadCoreCredits",
+        "summary": "Load core marketplace credits with a Lightning invoice",
+        "description": "Creates a credit-purchase order and a single-use BOLT11 invoice. Pay it\nfrom any Lightning wallet, then poll the order until it is paid.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AmountRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The invoice",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/CreditLoad"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "502": {
+            "description": "The Lightning node failed to mint an invoice",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Lightning loads are not configured on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/merchant_credits/{seller_slug}": {
+      "get": {
+        "tags": [
+          "Merchant Credits"
+        ],
+        "operationId": "getMerchantCreditBalance",
+        "summary": "The balance spendable at one seller",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SellerSlug"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The balance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/MerchantCreditBalance"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/merchant_credits/{seller_slug}/purchase": {
+      "post": {
+        "tags": [
+          "Merchant Credits"
+        ],
+        "operationId": "purchaseMerchantCredits",
+        "summary": "Create an order that buys credits from a seller",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SellerSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AmountRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The pending purchase order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/CreditPurchase"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/merchant_credits/{seller_slug}/redeem": {
+      "post": {
+        "tags": [
+          "Merchant Credits"
+        ],
+        "operationId": "redeemMerchantCredits",
+        "summary": "Pay a pending order with merchant credits",
+        "description": "An order that is already paid answers 200 with `status: already_paid`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SellerSlug"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RedeemRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "How the redemption went",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Redemption"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/account": {
+      "get": {
+        "tags": [
+          "Account"
+        ],
+        "operationId": "getAccount",
+        "summary": "The authenticated buyer's account",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Account"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/buyer/register": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "registerBuyer",
+        "summary": "Find or create the buyer for a Nostr key and mint an API token",
+        "description": "Authenticated with NIP-98 only. Every call mints a new token; 201 when\nthe account was created, 200 when it already existed.\n",
+        "security": [
+          {
+            "nostrAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BuyerRegistrationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Existing account; new token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/BuyerRegistration"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New account and token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/BuyerRegistration"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/buyer/web_session": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "createWebSession",
+        "summary": "A one-time browser login link for the token's account (5-minute TTL)",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The login link",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data"
+                  ],
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/WebSession"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/.well-known/oauth-authorization-server": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "getOAuthMetadata",
+        "security": [],
+        "summary": "OAuth 2.0 authorization server metadata (RFC 8414)",
+        "responses": {
+          "200": {
+            "description": "Server metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthServerMetadata"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/oauth/clients": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "registerOAuthClient",
+        "security": [],
+        "summary": "Dynamic client registration (RFC 7591); public clients only",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthClientRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The registered client",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthClient"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/oauth/authorize": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "authorizeOAuth",
+        "security": [],
+        "summary": "Browser consent page (requires a logged-in session)",
+        "description": "Authorization-code flow with PKCE (`code_challenge_method=S256`\nrequired). `redirect_uri` must be a loopback address. An optional\n`nip98` parameter (a base64 NIP-98 event signing this URL without\n`nip98`) links the wallet's Nostr key to the account on approval.\n",
+        "parameters": [
+          {
+            "name": "response_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "code"
+              ]
+            }
+          },
+          {
+            "name": "client_id",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "redirect_uri",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code_challenge",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "code_challenge_method",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "S256"
+              ]
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "client_name",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "nip98",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Consent page",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "302": {
+            "description": "Not logged in — redirect to the login page"
+          },
+          "400": {
+            "description": "Invalid authorization request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "approveOAuth",
+        "security": [],
+        "summary": "Approve the consent page; redirects to redirect_uri with code and state",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "302": {
+            "description": "Redirect to redirect_uri (or to the login page)"
+          },
+          "400": {
+            "description": "Invalid authorization request",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid authenticity token",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/oauth/token": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "operationId": "exchangeOAuthToken",
+        "security": [],
+        "summary": "Exchange an authorization code (with its PKCE verifier) for an API token",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/OAuthTokenRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The token (never expires; no refresh token)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "RFC 6749 error (`unsupported_grant_type`, `invalid_grant`)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OAuthError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/seller/register": {
+      "post": {
+        "tags": [
+          "Registration"
+        ],
+        "summary": "Register seller via NIP-98 Nostr auth",
+        "operationId": "registerSeller",
+        "security": [
+          {
+            "nostrAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "username": {
+                    "type": "string"
+                  },
+                  "seller_slug": {
+                    "type": "string"
+                  },
+                  "bio": {
+                    "type": "string"
+                  },
+                  "token_name": {
+                    "type": "string"
+                  },
+                  "crypto_currency": {
+                    "type": "string",
+                    "enum": [
+                      "usdc_base",
+                      "zcash",
+                      "bitcoin"
+                    ]
+                  },
+                  "crypto_address": {
+                    "type": "string"
+                  },
+                  "derivation_key": {
+                    "type": "string"
+                  },
+                  "key_birthday_height": {
+                    "type": "integer"
+                  },
+                  "organization": {
+                    "type": "string",
+                    "description": "Organization slug to join (idempotently reconciled; moves the seller if already in another org). e.g. 'core'"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Seller created"
+          },
+          "200": {
+            "description": "Existing seller returned"
+          },
+          "401": {
+            "description": "Invalid Nostr auth"
+          },
+          "422": {
+            "description": "Validation error"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/listings": {
+      "get": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "List your listings",
+        "operationId": "sellerListListings",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "draft",
+                "active",
+                "paused",
+                "sold_out",
+                "archived"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SellerListing"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-overpay-audience": "seller"
+      },
+      "post": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Create a listing",
+        "operationId": "sellerCreateListing",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "title",
+                  "price_cents"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "price_cents": {
+                    "type": "integer"
+                  },
+                  "currency": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "draft",
+                      "active",
+                      "paused",
+                      "sold_out",
+                      "archived"
+                    ]
+                  },
+                  "condition": {
+                    "type": "string",
+                    "enum": [
+                      "new",
+                      "used_like_new",
+                      "used_good",
+                      "used_fair"
+                    ]
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": [
+                      "electronics",
+                      "books",
+                      "home",
+                      "clothing",
+                      "health",
+                      "services",
+                      "other"
+                    ]
+                  },
+                  "quantity": {
+                    "type": "integer"
+                  },
+                  "main_image_url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "external_product_id": {
+                    "type": "string"
+                  },
+                  "checkout_schema": {
+                    "type": "object"
+                  },
+                  "buyer_note_schema": {
+                    "type": "object"
+                  },
+                  "delivered_content_type": {
+                    "type": "string",
+                    "enum": [
+                      "text/plain",
+                      "text/markdown",
+                      "text/html",
+                      "application/json",
+                      "image/png",
+                      "image/jpeg"
+                    ]
+                  },
+                  "featured": {
+                    "type": "boolean"
+                  },
+                  "image_urls": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uri"
+                    }
+                  },
+                  "metadata": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Listing created"
+          },
+          "422": {
+            "description": "Validation error"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/listings/{id}": {
+      "get": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Get listing details",
+        "operationId": "sellerGetListing",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        },
+        "x-overpay-audience": "seller"
+      },
+      "patch": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Update a listing",
+        "operationId": "sellerUpdateListing",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Listing updated"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "422": {
+            "description": "Validation error"
+          }
+        },
+        "x-overpay-audience": "seller"
+      },
+      "delete": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Archive a listing",
+        "operationId": "sellerArchiveListing",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Listing archived"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/orders": {
+      "get": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "List sold orders",
+        "operationId": "sellerListOrders",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "fulfillment_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "awaiting_seller",
+                "submitting",
+                "processing",
+                "placed",
+                "shipping",
+                "delivered",
+                "failed",
+                "cancelled",
+                "rejected"
+              ]
+            },
+            "description": "Unknown values return 422 invalid_status_filter"
+          },
+          {
+            "name": "payment_status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "awaiting_quote",
+                "quoted",
+                "pending",
+                "paid",
+                "expired",
+                "cancelled"
+              ]
+            },
+            "description": "Unknown values return 422 invalid_status_filter"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SellerOrder"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/orders/{id}": {
+      "get": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Get order details with shipping",
+        "operationId": "sellerGetOrder",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "404": {
+            "description": "Not found"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/orders/{id}/ship": {
+      "patch": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Mark order shipped",
+        "operationId": "sellerShipOrder",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "tracking_number"
+                ],
+                "properties": {
+                  "tracking_number": {
+                    "type": "string"
+                  },
+                  "carrier": {
+                    "type": "string"
+                  },
+                  "tracking_url": {
+                    "type": "string",
+                    "format": "uri"
+                  },
+                  "seller_note": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Order shipped"
+          },
+          "422": {
+            "description": "Missing tracking number"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/orders/{id}/deliver": {
+      "patch": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Mark order delivered",
+        "operationId": "sellerDeliverOrder",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "delivered_content": {
+                    "type": "string"
+                  },
+                  "delivered_content_type": {
+                    "type": "string",
+                    "enum": [
+                      "text/plain",
+                      "text/markdown",
+                      "text/html",
+                      "application/json",
+                      "image/png",
+                      "image/jpeg"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Order delivered"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/orders/{id}/cancel": {
+      "patch": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Cancel order",
+        "operationId": "sellerCancelOrder",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order cancelled"
+          },
+          "422": {
+            "description": "Cannot cancel (not awaiting_seller)"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/orders/{id}/fail": {
+      "patch": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Mark order failed",
+        "operationId": "sellerFailOrder",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "fulfillment_error": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Order marked failed"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/profile": {
+      "get": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "View seller profile",
+        "operationId": "sellerGetProfile",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/SellerProfile"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-overpay-audience": "seller"
+      },
+      "patch": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Update seller profile",
+        "operationId": "sellerUpdateProfile",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "bio": {
+                    "type": "string"
+                  },
+                  "seller_slug": {
+                    "type": "string"
+                  },
+                  "seller_wallets_attributes": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "crypto_currency": {
+                          "type": "string",
+                          "enum": [
+                            "usdc_base",
+                            "zcash",
+                            "bitcoin"
+                          ]
+                        },
+                        "crypto_address": {
+                          "type": "string"
+                        },
+                        "derivation_key": {
+                          "type": "string"
+                        },
+                        "key_birthday_height": {
+                          "type": "integer"
+                        },
+                        "_destroy": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Profile updated"
+          },
+          "422": {
+            "description": "Validation error"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/merchant_credits/mint": {
+      "post": {
+        "tags": [
+          "Merchant Credits"
+        ],
+        "summary": "Grant credits to a buyer",
+        "description": "Mints credits to a buyer. If the calling seller belongs to an organization, the credit is minted on the ORGANIZATION (shared across all member bots), not the individual seller.",
+        "operationId": "sellerMintMerchantCredits",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "account_number",
+                  "amount_cents"
+                ],
+                "properties": {
+                  "account_number": {
+                    "type": "string",
+                    "description": "Buyer's 16-character account number"
+                  },
+                  "amount_cents": {
+                    "type": "integer",
+                    "description": "Amount to mint in USD cents (e.g. 1000 = $10.00)"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Credits minted. Body: { account_number, balance_cents, formatted_balance, amount_minted_cents, holder_type: seller|organization, holder_name }"
+          },
+          "404": {
+            "description": "Buyer not found"
+          },
+          "422": {
+            "description": "Invalid amount"
+          },
+          "403": {
+            "description": "Not an approved seller"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/merchant_credits": {
+      "get": {
+        "tags": [
+          "Merchant Credits"
+        ],
+        "summary": "List buyers holding credit balances",
+        "operationId": "sellerListMerchantCredits",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SellerMerchantCredit"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/merchant_credits/summary": {
+      "get": {
+        "tags": [
+          "Merchant Credits"
+        ],
+        "summary": "Aggregate credit stats for the seller",
+        "operationId": "sellerMerchantCreditSummary",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "holder_type": {
+                      "type": "string",
+                      "enum": [
+                        "seller",
+                        "organization"
+                      ],
+                      "description": "Whether the totals reflect the seller's own balances or the seller's organization"
+                    },
+                    "holder_name": {
+                      "type": "string"
+                    },
+                    "total_outstanding_cents": {
+                      "type": "integer"
+                    },
+                    "total_purchased_cents": {
+                      "type": "integer"
+                    },
+                    "total_redeemed_cents": {
+                      "type": "integer"
+                    },
+                    "buyer_count": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/merchant_credits/policies": {
+      "post": {
+        "tags": [
+          "Merchant Credits"
+        ],
+        "summary": "Declare an idempotent auto-top-up policy for a buyer",
+        "description": "Ensures the buyer is topped up to target_balance_cents on demand at redemption time, so seller bots never seed balances out-of-band. If the calling seller belongs to an organization, the policy is created at the ORGANIZATION level.",
+        "operationId": "sellerUpsertMerchantCreditPolicy",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "target_balance_cents"
+                ],
+                "properties": {
+                  "account_number": {
+                    "type": "string",
+                    "description": "Buyer's 16-character account number (or use seller_slug)"
+                  },
+                  "seller_slug": {
+                    "type": "string",
+                    "description": "Buyer lookup by seller slug, when account_number is absent"
+                  },
+                  "target_balance_cents": {
+                    "type": "integer",
+                    "description": "Balance to maintain for the buyer, in USD cents"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Policy upserted. Body: { id, buyer_account_number, buyer_seller_slug, target_balance_cents, holder_type: seller|organization, updated_at }"
+          },
+          "404": {
+            "description": "Buyer not found"
+          },
+          "422": {
+            "description": "Invalid target"
+          },
+          "403": {
+            "description": "Not an approved seller"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/organization": {
+      "patch": {
+        "tags": [
+          "Organization"
+        ],
+        "summary": "Reconcile the calling bot's organization membership",
+        "description": "Idempotently ensures the authenticated seller belongs to the named organization, creating it if needed and moving the seller out of any prior org. Used by bot_manager on every supervisor bootstrap to keep DSL-declared membership in sync.",
+        "operationId": "sellerReconcileOrganization",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "organization"
+                ],
+                "properties": {
+                  "organization": {
+                    "type": "string",
+                    "description": "Organization slug, e.g. 'core'"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Membership reconciled. Body: { organization_slug, organization_name }"
+          },
+          "422": {
+            "description": "Missing organization param"
+          },
+          "403": {
+            "description": "Not an approved seller"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/orders/{id}/log": {
+      "get": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "The order's seller log, oldest first",
+        "operationId": "sellerGetOrderLog",
+        "description": "Append-only entries visible only to the order's seller and moderators, never the buyer.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SellerLogEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found"
+          }
+        },
+        "x-overpay-audience": "seller"
+      },
+      "post": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Append to the order's seller log",
+        "operationId": "sellerAppendOrderLog",
+        "description": "Append-only: entries can't be edited or deleted; a correction is another\nentry. A dedup_key already on this order returns that entry (200,\nduplicate: true) instead of appending, so retries are safe. data must be\na JSON object of at most 16384 bytes; an order holds at most 500 entries.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_.:-]{0,63}$"
+                  },
+                  "data": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 2000
+                  },
+                  "dedup_key": {
+                    "type": "string",
+                    "maxLength": 255
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Appended"
+          },
+          "200": {
+            "description": "dedup_key matched an existing entry (duplicate: true)"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "422": {
+            "description": "Validation error (data or note required, bad kind, too large)"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    },
+    "/api/v1/seller/log": {
+      "get": {
+        "tags": [
+          "Seller"
+        ],
+        "summary": "Every seller-log entry across the seller's orders, newest first",
+        "operationId": "sellerListLog",
+        "description": "For reconciling your own books: each entry carries a summary of its\norder's money (authorized/captured cents, seller revenue, platform fee).\nPass next_cursor back as cursor for the next page.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "listing_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Only entries at or after this time",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SellerLogEntry"
+                      }
+                    },
+                    "next_cursor": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid since or cursor"
+          }
+        },
+        "x-overpay-audience": "seller"
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API token (64 hex characters) — from `POST /api/v1/buyer/register`,\nthe OAuth flow, the account page, or (sellers) `POST /api/v1/seller/register`.\n"
+      },
+      "nostrAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization",
+        "description": "NIP-98: `Nostr <base64 kind-27235 event>` with tags `u` (the exact\nrequest URL, query string included) and `method`, signed within 60s.\n"
+      },
+      "gatewayAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The x402 gateway's shared secret (GATEWAY_API_SECRET)."
+      }
+    },
+    "headers": {
+      "IdempotentReplayed": {
+        "description": "Present (`true`) when this response is a replay of an earlier request with the same Idempotency-Key.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "true"
+          ]
+        }
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "description": "A unique key per logical request (a UUID is ideal), reused on retries\nof that request. Remembered for 24 hours per API user. Reusing a key\nwith a different request is 422 `idempotency_key_reused`.\n",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[\\x21-\\x7E]+$"
+        }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "description": "Opaque cursor from a previous page's `next_cursor` (empty or absent for the first page).",
+        "schema": {
+          "type": "string",
+          "nullable": true
+        }
+      },
+      "ListingId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "OrderId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "SpendAuthorizationId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      },
+      "SellerSlug": {
+        "name": "seller_slug",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "Missing or invalid credentials",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such resource (or not visible to the caller)",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "UnprocessableEntity": {
+        "description": "The request was understood but can't be carried out",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Cents": {
+        "type": "number",
+        "description": "Amount in US cents. Integer for whole cents; fractional for sub-cent amounts."
+      },
+      "NullableCents": {
+        "type": "number",
+        "nullable": true,
+        "description": "Amount in US cents, or null when not (yet) known."
+      },
+      "DecimalString": {
+        "type": "string",
+        "pattern": "^-?\\d+(\\.\\d+)?$",
+        "description": "A decimal number rendered as a string (e.g. \"500.0\")."
+      },
+      "NextCursor": {
+        "type": "string",
+        "nullable": true,
+        "description": "Cursor for the next page, or null on the last page."
+      },
+      "Error": {
+        "type": "object",
+        "required": [
+          "error",
+          "code"
+        ],
+        "description": "Every API error. `code` is the stable machine-readable part; extra\nfields depend on the code (see ErrorCode).\n",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable message. Don't match on it."
+          },
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "remaining_cents": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Cents"
+              }
+            ],
+            "description": "authorization_closed / authorization_listing_mismatch / authorization_exhausted"
+          },
+          "min_authorization_cents": {
+            "type": "number",
+            "nullable": true,
+            "description": "authorization_out_of_bounds"
+          },
+          "max_authorization_cents": {
+            "type": "number",
+            "nullable": true,
+            "description": "authorization_out_of_bounds"
+          },
+          "authorization_cents": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Cents"
+              }
+            ],
+            "description": "insufficient_credits"
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "unknown_variant — the listing's active variant keys"
+          },
+          "parameter": {
+            "type": "string",
+            "description": "invalid_status_filter — the offending query parameter"
+          },
+          "allowed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "invalid_status_filter — the accepted values"
+          }
+        },
+        "additionalProperties": true
+      },
+      "ErrorCode": {
+        "type": "string",
+        "x-extensible-enum": true,
+        "description": "Machine-readable error code. New codes may be added; treat unknown ones as generic failures.",
+        "enum": [
+          "unauthorized",
+          "token_required",
+          "nip98_invalid",
+          "nip98_address_mismatch",
+          "forbidden",
+          "not_found",
+          "validation_failed",
+          "invalid_parameter",
+          "invalid_cursor",
+          "invalid_status_filter",
+          "invalid_amount",
+          "payer_address_required",
+          "conflict",
+          "listing_unavailable",
+          "seller_crypto_missing",
+          "unknown_variant",
+          "invalid_client_session_id",
+          "duplicate_settlement",
+          "invalid_authorization",
+          "conflicting_authorization",
+          "authorization_requires_credits",
+          "authorization_not_supported",
+          "authorization_out_of_bounds",
+          "authorization_closed",
+          "authorization_listing_mismatch",
+          "authorization_exhausted",
+          "insufficient_credits",
+          "no_credits",
+          "order_not_payable",
+          "redemption_failed",
+          "idempotency_key_invalid",
+          "idempotency_key_reused",
+          "idempotency_request_in_progress",
+          "upstream_error",
+          "upstream_unavailable"
+        ]
+      },
+      "PaymentStatus": {
+        "type": "string",
+        "enum": [
+          "awaiting_quote",
+          "quoted",
+          "pending",
+          "paid",
+          "expired",
+          "cancelled"
+        ]
+      },
+      "FulfillmentStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "awaiting_seller",
+          "submitting",
+          "processing",
+          "placed",
+          "shipping",
+          "delivered",
+          "failed",
+          "cancelled",
+          "rejected"
+        ]
+      },
+      "RejectionReason": {
+        "type": "string",
+        "enum": [
+          "authorization_too_low",
+          "unsupported_input",
+          "upstream_unavailable"
+        ]
+      },
+      "CreditSource": {
+        "type": "string",
+        "description": "Where a credit load came from — a paid load (purchase), a seller's mint or policy top-up (seller_grant), or an admin's grant (admin_grant).",
+        "enum": [
+          "purchase",
+          "seller_grant",
+          "admin_grant"
+        ]
+      },
+      "SellerRef": {
+        "type": "object",
+        "required": [
+          "name",
+          "slug"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "DeliveryEta": {
+        "type": "object",
+        "nullable": true,
+        "required": [
+          "p50_seconds",
+          "p90_seconds",
+          "source"
+        ],
+        "properties": {
+          "p50_seconds": {
+            "type": "integer"
+          },
+          "p90_seconds": {
+            "type": "integer",
+            "nullable": true
+          },
+          "source": {
+            "type": "string"
+          }
+        }
+      },
+      "ProviderTool": {
+        "type": "object",
+        "nullable": true,
+        "required": [
+          "name"
+        ],
+        "description": "Present when the listing is offered as a model-callable tool under this function name.",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "JsonSchemaObject": {
+        "type": "object",
+        "nullable": true,
+        "description": "A JSON Schema document (opaque to the API).",
+        "additionalProperties": true
+      },
+      "ListingVariant": {
+        "type": "object",
+        "required": [
+          "key",
+          "title",
+          "rate_card",
+          "min_authorization_cents",
+          "max_authorization_cents",
+          "metadata"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "rate_card": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true,
+            "description": "Seller-published and opaque to the marketplace."
+          },
+          "min_authorization_cents": {
+            "type": "integer",
+            "nullable": true
+          },
+          "max_authorization_cents": {
+            "type": "integer",
+            "nullable": true
+          },
+          "metadata": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true
+          }
+        }
+      },
+      "Listing": {
+        "type": "object",
+        "description": "A listing. `GET /api/v1/listings` returns the summary fields (with\n`description` truncated to 200 characters); `GET /api/v1/listings/{id}`\nadds the detail fields.\n",
+        "required": [
+          "id",
+          "title",
+          "description",
+          "price_cents",
+          "price_usd",
+          "free",
+          "currency",
+          "category",
+          "condition",
+          "quantity",
+          "main_image_url",
+          "delivered_content_type",
+          "seller",
+          "checkout_url",
+          "delivery_eta",
+          "provider_tool",
+          "published_at",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "price_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "price_usd": {
+            "type": "string"
+          },
+          "free": {
+            "type": "boolean"
+          },
+          "currency": {
+            "type": "string",
+            "nullable": true
+          },
+          "category": {
+            "type": "string",
+            "nullable": true
+          },
+          "condition": {
+            "type": "string",
+            "nullable": true
+          },
+          "quantity": {
+            "type": "integer",
+            "nullable": true,
+            "description": "-1 means unlimited."
+          },
+          "main_image_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "delivered_content_type": {
+            "type": "string",
+            "nullable": true
+          },
+          "seller": {
+            "$ref": "#/components/schemas/SellerRef"
+          },
+          "checkout_url": {
+            "type": "string",
+            "description": "x402 gateway checkout URL for this listing."
+          },
+          "delivery_eta": {
+            "$ref": "#/components/schemas/DeliveryEta"
+          },
+          "provider_tool": {
+            "$ref": "#/components/schemas/ProviderTool"
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "checkout_schema": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JsonSchemaObject"
+              }
+            ],
+            "description": "Detail only. Schema of the checkout data (e.g. shipping address)."
+          },
+          "buyer_note_schema": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JsonSchemaObject"
+              }
+            ],
+            "description": "Detail only. Schema of the buyer_note; send the note as a JSON string."
+          },
+          "delivered_content_schema": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JsonSchemaObject"
+              }
+            ],
+            "description": "Detail only. Schema of delivered_content when it is JSON."
+          },
+          "variant_field": {
+            "type": "string",
+            "nullable": true,
+            "description": "Detail only. The buyer_note key that implies a variant (e.g. \"model\")."
+          },
+          "pricing_mode": {
+            "type": "string",
+            "enum": [
+              "fixed",
+              "metered"
+            ],
+            "description": "Detail only. `metered` means the price is only the default authorization."
+          },
+          "min_authorization_cents": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Detail only."
+          },
+          "max_authorization_cents": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Detail only."
+          },
+          "variants": {
+            "type": "array",
+            "description": "Detail only. Active variants.",
+            "items": {
+              "$ref": "#/components/schemas/ListingVariant"
+            }
+          }
+        }
+      },
+      "Seller": {
+        "type": "object",
+        "required": [
+          "name",
+          "slug",
+          "wallets"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "wallets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "crypto_currency",
+                "crypto_address"
+              ],
+              "properties": {
+                "crypto_currency": {
+                  "type": "string"
+                },
+                "crypto_address": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Rejection": {
+        "type": "object",
+        "nullable": true,
+        "description": "Why the seller rejected the order (fulfillment_status `rejected`, terminal).",
+        "required": [
+          "reason_code"
+        ],
+        "properties": {
+          "reason_code": {
+            "$ref": "#/components/schemas/RejectionReason"
+          },
+          "message": {
+            "type": "string"
+          },
+          "estimated_cost_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "required_authorization_cents": {
+            "$ref": "#/components/schemas/Cents"
+          }
+        }
+      },
+      "OrderListingRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "title"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "delivered_content_schema": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/JsonSchemaObject"
+              }
+            ],
+            "description": "Detail only, when the listing declares one."
+          }
+        }
+      },
+      "Order": {
+        "type": "object",
+        "description": "An order. List responses carry the summary fields; `GET\n/api/v1/orders/{id}` (and the list with `ids[]`) add the detail\nfields: delivered output (inline or offloaded) and streaming partial\noutput.\n",
+        "required": [
+          "id",
+          "payment_status",
+          "fulfillment_status",
+          "product_title",
+          "free",
+          "product_price_cents",
+          "product_price_usd",
+          "total_usd_cents",
+          "total_usd",
+          "settled_amount_cents",
+          "refunded_cents",
+          "refund_status",
+          "fulfillment_error",
+          "authorized_cents",
+          "captured_cents",
+          "released_cents",
+          "rejection",
+          "spend_authorization_id",
+          "seller_revenue_cents",
+          "platform_fee_cents",
+          "platform_fee_usd",
+          "buyer_note",
+          "variant_key",
+          "client_session_id",
+          "order_url",
+          "delivered_content_type",
+          "tracking_number",
+          "carrier",
+          "tracking_url",
+          "created_at",
+          "paid_at",
+          "delivered_at",
+          "expected_delivered_at",
+          "delivery_skew_seconds",
+          "settlement_tx_hash"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "payment_status": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "fulfillment_status": {
+            "$ref": "#/components/schemas/FulfillmentStatus"
+          },
+          "product_title": {
+            "type": "string"
+          },
+          "free": {
+            "type": "boolean"
+          },
+          "product_price_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "product_price_usd": {
+            "type": "string",
+            "description": "\"$x.xxxx\", or \"Free\"."
+          },
+          "total_usd_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "total_usd": {
+            "type": "string"
+          },
+          "settled_amount_cents": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Cents"
+              }
+            ],
+            "description": "What the buyer actually paid after refunds."
+          },
+          "refunded_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "refund_status": {
+            "type": "string",
+            "enum": [
+              "none",
+              "partial",
+              "refunded"
+            ]
+          },
+          "fulfillment_error": {
+            "type": "string",
+            "nullable": true
+          },
+          "authorized_cents": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/NullableCents"
+              }
+            ],
+            "description": "What the buyer committed when the order was paid."
+          },
+          "captured_cents": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/NullableCents"
+              }
+            ],
+            "description": "What the seller finally kept; null until it captures or rejects."
+          },
+          "released_cents": {
+            "$ref": "#/components/schemas/NullableCents"
+          },
+          "rejection": {
+            "$ref": "#/components/schemas/Rejection"
+          },
+          "spend_authorization_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "seller_revenue_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "platform_fee_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "platform_fee_usd": {
+            "type": "string"
+          },
+          "buyer_note": {
+            "type": "string",
+            "nullable": true
+          },
+          "variant_key": {
+            "type": "string",
+            "nullable": true
+          },
+          "client_session_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "The buyer's own opaque label for the session this order belongs to, set at creation. Never shown to the seller."
+          },
+          "order_url": {
+            "type": "string"
+          },
+          "delivered_content_type": {
+            "type": "string",
+            "nullable": true
+          },
+          "tracking_number": {
+            "type": "string",
+            "nullable": true
+          },
+          "carrier": {
+            "type": "string",
+            "nullable": true
+          },
+          "tracking_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "paid_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "delivered_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "expected_delivered_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "delivery_skew_seconds": {
+            "type": "integer",
+            "nullable": true
+          },
+          "settlement_tx_hash": {
+            "type": "string",
+            "nullable": true
+          },
+          "listing": {
+            "$ref": "#/components/schemas/OrderListingRef"
+          },
+          "delivered_content": {
+            "type": "string",
+            "nullable": true,
+            "description": "Detail only. The deliverable, inline (absent when offloaded)."
+          },
+          "delivered_content_url": {
+            "type": "string",
+            "description": "Detail only. Where to download an offloaded deliverable (no auth needed)."
+          },
+          "delivered_content_byte_size": {
+            "type": "integer",
+            "description": "Detail only, with delivered_content_url."
+          },
+          "delivered_content_filename": {
+            "type": "string",
+            "description": "Detail only, with delivered_content_url."
+          },
+          "partial_seq": {
+            "type": "integer",
+            "description": "Detail only, while the seller streams. Sequence of the latest partial chunk."
+          },
+          "partial_content": {
+            "type": "string",
+            "description": "Detail only, while the seller streams; omitted when `since_seq` equals `partial_seq`."
+          }
+        }
+      },
+      "CreateOrderRequest": {
+        "type": "object",
+        "required": [
+          "listing_id"
+        ],
+        "properties": {
+          "listing_id": {
+            "type": "string"
+          },
+          "buyer_note": {
+            "type": "string",
+            "description": "Free text, or a JSON document encoded as a string (see the listing's buyer_note_schema)."
+          },
+          "variant": {
+            "type": "string",
+            "description": "An active variant key. Without it, the listing's variant_field in a JSON buyer_note implies one."
+          },
+          "pay": {
+            "type": "string",
+            "enum": [
+              "merchant_credits"
+            ]
+          },
+          "authorization_cents": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Metered listings only. Requires pay=merchant_credits."
+          },
+          "spend_authorization_id": {
+            "type": "string",
+            "description": "Size and pay this order from a spend authorization. Requires pay=merchant_credits."
+          },
+          "client_session_id": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "The buyer's own opaque label for the session (conversation, run, job)\nthis order belongs to; list a session's orders with\n`GET /api/v1/orders?client_session_id=`. Never shown to the seller.\nLonger than 256 characters, or not a string, is 422\n`invalid_client_session_id`.\n"
+          }
+        }
+      },
+      "PaymentOutcome": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "fully_paid",
+              "partial",
+              "already_paid",
+              "failed"
+            ]
+          },
+          "amount_redeemed_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateOrderResponse": {
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Order"
+          },
+          "payment": {
+            "$ref": "#/components/schemas/PaymentOutcome"
+          }
+        }
+      },
+      "X402OrderRequest": {
+        "type": "object",
+        "required": [
+          "listing_id",
+          "payer_address",
+          "tx_hash",
+          "merchant_amount_usdc",
+          "platform_fee_usdc"
+        ],
+        "properties": {
+          "listing_id": {
+            "type": "string"
+          },
+          "payer_address": {
+            "type": "string"
+          },
+          "tx_hash": {
+            "type": "string"
+          },
+          "merchant_amount_usdc": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "Atomic USDC units (6 decimals)."
+          },
+          "platform_fee_usdc": {
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "Atomic USDC units (6 decimals)."
+          },
+          "network": {
+            "type": "string",
+            "description": "CAIP-2 chain id (default \"eip155:84532\")."
+          },
+          "buyer_note": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string"
+          },
+          "buyer_api_key": {
+            "type": "string"
+          },
+          "shipping": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "X402Order": {
+        "type": "object",
+        "required": [
+          "order_id",
+          "payment_status",
+          "fulfillment_status",
+          "listing_id",
+          "product_title",
+          "seller_revenue_cents",
+          "platform_fee_cents",
+          "settlement_tx_hash",
+          "created_at"
+        ],
+        "properties": {
+          "order_id": {
+            "type": "string"
+          },
+          "payment_status": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "fulfillment_status": {
+            "$ref": "#/components/schemas/FulfillmentStatus"
+          },
+          "listing_id": {
+            "type": "string"
+          },
+          "product_title": {
+            "type": "string"
+          },
+          "seller_revenue_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "platform_fee_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "settlement_tx_hash": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CreateSpendAuthorizationRequest": {
+        "type": "object",
+        "required": [
+          "listing_id",
+          "cap_cents"
+        ],
+        "properties": {
+          "listing_id": {
+            "type": "string"
+          },
+          "cap_cents": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "expires_in_seconds": {
+            "type": "integer",
+            "description": "Clamped to 60..86400; default 3600."
+          }
+        }
+      },
+      "SpendAuthorization": {
+        "type": "object",
+        "required": [
+          "id",
+          "listing_id",
+          "cap_cents",
+          "spent_cents",
+          "remaining_cents",
+          "status",
+          "expires_at",
+          "closed_at",
+          "orders_count",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "listing_id": {
+            "type": "string"
+          },
+          "cap_cents": {
+            "type": "integer"
+          },
+          "spent_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "remaining_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "closed",
+              "expired"
+            ]
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "closed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "orders_count": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SellerHeldCredit": {
+        "type": "object",
+        "required": [
+          "id",
+          "holder_type",
+          "seller_slug",
+          "seller_name",
+          "balance_cents",
+          "formatted_balance",
+          "total_purchased_cents",
+          "total_redeemed_cents",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "holder_type": {
+            "type": "string",
+            "enum": [
+              "seller"
+            ]
+          },
+          "seller_slug": {
+            "type": "string"
+          },
+          "seller_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "balance_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "formatted_balance": {
+            "type": "string"
+          },
+          "total_purchased_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "total_redeemed_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "OrganizationHeldCredit": {
+        "type": "object",
+        "required": [
+          "id",
+          "holder_type",
+          "organization_slug",
+          "organization_name",
+          "core",
+          "balance_cents",
+          "formatted_balance",
+          "total_purchased_cents",
+          "total_redeemed_cents",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "holder_type": {
+            "type": "string",
+            "enum": [
+              "organization"
+            ]
+          },
+          "organization_slug": {
+            "type": "string"
+          },
+          "organization_name": {
+            "type": "string",
+            "nullable": true
+          },
+          "core": {
+            "type": "boolean",
+            "description": "True for core marketplace credits (the primary spend balance)."
+          },
+          "balance_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "formatted_balance": {
+            "type": "string"
+          },
+          "total_purchased_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "total_redeemed_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "MerchantCredit": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SellerHeldCredit"
+          },
+          {
+            "$ref": "#/components/schemas/OrganizationHeldCredit"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "holder_type",
+          "mapping": {
+            "seller": "#/components/schemas/SellerHeldCredit",
+            "organization": "#/components/schemas/OrganizationHeldCredit"
+          }
+        }
+      },
+      "MerchantCreditBalance": {
+        "type": "object",
+        "required": [
+          "seller_slug",
+          "balance_cents",
+          "formatted_balance",
+          "organization"
+        ],
+        "properties": {
+          "seller_slug": {
+            "type": "string"
+          },
+          "balance_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "formatted_balance": {
+            "type": "string"
+          },
+          "organization": {
+            "type": "string",
+            "nullable": true,
+            "description": "Slug of the organization whose balance this is, when the seller is in one."
+          }
+        }
+      },
+      "MerchantCreditTransaction": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "label",
+          "created_at",
+          "amount_cents",
+          "balance_before_cents",
+          "balance_after_cents",
+          "credit_id",
+          "holder_type",
+          "order_id",
+          "order_title"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "load",
+              "spend",
+              "refund"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "example": "Admin Credit",
+            "description": "Human-readable description: Credit Load, Seller Credit, Admin Credit, Order Payment or Refund."
+          },
+          "source": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/CreditSource"
+              }
+            ],
+            "description": "Loads only."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "amount_cents": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Cents"
+              }
+            ],
+            "description": "Always positive (to 4 decimal places; micropayments resolve to $0.000001); `type` gives the direction."
+          },
+          "balance_before_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "balance_after_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "credit_id": {
+            "type": "string"
+          },
+          "holder_type": {
+            "type": "string",
+            "enum": [
+              "seller",
+              "organization"
+            ]
+          },
+          "seller_slug": {
+            "type": "string",
+            "description": "Seller-held credits only."
+          },
+          "organization_slug": {
+            "type": "string",
+            "description": "Organization-held credits only."
+          },
+          "core": {
+            "type": "boolean",
+            "description": "Organization-held credits only."
+          },
+          "order_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "order_title": {
+            "type": "string",
+            "nullable": true
+          },
+          "redemption_id": {
+            "type": "string",
+            "description": "Refunds only."
+          }
+        }
+      },
+      "AmountRequest": {
+        "type": "object",
+        "required": [
+          "amount_cents"
+        ],
+        "properties": {
+          "amount_cents": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": true,
+            "description": "USD cents to 4 decimal places (micropayments resolve to $0.000001)."
+          }
+        }
+      },
+      "RedeemRequest": {
+        "type": "object",
+        "required": [
+          "order_id"
+        ],
+        "properties": {
+          "order_id": {
+            "type": "string"
+          }
+        }
+      },
+      "CreditLoad": {
+        "type": "object",
+        "required": [
+          "order_id",
+          "bolt11",
+          "payment_hash",
+          "sats",
+          "amount_cents",
+          "expires_at",
+          "order_url"
+        ],
+        "properties": {
+          "order_id": {
+            "type": "string"
+          },
+          "bolt11": {
+            "type": "string"
+          },
+          "payment_hash": {
+            "type": "string"
+          },
+          "sats": {
+            "type": "integer"
+          },
+          "amount_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "order_url": {
+            "type": "string"
+          }
+        }
+      },
+      "CreditPurchase": {
+        "type": "object",
+        "required": [
+          "order_id",
+          "order_type",
+          "total_usd_cents",
+          "payment_status",
+          "payment_expires_at",
+          "order_url",
+          "message"
+        ],
+        "properties": {
+          "order_id": {
+            "type": "string"
+          },
+          "order_type": {
+            "type": "string"
+          },
+          "total_usd_cents": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DecimalString"
+              }
+            ],
+            "description": "Rendered as a decimal string (unlike other money fields)."
+          },
+          "payment_status": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "payment_expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "order_url": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "beneficiary_organization": {
+            "type": "string",
+            "description": "Slug of the organization the credits go to, when the seller is in one."
+          },
+          "payment_address": {
+            "type": "string",
+            "description": "The seller's USDC address, when the seller has a USDC wallet."
+          },
+          "payment_amount_usdc": {
+            "type": "number"
+          }
+        }
+      },
+      "Redemption": {
+        "type": "object",
+        "required": [
+          "status",
+          "amount_redeemed_cents",
+          "message"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "fully_paid",
+              "partial",
+              "already_paid"
+            ]
+          },
+          "amount_redeemed_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "credit_balance_cents": {
+            "$ref": "#/components/schemas/Cents"
+          },
+          "message": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "Account": {
+        "type": "object",
+        "required": [
+          "account_number",
+          "formatted_account_number",
+          "username"
+        ],
+        "properties": {
+          "account_number": {
+            "type": "string"
+          },
+          "formatted_account_number": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "BuyerRegistrationRequest": {
+        "type": "object",
+        "properties": {
+          "username": {
+            "type": "string"
+          },
+          "token_name": {
+            "type": "string"
+          }
+        }
+      },
+      "BuyerRegistration": {
+        "type": "object",
+        "required": [
+          "user_id",
+          "account_number",
+          "nostr_pubkey",
+          "token",
+          "token_name"
+        ],
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "account_number": {
+            "type": "string"
+          },
+          "nostr_pubkey": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string",
+            "description": "The new API token. Shown once."
+          },
+          "token_name": {
+            "type": "string"
+          }
+        }
+      },
+      "WebSession": {
+        "type": "object",
+        "required": [
+          "login_url",
+          "expires_at"
+        ],
+        "properties": {
+          "login_url": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "integer",
+            "description": "Unix time."
+          }
+        }
+      },
+      "OAuthServerMetadata": {
+        "type": "object",
+        "required": [
+          "issuer",
+          "authorization_endpoint",
+          "token_endpoint",
+          "registration_endpoint",
+          "response_types_supported",
+          "grant_types_supported",
+          "code_challenge_methods_supported"
+        ],
+        "properties": {
+          "issuer": {
+            "type": "string"
+          },
+          "authorization_endpoint": {
+            "type": "string"
+          },
+          "token_endpoint": {
+            "type": "string"
+          },
+          "registration_endpoint": {
+            "type": "string"
+          },
+          "response_types_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "grant_types_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "code_challenge_methods_supported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "OAuthClientRequest": {
+        "type": "object",
+        "properties": {
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "client_name": {
+            "type": "string"
+          }
+        }
+      },
+      "OAuthClient": {
+        "type": "object",
+        "required": [
+          "client_id",
+          "client_id_issued_at",
+          "redirect_uris",
+          "grant_types",
+          "response_types",
+          "token_endpoint_auth_method"
+        ],
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "client_id_issued_at": {
+            "type": "integer"
+          },
+          "redirect_uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "grant_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "response_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "token_endpoint_auth_method": {
+            "type": "string"
+          },
+          "client_name": {
+            "type": "string"
+          }
+        }
+      },
+      "OAuthTokenRequest": {
+        "type": "object",
+        "required": [
+          "grant_type",
+          "code",
+          "redirect_uri",
+          "code_verifier"
+        ],
+        "properties": {
+          "grant_type": {
+            "type": "string",
+            "enum": [
+              "authorization_code"
+            ]
+          },
+          "code": {
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "code_verifier": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          }
+        }
+      },
+      "OAuthToken": {
+        "type": "object",
+        "required": [
+          "access_token",
+          "token_type",
+          "scope"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string"
+          },
+          "token_type": {
+            "type": "string",
+            "enum": [
+              "bearer"
+            ]
+          },
+          "scope": {
+            "type": "string"
+          }
+        }
+      },
+      "OAuthError": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "description": "RFC 6749 §5.2 error. Not part of the API's `code` scheme.",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "error_description": {
+            "type": "string"
+          }
+        }
+      },
+      "SellerListing": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "price_cents": {
+            "type": "integer"
+          },
+          "currency": {
+            "type": "string",
+            "example": "USD"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "electronics",
+              "books",
+              "home",
+              "clothing",
+              "health",
+              "services",
+              "other"
+            ]
+          },
+          "condition": {
+            "type": "string",
+            "enum": [
+              "new",
+              "used_like_new",
+              "used_good",
+              "used_fair"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "active",
+              "paused",
+              "sold_out",
+              "archived"
+            ]
+          },
+          "quantity": {
+            "type": "integer"
+          },
+          "main_image_url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true
+          },
+          "image_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri"
+            }
+          },
+          "checkout_schema": {
+            "type": "object",
+            "nullable": true,
+            "description": "JSON Schema for post-quote/pre-payment buyer input (e.g. shipping address). May reference marketplace primitives like {\"$primitive\": \"shipping_address:v1\"}."
+          },
+          "buyer_note_schema": {
+            "type": "object",
+            "nullable": true,
+            "description": "JSON Schema for the buyer-note input."
+          },
+          "delivered_content_type": {
+            "type": "string",
+            "enum": [
+              "text/plain",
+              "text/markdown",
+              "text/html",
+              "application/json",
+              "image/png",
+              "image/jpeg"
+            ],
+            "default": "text/plain"
+          },
+          "featured": {
+            "type": "boolean"
+          },
+          "external_product_id": {
+            "type": "string",
+            "nullable": true
+          },
+          "metadata": {
+            "type": "object"
+          },
+          "seller": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "slug": {
+                "type": "string"
+              }
+            }
+          },
+          "checkout_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "published_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SellerOrder": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "payment_status": {
+            "type": "string",
+            "enum": [
+              "awaiting_quote",
+              "quoted",
+              "pending",
+              "paid",
+              "expired",
+              "cancelled"
+            ]
+          },
+          "fulfillment_status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "awaiting_seller",
+              "submitting",
+              "processing",
+              "placed",
+              "shipping",
+              "delivered",
+              "failed",
+              "cancelled",
+              "rejected"
+            ]
+          },
+          "fulfillment_error": {
+            "type": "string",
+            "nullable": true,
+            "description": "Why the seller couldn't fulfill, when fulfillment_status is failed"
+          },
+          "refunded_cents": {
+            "type": "number",
+            "description": "Merchant credits given back on this order"
+          },
+          "refund_status": {
+            "type": "string",
+            "enum": [
+              "none",
+              "partial",
+              "refunded"
+            ],
+            "description": "Credits on a failed or cancelled order are refunded automatically. A metered capture below the authorization reads partial; captured_cents distinguishes it"
+          },
+          "product_title": {
+            "type": "string"
+          },
+          "product_price_cents": {
+            "type": "integer"
+          },
+          "product_price_usd": {
+            "type": "string"
+          },
+          "total_usd_cents": {
+            "type": "integer"
+          },
+          "total_usd": {
+            "type": "string"
+          },
+          "seller_revenue_cents": {
+            "type": "integer"
+          },
+          "platform_fee_cents": {
+            "type": "integer"
+          },
+          "platform_fee_usd": {
+            "type": "string"
+          },
+          "buyer_note": {
+            "type": "string",
+            "nullable": true
+          },
+          "delivered_content": {
+            "type": "string",
+            "nullable": true
+          },
+          "delivered_content_type": {
+            "type": "string",
+            "enum": [
+              "text/plain",
+              "text/markdown",
+              "text/html",
+              "application/json",
+              "image/png",
+              "image/jpeg"
+            ],
+            "nullable": true
+          },
+          "delivered_content_url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true,
+            "description": "Download URL when the deliverable is stored as a file (detail only); delivered_content is then absent"
+          },
+          "delivered_content_byte_size": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Size of the file at delivered_content_url (detail only)"
+          },
+          "delivered_content_filename": {
+            "type": "string",
+            "nullable": true,
+            "description": "Filename of the file at delivered_content_url (detail only)"
+          },
+          "tracking_number": {
+            "type": "string",
+            "nullable": true
+          },
+          "carrier": {
+            "type": "string",
+            "nullable": true
+          },
+          "tracking_url": {
+            "type": "string",
+            "format": "uri",
+            "nullable": true
+          },
+          "settlement_tx_hash": {
+            "type": "string",
+            "nullable": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "paid_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "delivered_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "listing": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "title": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "SellerProfile": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "account_number": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          },
+          "seller_slug": {
+            "type": "string"
+          },
+          "bio": {
+            "type": "string",
+            "nullable": true
+          },
+          "wallets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "crypto_currency": {
+                  "type": "string",
+                  "enum": [
+                    "usdc_base",
+                    "zcash",
+                    "bitcoin"
+                  ]
+                },
+                "crypto_address": {
+                  "type": "string"
+                },
+                "has_derivation_key": {
+                  "type": "boolean"
+                },
+                "key_birthday_height": {
+                  "type": "integer",
+                  "nullable": true
+                }
+              }
+            }
+          },
+          "total_sales_count": {
+            "type": "integer"
+          },
+          "total_sales_cents": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SellerMerchantCredit": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "buyer_name": {
+            "type": "string"
+          },
+          "balance_cents": {
+            "type": "integer"
+          },
+          "formatted_balance": {
+            "type": "string",
+            "example": "$10.00"
+          },
+          "total_purchased_cents": {
+            "type": "integer"
+          },
+          "total_redeemed_cents": {
+            "type": "integer"
+          },
+          "holder_type": {
+            "type": "string",
+            "enum": [
+              "seller",
+              "organization"
+            ],
+            "description": "Whether this balance is held by the caller as a seller or by the caller's organization"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SellerLogEntry": {
+        "type": "object",
+        "description": "One entry in an order's seller log: append-only, readable only by the\norder's seller and moderators, never the buyer. kind and data are the\nauthor's; the marketplace stores them but never interprets them.\n",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "order_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "author_role": {
+            "type": "string",
+            "enum": [
+              "seller",
+              "moderator"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.:-]{0,63}$",
+            "example": "openrouter.generation"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "note": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 2000
+          },
+          "dedup_key": {
+            "type": "string",
+            "nullable": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}
