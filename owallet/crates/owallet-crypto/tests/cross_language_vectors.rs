@@ -62,7 +62,8 @@ fn nip98_vectors_round_trip_in_rust() {
         let sk = PrivateKey::from_hex(&v.secret_key_hex)
             .unwrap_or_else(|e| panic!("vector {} secret_key_hex: {e:?}", v.name));
 
-        let header = nip98::sign_at(&sk, &v.url, &v.method, v.created_at, [0u8; 32]);
+        let header = nip98::sign_at(&sk, &v.url, &v.method, v.created_at, [0u8; 32])
+            .unwrap_or_else(|e| panic!("vector {} sign: {e}", v.name));
         let b64 = header
             .strip_prefix("Nostr ")
             .unwrap_or_else(|| panic!("vector {}: missing 'Nostr ' prefix in {header}", v.name));

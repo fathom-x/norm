@@ -2,9 +2,10 @@
 //! mock server. Each test asserts both the wire shape that goes out
 //! (method, path, headers, body) and the shape that comes back.
 
+use overpay_sdk::Pkce;
 use owallet_crypto::{derive_from_mnemonic, Mnemonic, PrivateKey, EVM_HD_PATH};
-use owallet_overpay::models::{ListingFilters, OAuthRegisterRequest, OrderFilters};
-use owallet_overpay::{Auth, OverpayClient, Pkce};
+use owallet_overpay::models::{ListingFilters, OrderFilters};
+use owallet_overpay::{Auth, OverpayClient};
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -26,40 +27,6 @@ async fn fixture() -> (MockServer, OverpayClient) {
 // ---------------------------------------------------------------------------
 // OAuth flow
 // ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn register_oauth_client_posts_expected_body() {
-    let (server, client) = fixture().await;
-    Mock::given(method("POST"))
-        .and(path("/oauth/clients"))
-        .and(body_json(json!({
-            "client_name": "owallet",
-            "redirect_uris": ["http://127.0.0.1:9999/callback"],
-            "grant_types": ["authorization_code"],
-            "response_types": ["code"],
-            "scope": "wallet",
-            "token_endpoint_auth_method": "none",
-        })))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
-            "client_id": "abcd_client_id",
-            "client_secret": null,
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let req = OAuthRegisterRequest {
-        client_name: "owallet".into(),
-        redirect_uris: vec!["http://127.0.0.1:9999/callback".into()],
-        grant_types: vec!["authorization_code".into()],
-        response_types: vec!["code".into()],
-        scope: Some("wallet".into()),
-        token_endpoint_auth_method: Some("none".into()),
-    };
-    let resp = client.register_oauth_client(&req).await.unwrap();
-    assert_eq!(resp.client_id, "abcd_client_id");
-    assert!(resp.client_secret.is_none());
-}
 
 #[tokio::test]
 async fn exchange_code_sends_pkce_verifier_in_form_body() {
@@ -90,40 +57,6 @@ async fn exchange_code_sends_pkce_verifier_in_form_body() {
         .unwrap();
     assert_eq!(resp.access_token, "tok_abc");
     assert_eq!(resp.token_type.as_deref(), Some("Bearer"));
-}
-
-#[tokio::test]
-async fn authorize_url_has_required_pkce_params() {
-    let (_server, client) = fixture().await;
-    let pkce = Pkce::generate();
-    let url = client
-        .authorize_url(
-            "client_abc",
-            "http://127.0.0.1:1234/callback",
-            &pkce.state,
-            &pkce.challenge,
-            "wallet",
-        )
-        .unwrap();
-    let pairs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-    assert_eq!(pairs.get("response_type").map(String::as_str), Some("code"));
-    assert_eq!(
-        pairs.get("client_id").map(String::as_str),
-        Some("client_abc")
-    );
-    assert_eq!(
-        pairs.get("redirect_uri").map(String::as_str),
-        Some("http://127.0.0.1:1234/callback")
-    );
-    assert_eq!(pairs.get("scope").map(String::as_str), Some("wallet"));
-    assert_eq!(
-        pairs.get("code_challenge_method").map(String::as_str),
-        Some("S256")
-    );
-    assert_eq!(
-        pairs.get("code_challenge").map(String::as_str),
-        Some(pkce.challenge.as_str())
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -227,8 +160,8 @@ async fn account_unauthorized_returns_http_status_error() {
 
     let err = client.account(Auth::Bearer("nope")).await.unwrap_err();
     match err {
-        owallet_overpay::OverpayError::HttpStatus { status, .. } => assert_eq!(status, 401),
-        other => panic!("expected HttpStatus, got {other:?}"),
+        owallet_overpay::OverpayError::Api(e) => assert_eq!(e.status, 401),
+        other => panic!("expected an API error, got {other:?}"),
     }
 }
 
@@ -237,7 +170,7 @@ async fn account_unauthorized_returns_http_status_error() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn list_listings_passes_filters_as_query_params() {
+async fn list_listings_value_passes_filters_as_query_params() {
     let (server, client) = fixture().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/listings"))
@@ -269,7 +202,7 @@ async fn list_listings_passes_filters_as_query_params() {
         .await;
 
     let page = client
-        .list_listings(&ListingFilters {
+        .list_listings_value(&ListingFilters {
             category: Some("books".into()),
             limit: Some(5),
             seller_slug: Some("acme".into()),
@@ -277,21 +210,19 @@ async fn list_listings_passes_filters_as_query_params() {
         })
         .await
         .unwrap();
-    assert_eq!(page.data.len(), 1);
-    assert_eq!(page.data[0].id, "L1");
-    // Regression: the string price must parse (previously `Option<f64>` here
-    // raised "invalid type: string, expected f64").
-    assert_eq!(page.data[0].price_usd.as_deref(), Some("$9.99"));
-    assert_eq!(page.data[0].price_cents, Some(999.0));
+    // Verbatim: the string price, the nested seller, unknown fields.
+    assert_eq!(page["data"][0]["id"], "L1");
+    assert_eq!(page["data"][0]["price_usd"], "$9.99");
+    assert_eq!(page["data"][0]["seller"]["slug"], "acme");
     assert_eq!(
-        page.data[0].seller.as_ref().and_then(|s| s.slug.as_deref()),
-        Some("acme")
+        page["data"][0]["checkout_url"],
+        "http://example.test/checkout/L1"
     );
-    assert_eq!(page.next_cursor.as_deref(), Some("cur_x"));
+    assert_eq!(page["next_cursor"], "cur_x");
 }
 
 #[tokio::test]
-async fn list_listings_omits_unset_filters() {
+async fn list_listings_value_omits_unset_filters() {
     let (server, client) = fixture().await;
     // Match `/api/v1/listings` with no query string.
     Mock::given(method("GET"))
@@ -304,10 +235,12 @@ async fn list_listings_omits_unset_filters() {
         .await;
 
     let page = client
-        .list_listings(&ListingFilters::default())
+        .list_listings_value(&ListingFilters::default())
         .await
         .unwrap();
-    assert!(page.data.is_empty());
+    assert_eq!(page["data"], json!([]));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].url.query(), None);
 }
 
 // ---------------------------------------------------------------------------
@@ -315,11 +248,8 @@ async fn list_listings_omits_unset_filters() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn list_orders_with_filters() {
-    // Real Rails shape: `{data: [order_json...], next_cursor}` — each item
-    // emits `payment_status`/`tracking_number`/string `total_usd`, and the
-    // listing reference is nested under `listing.id`. The query param is
-    // `payment_status=`, not `status=`.
+async fn list_orders_value_passes_filters_as_query_params() {
+    // The query param is `payment_status=`, not `status=`.
     let (server, client) = fixture().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/orders"))
@@ -344,32 +274,29 @@ async fn list_orders_with_filters() {
         .await;
 
     let page = client
-        .list_orders(
+        .list_orders_value(
             Auth::Bearer("tok"),
             &OrderFilters {
                 payment_status: Some("paid".into()),
+                fulfillment_status: Some("shipping".into()),
+                limit: Some(5),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-    assert_eq!(page.data.len(), 1);
-    let o = &page.data[0];
-    assert_eq!(o.payment_status.as_deref(), Some("paid"));
-    assert_eq!(o.fulfillment_status.as_deref(), Some("shipping"));
-    assert_eq!(o.total_usd.as_deref(), Some("$0.0010"));
-    assert_eq!(o.total_usd_cents, Some(1.0));
-    assert_eq!(o.tracking_number.as_deref(), Some("1Z999"));
-    // listing.id surfaces as listing_id on the flat Rust struct.
-    assert_eq!(o.listing_id.as_deref(), Some("L42"));
-    assert_eq!(o.listing_title.as_deref(), Some("Widget"));
+    assert_eq!(page["data"][0]["total_usd"], "$0.0010");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests[0].url.query(),
+        Some("payment_status=paid&fulfillment_status=shipping&limit=5")
+    );
 }
 
 #[tokio::test]
 async fn list_orders_value_keeps_envelope_and_nested_listing() {
-    // Companion to `list_orders_parses_real_rails_shape`: the `_value`
-    // variant exists for MCP tool output (fathom-x/overpay#288) and
-    // must NOT unwrap `{data: [...]}` or flatten the nested
+    // The `_value` variant exists for MCP tool output
+    // (fathom-x/overpay#288) and must NOT unwrap `{data: [...]}` or flatten the nested
     // `{listing: {id, title}}` reference — the wire must reach the
     // MCP consumer byte-identical to what Rails emitted.
     let (server, client) = fixture().await;
@@ -439,7 +366,7 @@ async fn get_order_by_id_unwraps_data_envelope() {
 }
 
 #[tokio::test]
-async fn create_order_posts_listing_id_and_note() {
+async fn create_order_value_posts_listing_id_and_note() {
     // Real Rails shape for `orders#create`: `{data: order_json}`.
     let (server, client) = fixture().await;
     Mock::given(method("POST"))
@@ -461,12 +388,55 @@ async fn create_order_posts_listing_id_and_note() {
         .await;
 
     let order = client
-        .create_order("L42", Some("for the cat"), None, Auth::Bearer("tok"))
+        .create_order_value("L42", Some("for the cat"), None, Auth::Bearer("tok"))
         .await
         .unwrap();
-    assert_eq!(order.id, "O1");
-    assert_eq!(order.payment_status.as_deref(), Some("pending"));
-    assert_eq!(order.listing_id.as_deref(), Some("L42"));
+    assert_eq!(order["data"]["id"], "O1");
+    assert_eq!(order["data"]["listing"]["id"], "L42");
+}
+
+/// Without a note the body is just the listing: no `"buyer_note": null`.
+#[tokio::test]
+async fn create_order_value_leaves_out_an_absent_note() {
+    let (server, client) = fixture().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/orders"))
+        .and(body_json(json!({ "listing_id": "L42" })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "data": { "id": "O2" } })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    client
+        .create_order_value("L42", None, None, Auth::Bearer("tok"))
+        .await
+        .unwrap();
+}
+
+/// Ids and slugs are path segments: reserved characters are escaped
+/// rather than changing the route.
+#[tokio::test]
+async fn path_segments_are_percent_encoded() {
+    let (server, client) = fixture().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "data": { "id": "x" } })))
+        .mount(&server)
+        .await;
+    client
+        .get_order_value("a/b c", Auth::Bearer("tok"))
+        .await
+        .unwrap();
+    client.get_listing_value("l?x").await.unwrap();
+    let paths: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .collect();
+    assert_eq!(
+        paths,
+        ["/api/v1/orders/a%2Fb%20c", "/api/v1/listings/l%3Fx"]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -577,35 +547,6 @@ async fn list_merchant_credits_handles_seller_and_org_owned_rows() {
 }
 
 #[tokio::test]
-async fn get_merchant_credits_for_one_seller_unwraps_data_envelope() {
-    // Real Rails shape for `merchant_credits#show`: `render_json({...})`
-    // produces `{data: {seller_slug, balance_cents, ...}}`.
-    let (server, client) = fixture().await;
-    Mock::given(method("GET"))
-        .and(path_regex(r"^/api/v1/merchant_credits/[A-Za-z0-9_-]+$"))
-        .and(header("authorization", "Bearer tok"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {
-                "seller_slug": "alice",
-                "balance_cents": 5000,
-                "formatted_balance": "$50.00",
-                "organization": null,
-            }
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let mc = client
-        .get_merchant_credits("alice", Auth::Bearer("tok"))
-        .await
-        .unwrap();
-    assert_eq!(mc.seller_slug.as_deref(), Some("alice"));
-    assert_eq!(mc.balance_cents, Some(5000.0));
-    assert_eq!(mc.formatted_balance.as_deref(), Some("$50.00"));
-}
-
-#[tokio::test]
 async fn purchase_merchant_credits_posts_amount_cents() {
     // Real Rails shape for `merchant_credits#purchase`: `render_json({...})`
     // gives `{data: {order_id, payment_address, payment_amount_usdc,
@@ -679,7 +620,7 @@ async fn purchase_merchant_credits_handles_non_usdc_seller() {
 }
 
 #[tokio::test]
-async fn redeem_merchant_credits_posts_order_id() {
+async fn redeem_merchant_credits_value_posts_order_id() {
     // Real Rails shape for `merchant_credits#redeem`: wrapped in `{data: ...}`.
     let (server, client) = fixture().await;
     Mock::given(method("POST"))
@@ -701,12 +642,11 @@ async fn redeem_merchant_credits_posts_order_id() {
         .await;
 
     let resp = client
-        .redeem_merchant_credits("alice", "ord_xyz", Auth::Bearer("tok"))
+        .redeem_merchant_credits_value("alice", "ord_xyz", Auth::Bearer("tok"))
         .await
         .unwrap();
-    assert_eq!(resp.status, "applied");
-    assert_eq!(resp.amount_redeemed_cents, 1500.0);
-    assert_eq!(resp.credit_balance_cents, 3500.0);
+    assert_eq!(resp["data"]["status"], "applied");
+    assert_eq!(resp["data"]["amount_redeemed_cents"], 1500);
 }
 
 // ---------------------------------------------------------------------------
@@ -747,7 +687,7 @@ async fn bearer_signed_post_signs_the_exact_body() {
 
     let sk = fixture_sk();
     client
-        .redeem_merchant_credits("alice", "ord_xyz", Auth::BearerSigned("tok", &sk))
+        .redeem_merchant_credits_value("alice", "ord_xyz", Auth::BearerSigned("tok", &sk))
         .await
         .unwrap();
 
@@ -803,10 +743,7 @@ async fn bearer_signed_get_is_signed_without_payload() {
 
 #[tokio::test]
 async fn to_public_url_rewrites_origin() {
-    let client = OverpayClient::new("http://web:80")
-        .unwrap()
-        .with_public_url("https://overpay.com")
-        .unwrap();
+    let client = OverpayClient::with_urls("http://web:80", Some("https://overpay.com")).unwrap();
     let rewritten = client.to_public_url("http://web:80/login/abc?next=/x");
     assert_eq!(rewritten, "https://overpay.com/login/abc?next=/x");
 }
@@ -818,48 +755,100 @@ async fn to_public_url_no_rewrite_when_urls_match() {
     assert_eq!(client.to_public_url(s), s);
 }
 
-/// A delivered-file link must be on the marketplace's own origin; anything
-/// else in order data is refused rather than fetched.
+// ---- retries (the SDK transport) ----
+
 #[tokio::test]
-async fn fetch_delivered_content_refuses_a_foreign_host() {
-    let client = owallet_overpay::OverpayClient::new("https://overpay.example").unwrap();
-    let err = client
-        .fetch_delivered_content("https://attacker.example/rails/active_storage/blobs/redirect/x")
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("not this marketplace"), "{err}");
+async fn gets_are_retried_through_a_transient_502() {
+    let (server, client) = fixture().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/account"))
+        .respond_with(ResponseTemplate::new(502))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/account"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": {"account_number": "1", "formatted_account_number": "1", "username": null}
+        })))
+        .mount(&server)
+        .await;
+    client.account_value(Auth::Bearer("tok")).await.unwrap();
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
-async fn sub_cent_prices_and_balances_parse_exactly() {
+async fn order_creation_retries_under_one_idempotency_key() {
+    let (server, client) = fixture().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/orders"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/orders"))
+        .respond_with(
+            ResponseTemplate::new(201).set_body_json(serde_json::json!({"data": {"id": "o1"}})),
+        )
+        .mount(&server)
+        .await;
+    client
+        .create_order_value("l1", Some("note"), None, Auth::Bearer("tok"))
+        .await
+        .unwrap();
+    let keys: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.headers["idempotency-key"].to_str().unwrap().to_string())
+        .collect();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0], keys[1]);
+}
+
+#[tokio::test]
+async fn other_posts_are_not_retried() {
+    let (server, client) = fixture().await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/merchant_credits/s/redeem"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    assert!(client
+        .redeem_merchant_credits_value("s", "o", Auth::Bearer("tok"))
+        .await
+        .is_err());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn sub_cent_amounts_parse_exactly() {
     // Micropayments: the marketplace emits sub-cent amounts as fractional
-    // cents (to 4 places). A fractional `price_cents` used to fail the whole
-    // listings parse (it was typed as an integer).
+    // cents (to 4 places); the compat models keep them.
     let (server, client) = fixture().await;
     Mock::given(method("GET"))
-        .and(path("/api/v1/listings"))
+        .and(path("/api/v1/merchant_credits"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": [{"id": "L1", "title": "Micro lookup", "price_cents": 0.05, "price_usd": "$0.0005"}]
+            "data": [{"seller_slug": "alice", "balance_cents": 99.9244, "formatted_balance": "$0.999244"}]
         })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path_regex(r"^/api/v1/merchant_credits/[A-Za-z0-9_-]+$"))
+        .and(path("/api/v1/orders/o1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {"seller_slug": "alice", "balance_cents": 99.9244, "formatted_balance": "$0.999244"}
+            "data": {"id": "o1", "total_usd": "$0.0005", "total_usd_cents": 0.05}
         })))
         .mount(&server)
         .await;
 
-    let page = client
-        .list_listings(&ListingFilters::default())
+    let credits = client
+        .list_merchant_credits(Auth::Bearer("tok"))
         .await
         .unwrap();
-    assert_eq!(page.data[0].price_cents, Some(0.05));
+    assert_eq!(credits.data[0].balance_cents, Some(99.9244));
 
-    let mc = client
-        .get_merchant_credits("alice", Auth::Bearer("tok"))
-        .await
-        .unwrap();
-    assert_eq!(mc.balance_cents, Some(99.9244));
+    let order = client.get_order("o1", Auth::Bearer("tok")).await.unwrap();
+    assert_eq!(order.total_usd_cents, Some(0.05));
 }

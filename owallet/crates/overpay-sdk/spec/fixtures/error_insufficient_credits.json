@@ -1,0 +1,5 @@
+{
+  "error": "Not enough merchant credits to cover the authorization",
+  "code": "insufficient_credits",
+  "authorization_cents": 50
+}

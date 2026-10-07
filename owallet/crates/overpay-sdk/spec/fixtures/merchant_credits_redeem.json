@@ -1,0 +1,8 @@
+{
+  "data": {
+    "status": "fully_paid",
+    "amount_redeemed_cents": 25,
+    "credit_balance_cents": 975,
+    "message": "Credits applied. Order fully paid!"
+  }
+}

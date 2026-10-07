@@ -11,12 +11,7 @@ pub(crate) fn client() -> Result<OverpayClient> {
     let rails = std::env::var("OVERPAY_RAILS_URL")
         .unwrap_or_else(|_| defaults::OVERPAY_RAILS_URL.to_string());
     let public = std::env::var("OVERPAY_PUBLIC_URL").ok();
-    let c = OverpayClient::new(&rails)?;
-    let c = match public {
-        Some(p) if p != rails => c.with_public_url(&p)?,
-        _ => c,
-    };
-    Ok(c)
+    Ok(OverpayClient::with_urls(&rails, public.as_deref())?)
 }
 
 /// Stable host key under which the OAuth bearer token is stored — the

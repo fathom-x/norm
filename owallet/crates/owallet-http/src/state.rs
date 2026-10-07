@@ -4,8 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use dashmap::DashMap;
+use overpay_sdk::Pkce;
 use owallet_db::Database;
-use owallet_overpay::{OverpayClient, Pkce};
+use owallet_overpay::OverpayClient;
 
 use crate::session::SessionStore;
 use crate::{EvmConfig, ZcashConfig};

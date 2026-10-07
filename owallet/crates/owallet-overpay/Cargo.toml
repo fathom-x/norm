@@ -5,21 +5,18 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "REST client for the Overpay Rails API + OAuth PKCE helper. Rust port of the HTTP surface in wallet_mcp/server.py."
+description = "owallet's Overpay API client: a compatibility layer over overpay-sdk."
 
 [dependencies]
-owallet-crypto = { workspace = true }
+overpay-sdk = { workspace = true }
 
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 url = "2"
-thiserror = { workspace = true }
-sha2 = { workspace = true }
-base64 = "0.22"
-rand = { workspace = true }
-tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
+owallet-crypto = { workspace = true }
+base64 = "0.22"
+sha2 = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wiremock = "0.6"

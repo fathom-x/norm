@@ -1,0 +1,14 @@
+{
+  "data": {
+    "id": "a4545360-19d0-4cac-9d01-48a565c65df5",
+    "listing_id": "70e969a3-dc6c-4430-961b-ffebcca7ac61",
+    "cap_cents": 500,
+    "spent_cents": 0,
+    "remaining_cents": 500,
+    "status": "open",
+    "expires_at": "2026-10-02T22:00:33.413Z",
+    "closed_at": null,
+    "orders_count": 0,
+    "created_at": "2026-10-02T21:00:33.418Z"
+  }
+}

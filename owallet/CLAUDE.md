@@ -18,10 +18,13 @@ format without also updating the Python compat fixture + test.
 
 ```
 crates/
+  overpay-sdk/      client SDK for the Overpay API (no owallet-* deps; see below)
+  overpay-sdk-codegen/  generates overpay-sdk/src/generated.rs from spec/
+  overpay-nip98/    standalone NIP-98 signer (the SDK and owallet-crypto use it)
   owallet-crypto/   AES-256-GCM, PBKDF2-SHA256, BIP-39/32, Nostr, NIP-98
   owallet-db/       rusqlite + Database; reads existing Python DBs
   owallet-config/   .owallet dotenv resolution, --prod/--dev/--staging
-  owallet-overpay/  reqwest client for the Rails API + PKCE helper
+  owallet-overpay/  owallet's adapter over overpay-sdk (raw passthroughs, compat models)
   owallet-evm/      alloy 0.7 wrapper (ERC-20 USDC + chain table)
   owallet-zcash/    librustzcash wrapper (Orchard-only: receive/sync/balance/send)
   owallet-mcp/      JSON-RPC 2.0 MCP transport + tool registry
@@ -29,9 +32,9 @@ crates/
   owallet/          binary crate (clap CLI)
 ```
 
-Original Python source lives in the `fathom-x/overpay` repository at
-`owallet/wallet_mcp/`. Cross-references in code comments use
-`wallet_mcp/server.py:NNNN` style.
+This began as a port of a Python `wallet_mcp` package, which no longer
+lives in `fathom-x/overpay` either; code comments citing
+`wallet_mcp/server.py:NNNN` refer to it.
 
 ## Syncing from overpay
 
@@ -72,6 +75,31 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
 
 ## Conventions that aren't obvious from the code
 
+- **`overpay-sdk` is the Overpay API client.** It carries a copy of the
+  API's OpenAPI spec and contract fixtures in `crates/overpay-sdk/spec/`,
+  written by the Rails repo's `bin/sync-openapi` (Rails CI fails when the
+  copy is stale) — never edit them here; change `openapi/v1.yaml` and the
+  fixtures in the Rails app and re-sync. After a sync that touches an enum
+  or an operation, `cargo run -p overpay-sdk-codegen` rewrites
+  `src/generated.rs` (`generated_is_fresh` fails until you do). Its tests
+  round-trip every fixture through the typed models (models keep unknown
+  fields in `extra`, so nothing the API sends is dropped) and check that
+  every buyer operation in the spec is implemented. Keep it free of
+  `owallet-*` dependencies: norm and other clients build on it.
+  owallet reaches Overpay only through it: `owallet-overpay`'s
+  `OverpayClient` is a thin adapter over `overpay_sdk::Client` (keeping
+  owallet's raw-`Value` passthroughs and lenient compat models) and
+  exposes it as `.sdk()`. Its `Auth` and `OverpayError` *are* the SDK's
+  (`overpay_sdk::Auth`, `overpay_sdk::Error`), so values pass between the
+  two without conversion. Crates that use SDK types depend on
+  `overpay-sdk` directly (owallet-overpay doesn't re-export it); new code
+  should call the SDK and its `flows` directly (`OrderWaiter`, `create_paid_order`/`pay_with_credits`,
+  `discover_provider_tools_where`, `find_listing_id`, `PkceFlow`). Retries:
+  GETs and order creation (under an automatic `Idempotency-Key`), but a
+  create is not repeated after a timeout/502/504 unless the client opts in
+  with `retry_ambiguous_writes` — only safe once the marketplace honors the
+  key.
+
 - **Database byte format.** Don't touch `owallet-crypto::kdf` or
   `owallet-crypto::aesgcm` without re-running the Python compat test
   (`cargo test -p owallet-db --test python_compat`). PBKDF2 iters
@@ -79,21 +107,27 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   **16-byte nonces** (PyCryptodome default), not 12 — see
   `Aes256Gcm<U16>` in `aesgcm.rs`.
 
-- **NIP-98 fallback, and every request signed.** The `Auth` enum on
-  `OverpayClient` has four variants (`None`, `Bearer`, `Nip98(&PrivateKey)`,
-  `BearerSigned(&str, &PrivateKey)`). Any tool / command that takes an
-  Overpay action should go through `McpState::resolve_owned_auth()` (for
-  tools) or the bearer-or-derive-key branch in `commands/account.rs` (for
-  the CLI), so users without a stored token still authenticate via wallet
-  key. With a token *and* an unlocked DB (always, under `owallet serve`)
-  it returns `BearerSigned`: every request also carries
-  `X-Nostr-Signature`, a NIP-98 event by the wallet key (the npub's, which
-  is also the EVM key) — and for POSTs a `payload` tag, the sha256 of the
-  **exact body bytes sent**. Overpay stores it as the buyer's signed
+- **NIP-98 fallback, and every request signed.** `Auth` (the SDK's) has
+  four variants (`None`, `Bearer`, `Nip98(&dyn Nip98Signer)`,
+  `BearerSigned(&str, &dyn Nip98Signer)`); owallet passes a `&PrivateKey`,
+  which `owallet-crypto` makes a `Nip98Signer`.
+  Any tool / command that takes an Overpay action should go through
+  `McpState::resolve_owned_auth()` (for tools) or `OwnedAuth::from_stored`
+  (for the CLI), so users without a stored token still authenticate via
+  wallet key. With a token *and* the wallet key (an unlocked DB — always,
+  under `owallet serve`) they return `BearerSigned`: every request also
+  carries `X-Nostr-Signature`, a NIP-98 event by the wallet key (the
+  npub's, which is also the EVM key) — and for a request with a body a
+  `payload` tag, the sha256 of the **exact body bytes sent**; `Nip98`
+  carries the same tag in `Authorization`. This is the buyer's signed
   authorization of each spend (orders, merchant-credit redeem / purchase /
-  load) and refuses replays. So `post_json*` serialise the body once,
-  sign those bytes and send them unchanged (`post_signed`); never add a
-  POST path that re-serialises after signing.
+  load), which the marketplace is to store and check for replays
+  (fathom-x/overpay#481). The signing lives in the SDK transport
+  (`overpay_sdk::Client::execute`): it serialises a body once per attempt,
+  signs those bytes and sends them unchanged, re-signing on every retry.
+  Never send a body around it, or re-serialise one after signing. Note a
+  retry within the same second keeps the same event id (NIP-98 ids hash
+  key, time, kind and tags); only the signature differs.
 
 - **`/v1` OpenAI-compatible endpoint** (`owallet-mcp/src/openai_compat.rs`,
   mounted by `owallet-http`). Hardcoded to exactly two *listings*
@@ -126,13 +160,15 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   listing tools forward their in-flight partial output too, unfenced —
   the preview is buyer-facing markdown — set off by blank lines, with
   keep-alive comments between deltas. First consumer: the weather reporter's
-  `forecast`. **Every order poll goes through `poll_order`**: conditional
-  on the last `partial_seq` seen (`?since_seq=`, so an unchanged streaming
-  buffer isn't re-downloaded), paced start-to-start by `pace`, and with a
-  file-delivered result inlined (`inline_delivered_file`) — Rails
+  `forecast`. **Every order poll is an SDK `OrderWaiter`** (helper
+  `order_waiter()`): paced start-to-start, conditional on the last
+  `partial_seq` seen (`?since_seq=`, so an unchanged streaming buffer isn't
+  re-downloaded), and inlining an offloaded deliverable: Rails
   offloads `delivered_content` over 4 KB to object storage
   (`delivered_content_url`), and a poll that reads the inline field alone
-  fails every long chat reply after it was paid for. One-shot executions
+  fails every long chat reply after it was paid for. Each `WaitEvent`
+  carries the streamed `delta` (the final poll's too) and the running
+  `streamed` offset the catch-up uses. One-shot executions
   (`run_listing_tool` / `run_python_tool`, via `poll_one_shot`) never error
   on a stall — the paid order comes back as a pending result with its id —
   and on `/mcp` they stream progress, which is what resets the MCP
@@ -260,9 +296,9 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   pricing as USD per Mtok with markup in) — norm turns them into model
   cost and context limits, so a rate-card shape change on the Ruby side
   must keep those keys or update both.
-  `partial_output`/`new_output_since`/`WAIT_TERMINAL_STATUSES` in
-  `tools.rs` are `pub(crate)` specifically so this module can reuse
-  `wait_for_order`'s streaming-diff logic rather than reimplementing it.
+  The streaming diff (`PartialTracker` / `new_output_since`) and
+  `partial_output` live in `overpay_sdk::flows`, shared by `/v1` and the
+  MCP `wait_for_order`.
   **The tool loop is server-side and transparent**: a tool call never
   reaches the HTTP caller — `run_agentic_loop` (buffered) / the streaming
   generator's own copy of the same loop shape executes `run_python` as a

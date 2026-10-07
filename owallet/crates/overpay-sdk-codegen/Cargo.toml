@@ -1,0 +1,12 @@
+[package]
+name = "overpay-sdk-codegen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Generates overpay-sdk's src/generated.rs (enums and the operation table) from the OpenAPI spec."
+
+[dependencies]
+serde_json = { workspace = true }

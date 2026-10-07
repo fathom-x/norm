@@ -13,6 +13,7 @@ owallet-db = { workspace = true }
 owallet-evm = { workspace = true }
 owallet-zcash = { workspace = true }
 owallet-overpay = { workspace = true }
+overpay-sdk = { workspace = true }
 owallet-mcp = { workspace = true }
 
 axum = { version = "0.8", features = ["macros"] }

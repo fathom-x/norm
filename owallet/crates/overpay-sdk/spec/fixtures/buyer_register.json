@@ -1,0 +1,9 @@
+{
+  "data": {
+    "user_id": "0f3b45e7-3380-43cf-8fc0-b5e1e89d0392",
+    "account_number": "2827951230548620",
+    "nostr_pubkey": "74f24d175a90f15e0ca3b156e5f75a0752fb3a31a7f28645db1c54889abe597b",
+    "token": "test-token-placeholder",
+    "token_name": "nostr-auth"
+  }
+}

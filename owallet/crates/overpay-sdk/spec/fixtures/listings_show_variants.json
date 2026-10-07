@@ -1,0 +1,61 @@
+{
+  "data": {
+    "id": "428f59d8-dc52-4b83-ac43-5850311d8712",
+    "title": "Metered inference",
+    "description": null,
+    "price_cents": 25,
+    "price_usd": "$0.25",
+    "free": false,
+    "currency": "USD",
+    "category": null,
+    "condition": null,
+    "quantity": 1,
+    "main_image_url": null,
+    "delivered_content_type": "text/plain",
+    "seller": {
+      "name": "aliceuser",
+      "slug": "alice-shop"
+    },
+    "checkout_url": "http://localhost:4030/checkout/428f59d8-dc52-4b83-ac43-5850311d8712",
+    "delivery_eta": null,
+    "provider_tool": {
+      "name": "infer"
+    },
+    "published_at": null,
+    "created_at": "2026-10-02T21:00:21.171Z",
+    "checkout_schema": {},
+    "buyer_note_schema": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        }
+      }
+    },
+    "delivered_content_schema": {},
+    "variant_field": "model",
+    "pricing_mode": "metered",
+    "min_authorization_cents": 5,
+    "max_authorization_cents": 500,
+    "variants": [
+      {
+        "key": "cheap",
+        "title": "Cheap model",
+        "rate_card": {
+          "input_per_mtok_cents": 10
+        },
+        "min_authorization_cents": null,
+        "max_authorization_cents": null,
+        "metadata": {}
+      },
+      {
+        "key": "premium",
+        "title": "Premium model",
+        "rate_card": {},
+        "min_authorization_cents": 100,
+        "max_authorization_cents": 2000,
+        "metadata": {}
+      }
+    ]
+  }
+}
