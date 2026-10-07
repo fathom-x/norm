@@ -3626,7 +3626,7 @@ checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
 name = "overpay-nip98"
-version = "0.0.1"
+version = "0.1.10"
 dependencies = [
  "base64",
  "hex",
@@ -3640,7 +3640,7 @@ dependencies = [
 
 [[package]]
 name = "overpay-sdk"
-version = "0.0.1"
+version = "0.1.10"
 dependencies = [
  "base64",
  "futures-util",
@@ -3660,7 +3660,7 @@ dependencies = [
 
 [[package]]
 name = "overpay-sdk-codegen"
-version = "0.0.1"
+version = "0.1.10"
 dependencies = [
  "serde_json",
 ]
