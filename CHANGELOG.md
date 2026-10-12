@@ -4,6 +4,18 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### One-shot tool purchases no longer fail on a fractional balance
+
+- Every `overpay-sdk` field the contract types as `Cents` is now the SDK's
+  `Cents` (a number, fractional after sub-cent charges) — `Redemption::
+  credit_balance_cents`, the held-credit balances and totals, ledger
+  amounts and `CreditLoad::amount_cents` were `i64`, so the first
+  purchase after an OpenRouter turn had put `9990.8444` cents in the
+  balance failed with "response is not valid JSON: invalid type: floating
+  point, expected i64" (the order itself had gone through). A contract
+  test now fractionalizes every `Cents` property in every fixture and
+  round-trips it through its model.
+
 ### Orders are filed under the conversation that placed them
 
 - Every order owallet places now carries a `client_session_id`: an HMAC of

@@ -23,10 +23,10 @@ impl MerchantCredit {
     }
 
     #[must_use]
-    pub fn balance_cents(&self) -> i64 {
+    pub fn balance_cents(&self) -> Cents {
         match self {
-            Self::Seller(c) => c.balance_cents,
-            Self::Organization(c) => c.balance_cents,
+            Self::Seller(c) => c.balance_cents.clone(),
+            Self::Organization(c) => c.balance_cents.clone(),
         }
     }
 
@@ -43,10 +43,10 @@ pub struct SellerHeldCredit {
     pub id: String,
     pub seller_slug: String,
     pub seller_name: Option<String>,
-    pub balance_cents: i64,
+    pub balance_cents: Cents,
     pub formatted_balance: String,
-    pub total_purchased_cents: i64,
-    pub total_redeemed_cents: i64,
+    pub total_purchased_cents: Cents,
+    pub total_redeemed_cents: Cents,
     pub updated_at: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -59,10 +59,10 @@ pub struct OrganizationHeldCredit {
     pub organization_slug: String,
     pub organization_name: Option<String>,
     pub core: bool,
-    pub balance_cents: i64,
+    pub balance_cents: Cents,
     pub formatted_balance: String,
-    pub total_purchased_cents: i64,
-    pub total_redeemed_cents: i64,
+    pub total_purchased_cents: Cents,
+    pub total_redeemed_cents: Cents,
     pub updated_at: String,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -73,7 +73,7 @@ pub struct OrganizationHeldCredit {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MerchantCreditBalance {
     pub seller_slug: String,
-    pub balance_cents: i64,
+    pub balance_cents: Cents,
     pub formatted_balance: String,
     /// The organization whose balance this is, when the seller is in one.
     pub organization: Option<String>,
@@ -90,9 +90,9 @@ pub struct CreditTransaction {
     pub kind: CreditTransactionType,
     pub created_at: String,
     /// Always positive; `kind` gives the direction.
-    pub amount_cents: i64,
-    pub balance_before_cents: i64,
-    pub balance_after_cents: i64,
+    pub amount_cents: Cents,
+    pub balance_before_cents: Cents,
+    pub balance_after_cents: Cents,
     pub credit_id: String,
     pub holder_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,7 +118,7 @@ pub struct CreditLoad {
     pub bolt11: String,
     pub payment_hash: String,
     pub sats: i64,
-    pub amount_cents: i64,
+    pub amount_cents: Cents,
     pub expires_at: String,
     pub order_url: String,
     #[serde(flatten)]
@@ -154,7 +154,8 @@ pub struct Redemption {
     pub status: RedemptionStatus,
     pub amount_redeemed_cents: Cents,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credit_balance_cents: Option<i64>,
+    /// Fractional after sub-cent charges, like every balance.
+    pub credit_balance_cents: Option<Cents>,
     pub message: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
