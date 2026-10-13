@@ -230,6 +230,15 @@ export const TuiThreadCommand = cmd({
       }
       const cwd = Filesystem.resolve(process.cwd())
 
+      // norm: the worker boot below (server, plugins, owallet) takes a few
+      // seconds with nothing on screen; say so, then erase the line before
+      // anything else is printed so it leaves no trace.
+      const notice = process.stderr.isTTY
+      if (notice) UI.print(UI.Style.TEXT_DIM + "Starting norm…" + UI.Style.TEXT_NORMAL)
+      const clear = () => {
+        if (notice) process.stderr.write("\r\x1b[2K")
+      }
+
       const worker = new Worker(file, {
         env: Object.fromEntries(
           Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -280,6 +289,7 @@ export const TuiThreadCommand = cmd({
           headers,
         })
       } catch (error) {
+        clear()
         UI.error(errorMessage(error))
         process.exitCode = 1
         return
@@ -288,6 +298,8 @@ export const TuiThreadCommand = cmd({
       setTimeout(() => {
         client.call("checkUpgrade", { directory: cwd }).catch(() => {})
       }, 1000).unref?.()
+
+      clear()
 
       try {
         const { Effect } = await import("effect")

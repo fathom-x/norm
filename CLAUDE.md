@@ -383,10 +383,22 @@ opencode: the binary is `norm` (`packages/opencode/package.json` bin →
 own (`~/.config/norm`, `~/.local/share/norm` incl. `auth.json`, cache,
 state). There is no ASCII-art logo: the banner is "Norm <version>"
 (`cli/ui.ts` `logo()`, also printed by `norm`/`norm tui` ahead of the
-first-run wallet prompts in `cli/cmd/tui.ts`), the TUI home logo is the
-word "Norm" (`tui/src/component/logo.tsx`), and the exit summary is just
+first-run wallet prompts in `cli/cmd/tui.ts`), the exit summary is just
 the session lines (`tui/src/util/presentation.ts`); the terminal window title is
 "Norm" / "Norm | <session title>" (`tui/src/app.tsx`).
+
+The TUI's empty-chat screen is norm's `Welcome`
+(`tui/src/component/welcome.tsx`): the green `mascot` from
+`tui/src/logo.ts` beside "Norm Code" and the version, then a short
+how-to (`/budget`, `/loop`, Overpay micropayments) on terminals at least
+30 rows tall. `routes/home.tsx` puts it at the top of the chat column in
+the `home_logo` slot. Startup paints a `Splash`
+(`tui/src/component/splash.tsx`) from `app.tsx`'s `run()` the moment the
+renderer owns the terminal. It sits *outside* the theme/KV/plugin-gated
+provider tree, which stays empty until those resolve and used to read as
+a black screen, so it takes fixed per-mode colors instead of the theme.
+Before the renderer starts, `cli/cmd/tui.ts` prints and then erases a
+dim "Starting norm…" line while the worker boots.
 
 The primary agent the user picks with tab (Build/Plan) is labelled a
 **mode** in the TUI — hints row, "Switch mode" / `/modes` (`/agents`

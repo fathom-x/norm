@@ -34,6 +34,7 @@ import { EditorContextProvider } from "./context/editor"
 import { useEvent } from "./context/event"
 import { SDKProvider, useSDK } from "./context/sdk"
 import { StartupLoading } from "./component/startup-loading"
+import { Splash } from "./component/splash"
 import { SyncProvider, useSync } from "./context/sync"
 import { DataProvider } from "./context/data"
 import { LocationProvider } from "./context/location"
@@ -240,10 +241,16 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       yield* Effect.tryPromise(async () => {
         // Prewarm palette before ThemeProvider mounts so `system` theme avoids a first-paint fallback flash.
         void renderer.getPalette({ size: 16 }).catch(() => undefined)
-        const mode = (await renderer.waitForThemeMode(1000)) ?? "dark"
+        // norm: paint the splash right away; the provider tree mounts once the
+        // terminal answers the theme-mode query (or the 1s wait gives up) and
+        // stays empty until theme/KV/plugins resolve, so without this the
+        // alt screen sits black for the whole startup.
+        const [mode, setMode] = createSignal<"dark" | "light">()
+        const [booted, setBooted] = createSignal(false)
+        void renderer.waitForThemeMode(1000).then((value) => setMode(value ?? "dark"))
         if (renderer.isDestroyed) return
 
-        await render(() => {
+        const tree = (mode: "dark" | "light") => {
           return (
             <ExitProvider
               exit={(reason) => {
@@ -319,6 +326,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                                     <App
                                                                       onSnapshot={input.onSnapshot}
                                                                       pluginHost={input.pluginHost}
+                                                                      onReady={() => setBooted(true)}
                                                                     />
                                                                   </LocationProvider>
                                                                 </EditorContextProvider>
@@ -349,7 +357,20 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
               </EpilogueProvider>
             </ExitProvider>
           )
-        }, renderer)
+        }
+        await render(
+          () => (
+            <>
+              <Show when={!booted() && !process.env.OPENCODE_FAST_BOOT}>
+                <Splash mode={mode() ?? "dark"} />
+              </Show>
+              <Show when={mode()} keyed>
+                {tree}
+              </Show>
+            </>
+          ),
+          renderer,
+        )
       })
       yield* Deferred.await(shutdown)
       return { epilogue: exit.epilogue, reason: exit.reason }
@@ -364,7 +385,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   })
 })
 
-function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPluginHost }) {
+function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPluginHost; onReady?: () => void }) {
   const startup = useTuiStartup()
   const tuiConfig = useTuiConfig()
   const route = useRoute()
@@ -419,6 +440,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     })
     .finally(() => {
       setReady(true)
+      props.onReady?.()
     })
 
   // Let selection copy/dismiss win ahead of normal bindings when explicit copy is required.
