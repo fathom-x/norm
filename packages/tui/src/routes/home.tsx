@@ -1,6 +1,7 @@
 import { Prompt, type PromptRef } from "../component/prompt"
 import { createEffect, createSignal, Match, onMount, Show, Switch } from "solid-js"
 import { RGBA } from "@opentui/core"
+import { Welcome } from "../component/welcome"
 import { useSync } from "../context/sync"
 import { Toast } from "../ui/toast"
 import { useArgs } from "../context/args"
@@ -87,6 +88,13 @@ export function Home() {
     <HomeSessionDestinationProvider>
       <box flexDirection="row" flexGrow={1} minHeight={0}>
         <box flexGrow={1} minHeight={0} gap={1}>
+          {/* norm: "Norm Code" + the how-to sit where the first message will
+              appear, with the same 3-column margin messages get. */}
+          <box flexShrink={0} paddingTop={1} paddingLeft={3} paddingRight={3}>
+            <pluginRuntime.Slot name="home_logo" mode="replace">
+              <Welcome />
+            </pluginRuntime.Slot>
+          </box>
           <box flexGrow={1} minHeight={0} />
           <box flexShrink={0}>
             <pluginRuntime.Slot name="home_prompt" mode="replace" ref={bind}>
