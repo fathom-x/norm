@@ -4757,11 +4757,15 @@ mod tests {
             .await;
     }
 
+    /// The balance left is fractional, as a real one is once a metered
+    /// turn has drawn on it: a whole-cent mock let an `i64`
+    /// `Redemption::credit_balance_cents` fail every paid one-shot in
+    /// production while these tests passed.
     async fn mount_redeem_fully_paid(overpay: &MockServer, seller_slug: &str) {
         Mock::given(method("POST"))
             .and(path(format!("/api/v1/merchant_credits/{seller_slug}/redeem")))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": {"status": "fully_paid", "amount_redeemed_cents": 2, "credit_balance_cents": 100}
+                "data": {"status": "fully_paid", "amount_redeemed_cents": 2, "credit_balance_cents": 9990.8444}
             })))
             .mount(overpay)
             .await;

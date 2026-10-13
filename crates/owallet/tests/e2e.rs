@@ -9,6 +9,8 @@
 
 mod common;
 
+use std::time::{Duration, Instant};
+
 use common::{fulfill_as_seller, OwalletServer, RailsServer};
 use serde_json::json;
 
@@ -210,4 +212,75 @@ fn mcp_buy_flow_delivers_schema_buyer_note() {
     let status = &status["data"];
     assert_eq!(status["payment_status"], "paid");
     assert_eq!(status["fulfillment_status"], "delivered");
+}
+
+/// One-shot `run_python` paid from a balance with a fraction in it.
+///
+/// After a metered turn a credit balance is no longer whole cents
+/// (`9990.8444`), and the redeem reports it back as `credit_balance_cents`.
+/// owallet's one-shot purchases parse that through the SDK's typed
+/// `Redemption`; when it was an `i64`, every paid run failed with "invalid
+/// type: floating point, expected i64" after the buyer had been charged.
+/// `mcp_buy_flow_delivers_schema_buyer_note` can't catch that: its
+/// `redeem_merchant_credits` call reads the response as raw JSON.
+///
+/// The seller slug and title are the ones `run_python` resolves its
+/// listing by, so no other scenario may seed slug `exec`.
+#[test]
+#[ignore = "needs Rails + Postgres + bot_manager (run in owallet-rs-e2e workflow)"]
+fn mcp_run_python_pays_from_a_fractional_balance() {
+    let rails = RailsServer::start();
+
+    let seller = rails.seed(
+        "seed_seller",
+        json!({
+            "seller_slug": "exec",
+            "with_usdc_wallet": true,
+            "listing_title": "Run Python Code",
+            "price_cents": 2,
+            "delivered_content_type": "text/plain",
+            "buyer_note_schema": {
+                "type": "object",
+                "properties": { "code": { "type": "string" } },
+                "required": ["code"],
+            },
+        }),
+    );
+    let buyer = rails.seed("seed_buyer", json!({}));
+    rails.seed(
+        "seed_credits",
+        json!({
+            "buyer_id": buyer["user_id"],
+            "seller_id": seller["user_id"],
+            "balance_cents": 100.8444,
+        }),
+    );
+
+    let owallet = OwalletServer::start(&rails.base_url, buyer["api_token"].as_str());
+    let seller_token = seller["api_token"].as_str().unwrap();
+    let result = std::thread::scope(|s| {
+        // `run_python` blocks until the order is delivered, so the seller
+        // fulfills from a second thread while it waits.
+        s.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(45);
+            while Instant::now() < deadline {
+                rails.run_job("FulfillPaidOrdersJob");
+                let output = json!({ "stdout": "4\n", "stderr": "", "exit_code": 0 });
+                if !fulfill_as_seller(&rails.base_url, seller_token, &output.to_string(), None)
+                    .is_empty()
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        });
+        owallet.call_tool_with_timeout(
+            "run_python",
+            json!({ "code": "print(2 + 2)" }),
+            Duration::from_secs(60),
+        )
+    });
+
+    assert_eq!(result["stdout"], "4\n", "{result}");
+    assert_eq!(result["exit_code"], 0, "{result}");
 }
