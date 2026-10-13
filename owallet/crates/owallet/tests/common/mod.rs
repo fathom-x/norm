@@ -295,7 +295,13 @@ impl OwalletServer {
     /// Invoke an MCP tool over `/mcp` and return its `structuredContent`.
     /// Panics if the tool result is an error.
     pub fn call_tool(&self, name: &str, arguments: Value) -> Value {
-        let client = http_client(Duration::from_secs(30));
+        self.call_tool_with_timeout(name, arguments, Duration::from_secs(30))
+    }
+
+    /// `call_tool` for a tool that blocks longer than 30s — a one-shot
+    /// purchase polls up to 50s for the seller to deliver.
+    pub fn call_tool_with_timeout(&self, name: &str, arguments: Value, timeout: Duration) -> Value {
+        let client = http_client(timeout);
         let body = json!({
             "jsonrpc": "2.0",
             "id": 1,

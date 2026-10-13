@@ -1638,7 +1638,7 @@
                     "type": "string"
                   },
                   "price_cents": {
-                    "type": "integer"
+                    "$ref": "#/components/schemas/Cents"
                   },
                   "currency": {
                     "type": "string"
@@ -2373,13 +2373,13 @@
                       "type": "string"
                     },
                     "total_outstanding_cents": {
-                      "type": "integer"
+                      "$ref": "#/components/schemas/Cents"
                     },
                     "total_purchased_cents": {
-                      "type": "integer"
+                      "$ref": "#/components/schemas/Cents"
                     },
                     "total_redeemed_cents": {
-                      "type": "integer"
+                      "$ref": "#/components/schemas/Cents"
                     },
                     "buyer_count": {
                       "type": "integer"
@@ -4429,7 +4429,7 @@
             "type": "string"
           },
           "price_cents": {
-            "type": "integer"
+            "$ref": "#/components/schemas/Cents"
           },
           "currency": {
             "type": "string",
@@ -4598,22 +4598,22 @@
             "type": "string"
           },
           "product_price_cents": {
-            "type": "integer"
+            "$ref": "#/components/schemas/Cents"
           },
           "product_price_usd": {
             "type": "string"
           },
           "total_usd_cents": {
-            "type": "integer"
+            "$ref": "#/components/schemas/Cents"
           },
           "total_usd": {
             "type": "string"
           },
           "seller_revenue_cents": {
-            "type": "integer"
+            "$ref": "#/components/schemas/Cents"
           },
           "platform_fee_cents": {
-            "type": "integer"
+            "$ref": "#/components/schemas/Cents"
           },
           "platform_fee_usd": {
             "type": "string"
@@ -4753,7 +4753,7 @@
             "type": "integer"
           },
           "total_sales_cents": {
-            "type": "integer"
+            "$ref": "#/components/schemas/Cents"
           },
           "created_at": {
             "type": "string",
@@ -4772,17 +4772,17 @@
             "type": "string"
           },
           "balance_cents": {
-            "type": "integer"
+            "$ref": "#/components/schemas/Cents"
           },
           "formatted_balance": {
             "type": "string",
             "example": "$10.00"
           },
           "total_purchased_cents": {
-            "type": "integer"
+            "$ref": "#/components/schemas/Cents"
           },
           "total_redeemed_cents": {
-            "type": "integer"
+            "$ref": "#/components/schemas/Cents"
           },
           "holder_type": {
             "type": "string",
