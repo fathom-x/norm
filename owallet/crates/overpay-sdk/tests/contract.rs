@@ -148,6 +148,108 @@ fn every_fixture_round_trips_through_its_model() {
     }
 }
 
+/// Property names the spec types as `Cents`/`NullableCents` (directly or
+/// through `allOf`): amounts that are a whole number of cents in the
+/// fixtures but fractional after sub-cent charges in real responses.
+fn cents_properties(spec: &Value) -> BTreeSet<String> {
+    fn is_cents(schema: &Value) -> bool {
+        let reference = |v: &Value| {
+            v.get("$ref")
+                .and_then(Value::as_str)
+                .is_some_and(|r| r.ends_with("/Cents") || r.ends_with("/NullableCents"))
+        };
+        reference(schema)
+            || schema
+                .get("allOf")
+                .and_then(Value::as_array)
+                .is_some_and(|all| all.iter().any(reference))
+    }
+    fn walk(v: &Value, out: &mut BTreeSet<String>) {
+        match v {
+            Value::Object(map) => {
+                if let Some(Value::Object(props)) = map.get("properties") {
+                    for (name, schema) in props {
+                        if is_cents(schema) {
+                            out.insert(name.clone());
+                        }
+                    }
+                }
+                map.values().for_each(|v| walk(v, out));
+            }
+            Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    let mut out = BTreeSet::new();
+    walk(&spec["components"]["schemas"], &mut out);
+    out
+}
+
+/// Add half a cent to every whole-cent `Cents` value in a body.
+fn fractionalize(v: &mut Value, cents: &BTreeSet<String>) {
+    match v {
+        Value::Object(map) => {
+            for (name, value) in map.iter_mut() {
+                if cents.contains(name) {
+                    if let Some(n) = value.as_i64() {
+                        *value = Value::from(n as f64 + 0.5);
+                        continue;
+                    }
+                }
+                fractionalize(value, cents);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(|v| fractionalize(v, cents)),
+        _ => {}
+    }
+}
+
+/// The marketplace's fixtures carry whole cents, but `Cents` is a number:
+/// a balance reads `9990.8444` once sub-cent charges land on it. Every
+/// typed model must accept that — a `Redemption` whose
+/// `credit_balance_cents` was an `i64` failed every one-shot tool purchase
+/// with "invalid type: floating point, expected i64".
+#[test]
+fn every_cents_field_accepts_a_fraction() {
+    let spec = spec();
+    let cents = cents_properties(&spec);
+    assert!(cents.contains("credit_balance_cents") && cents.contains("balance_cents"));
+    let index: serde_json::Map<String, Value> = serde_json::from_str(INDEX).unwrap();
+    for (file, entry) in &index {
+        if entry["status"].as_u64().unwrap() >= 400 {
+            continue;
+        }
+        let mut body = overpay_sdk::testing::fixture(file.trim_end_matches(".json"));
+        fractionalize(&mut body, &cents);
+        match entry["operation"].as_str().unwrap() {
+            "listListings" => roundtrip::<Page<Listing>>(file, &body, whole),
+            "getListing" => roundtrip::<Listing>(file, &body, data),
+            "getSeller" => roundtrip::<Seller>(file, &body, data),
+            "listOrders" => roundtrip::<Page<Order>>(file, &body, whole),
+            "getOrder" => roundtrip::<Order>(file, &body, data),
+            "createOrder" => roundtrip::<CreatedOrder>(file, &body, whole),
+            "createSpendAuthorization" | "getSpendAuthorization" | "closeSpendAuthorization" => {
+                roundtrip::<SpendAuthorization>(file, &body, data);
+            }
+            "listMerchantCredits" => roundtrip::<Vec<MerchantCredit>>(file, &body, data),
+            "listMerchantCreditTransactions" => {
+                roundtrip::<Page<CreditTransaction>>(file, &body, whole)
+            }
+            "loadCoreCredits" => roundtrip::<CreditLoad>(file, &body, data),
+            "getMerchantCreditBalance" => roundtrip::<MerchantCreditBalance>(file, &body, data),
+            "purchaseMerchantCredits" => roundtrip::<CreditPurchase>(file, &body, data),
+            "redeemMerchantCredits" => roundtrip::<Redemption>(file, &body, data),
+            "getAccount" => roundtrip::<Account>(file, &body, data),
+            "registerBuyer" => roundtrip::<BuyerRegistration>(file, &body, data),
+            "createWebSession" => roundtrip::<WebSession>(file, &body, data),
+            "getOAuthMetadata" => roundtrip::<OAuthServerMetadata>(file, &body, whole),
+            "registerOAuthClient" => roundtrip::<OAuthClient>(file, &body, whole),
+            "exchangeOAuthToken" => roundtrip::<OAuthToken>(file, &body, whole),
+            other => panic!("{file}: no model mapped for {other}"),
+        }
+    }
+}
+
 #[test]
 fn typed_views_read_the_interesting_parts() {
     use overpay_sdk::testing::fixture;
