@@ -129,11 +129,10 @@ pub(crate) fn rejection(order: &Value) -> Option<Value> {
         .then_some(out)
 }
 
-/// One full order for detail output (`create_order` / `get_order_status`
-/// / `wait_for_order` on the MCP surface). Marketplace-side fields the
-/// buyer acts on survive — statuses, amounts, tracking, the web order
-/// URL, delivered content (already size-managed by `tools.rs`'s cache
-/// stripping) — while `settlement_tx_hash`, `payment_address`, and
+/// One full order for detail output (`create_order` / `get_order` on the
+/// MCP surface). Marketplace-side fields the buyer acts on survive —
+/// statuses, amounts, tracking, the web order URL, delivered content
+/// (already paged by `tools.rs`'s `get_order`) — while `settlement_tx_hash`, `payment_address`, and
 /// `buyer_note` do not.
 pub(crate) fn order_detail(order: &Value) -> Value {
     let mut row = Map::new();
@@ -156,7 +155,9 @@ pub(crate) fn order_detail(order: &Value) -> Value {
         "delivered_content",
         "delivered_content_type",
         "delivered_content_url",
-        "delivered_content_cached",
+        "delivered_content_bytes",
+        "content_offset",
+        "next_offset",
         "partial_content",
         "partial_seq",
         "error",
@@ -235,8 +236,7 @@ pub(crate) fn balances_map(data: &Value) -> Map<String, Value> {
     out
 }
 
-/// A credit redemption result (`pay_order`, and `redeem_merchant_credits`
-/// once flattened), as a map so `/v1` can append its allowance fields.
+/// A credit redemption result (`pay_order`), as a map so `/v1` can append its allowance fields.
 pub(crate) fn pay_order_map(data: &Value) -> Map<String, Value> {
     let mut out = Map::new();
     for key in [
@@ -263,7 +263,7 @@ pub(crate) fn pay_order_map(data: &Value) -> Map<String, Value> {
 // ---------------------------------------------------------------------------
 
 /// Sanitize one MCP tool result for transmission off-machine. Envelope
-/// shapes are preserved (`{data: ...}`, `{count, purchases}`, …) so
+/// shapes are preserved (`{data: ...}`, `{synced, errors}`, …) so
 /// programmatic clients keep their contract; only the field vocabulary
 /// narrows to the chain-free allowlist.
 pub fn sanitize(tool: &str, data: &Value) -> Value {
@@ -295,13 +295,13 @@ pub fn sanitize(tool: &str, data: &Value) -> Value {
             }
             out
         }
-        "create_order" | "get_order_status" | "wait_for_order" => {
+        "create_order" | "get_order" => {
             let mut out = Map::new();
             out.insert(
                 "data".into(),
                 order_detail(data.get("data").unwrap_or(data)),
             );
-            // wait_for_order splices these next to the envelope.
+            // A waiting get_order splices these next to the envelope.
             for key in ["waited_seconds", "timed_out"] {
                 if let Some(v) = data.get(key) {
                     out.insert(key.into(), v.clone());
@@ -315,11 +315,6 @@ pub fn sanitize(tool: &str, data: &Value) -> Value {
             }
             Value::Object(out)
         }
-        "redeem_merchant_credits" => {
-            // Raw passthrough is `{data: {...}}`; project the inner object
-            // flat (matching pay_order's self-describing shape).
-            Value::Object(pay_order_map(data.get("data").unwrap_or(data)))
-        }
         "pay_order" => Value::Object(pay_order_map(data)),
         "buy" => buy_result(data),
         "send_usdc" | "send_zcash" => send_result(tool, data),
@@ -327,22 +322,6 @@ pub fn sanitize(tool: &str, data: &Value) -> Value {
             data,
             &["height", "balance_zec", "balance_zat", "spendable_zat"],
         ),
-        "list_purchases" => {
-            // Drops the top-level `npub` the raw shape carries.
-            let rows: Vec<Value> = data
-                .get("purchases")
-                .and_then(Value::as_array)
-                .map(|l| l.iter().map(purchase_row).collect())
-                .unwrap_or_default();
-            let mut out = Map::new();
-            out.insert("count".into(), json!(rows.len()));
-            out.insert("purchases".into(), json!(rows));
-            if let Some(v) = data.get("error") {
-                out.insert("error".into(), v.clone());
-            }
-            Value::Object(out)
-        }
-        "get_purchase" => purchase_row(data),
         "sync_purchases" => copy_fields(data, &["synced", "skipped", "errors", "error"]),
         // The bolt11 invoice IS the deliverable (the user must pay it);
         // only the redundant standalone payment_hash is dropped.
@@ -396,6 +375,7 @@ pub fn sanitize(tool: &str, data: &Value) -> Value {
                 "delivered_content_type",
                 "delivered_content_url",
                 "delivered_content_bytes",
+                "next_offset",
                 "error",
                 "hint",
                 "status",
@@ -511,34 +491,6 @@ fn send_result(tool: &str, data: &Value) -> Value {
     })
 }
 
-/// One cached purchase (list row or `get_purchase` detail). The raw row
-/// carries the wallet `npub` and the full `snapshot` (the unprojected
-/// Rails order, settlement hash included) — neither survives. The cache
-/// itself keeps full snapshots; only responses project.
-fn purchase_row(data: &Value) -> Value {
-    copy_fields(
-        data,
-        &[
-            "order_id",
-            "listing_id",
-            "title",
-            "seller",
-            "payment_status",
-            "fulfillment_status",
-            "delivered_at",
-            "paid_at",
-            "total_usd_cents",
-            "delivered_content",
-            "delivered_content_type",
-            "delivered_content_url",
-            "delivered_content_schema",
-            "schema_json",
-            "cached_at",
-            "error",
-        ],
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,10 +558,10 @@ mod tests {
                 "get_wallet_orders",
                 json!({"data": [stuffed_order()], "next_cursor": "abc"}),
             ),
-            ("get_order_status", json!({"data": stuffed_order()})),
+            ("get_order", json!({"data": stuffed_order()})),
             ("create_order", json!({"data": stuffed_order()})),
             (
-                "wait_for_order",
+                "get_order",
                 json!({"data": stuffed_order(), "waited_seconds": 3, "timed_out": false}),
             ),
             (
@@ -633,26 +585,6 @@ mod tests {
                 json!({"order_id": "ORD-3", "seller_slug": "acme", "status": "fully_paid",
                        "amount_redeemed_cents": 100, "credit_balance_cents": 400,
                        "settlement_tx_hash": "0x6d6b56b3acba7ebe1e44b8a5b1bb9d8a"}),
-            ),
-            (
-                "redeem_merchant_credits",
-                json!({"data": {"status": "fully_paid", "amount_redeemed_cents": 100,
-                       "payer_address": "0xdeadbeef00000000000000000000000000000000"}}),
-            ),
-            (
-                "list_purchases",
-                json!({"npub": "npub1secret", "count": 1, "purchases": [
-                    {"order_id": "ORD-4", "title": "Widget", "fulfillment_status": "delivered",
-                     "npub": "npub1secret",
-                     "snapshot": {"settlement_tx_hash": "0x6d6b56b3acba7ebe1e44b8a5b1bb9d8a"}}
-                ]}),
-            ),
-            (
-                "get_purchase",
-                json!({"order_id": "ORD-4", "title": "Widget", "npub": "npub1secret",
-                       "delivered_content": "the goods",
-                       "snapshot": {"settlement_tx_hash": "0x6d6b56b3acba7ebe1e44b8a5b1bb9d8a",
-                                    "payment_address": "0xdeadbeef00000000000000000000000000000000"}}),
             ),
             (
                 "load_core_credits",
@@ -714,14 +646,14 @@ mod tests {
         assert_eq!(orders["data"][0]["order_id"], "ORD-1");
         assert_eq!(orders["next_cursor"], "c1");
 
-        let detail = sanitize("get_order_status", &json!({"data": stuffed_order()}));
+        let detail = sanitize("get_order", &json!({"data": stuffed_order()}));
         assert_eq!(detail["data"]["order_id"], "ORD-1");
         assert_eq!(detail["data"]["delivered_content"], "the goods");
         assert_eq!(detail["data"]["listing"]["id"], "L-1");
         assert!(detail["data"].get("buyer_note").is_none());
 
         let wait = sanitize(
-            "wait_for_order",
+            "get_order",
             &json!({"data": stuffed_order(), "waited_seconds": 7, "timed_out": true}),
         );
         assert_eq!(wait["waited_seconds"], 7);
@@ -749,13 +681,12 @@ mod tests {
         assert_eq!(buy["error"], "USDC transfer failed");
         assert_eq!(buy["order_url"], "https://x/o/1");
 
-        let purchases = sanitize(
-            "list_purchases",
-            &json!({"npub": "npub1x", "count": 1,
-                    "purchases": [{"order_id": "O-2", "title": "T", "snapshot": {}}]}),
+        let page = sanitize(
+            "get_order",
+            &json!({"data": {"id": "O-3", "delivered_content": "abc",
+                    "delivered_content_bytes": 9000, "content_offset": 0, "next_offset": 3}}),
         );
-        assert_eq!(purchases["count"], 1);
-        assert_eq!(purchases["purchases"][0]["order_id"], "O-2");
-        assert!(purchases.get("npub").is_none());
+        assert_eq!(page["data"]["next_offset"], 3);
+        assert_eq!(page["data"]["delivered_content_bytes"], 9000);
     }
 }

@@ -112,7 +112,7 @@ async fn orders_default_to_the_calling_conversation_and_total_all_of_it() {
     // The total covers the second page too: 0.03 + 0.02 + 0.01 cents.
     assert!(
         text.contains(
-            "This conversation so far: 3 order(s), 3 paid, charged $0.0006 (authorized $0.45)."
+            "This conversation so far: 3 order(s), 3 paid, charged $0.0006 = 0.06¢ (authorized $0.45)."
         ),
         "{text}"
     );
@@ -381,13 +381,23 @@ async fn mcp_tools_list_returns_full_catalog() {
         "list_marketplace",
         "get_wallet_orders",
         "create_order",
-        "get_order_status",
-        "wait_for_order",
+        "get_order",
         "buy",
         "send_usdc",
-        "redeem_merchant_credits",
+        "pay_order",
     ] {
         assert!(names.contains(&expected), "missing tool {expected}");
+    }
+    // Callable by name, but not worth a slot in the model's context.
+    assert!(!names.contains(&"sync_purchases"), "{names:?}");
+    // Folded into get_order.
+    for gone in [
+        "get_order_status",
+        "wait_for_order",
+        "list_purchases",
+        "get_purchase",
+    ] {
+        assert!(!names.contains(&gone), "{gone} should be gone: {names:?}");
     }
 }
 
@@ -1317,18 +1327,29 @@ async fn mcp_get_account_info_includes_onchain_balances() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_redeem_merchant_credits_posts_order_id() {
+async fn mcp_pay_order_redeems_credits_and_reports_the_spend() {
     let overpay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/orders/ord_xyz"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {"id": "ord_xyz", "payment_status": "pending"}
+        })))
+        .mount(&overpay)
+        .await;
     Mock::given(method("POST"))
         .and(path_regex(
             r"^/api/v1/merchant_credits/[A-Za-z0-9_-]+/redeem$",
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "status": "applied",
-            "amount_redeemed_cents": 1500,
-            "credit_balance_cents": 3500,
-            "message": "Applied $15.00",
+            "data": {
+                "status": "applied",
+                "amount_redeemed_cents": 1500,
+                "credit_balance_cents": 3500,
+                "message": "Applied $15.00",
+            }
         })))
+        // Once: the over-limit call at the bottom must not reach Overpay.
+        .expect(1)
         .mount(&overpay)
         .await;
     let tmp = TempDir::new().unwrap();
@@ -1339,7 +1360,7 @@ async fn mcp_redeem_merchant_credits_posts_order_id() {
         .json(&json!({
             "jsonrpc": "2.0", "id": 1,
             "method": "tools/call",
-            "params": {"name": "redeem_merchant_credits", "arguments": {
+            "params": {"name": "pay_order", "arguments": {
                 "seller_slug": "alice", "order_id": "ord_xyz"
             }}
         }))
@@ -1355,6 +1376,28 @@ async fn mcp_redeem_merchant_credits_posts_order_id() {
         body["result"]["structuredContent"]["amount_redeemed_cents"],
         1500
     );
+    // The redemption is reported as spend, for the client's conversation
+    // total (norm's /budget).
+    assert_eq!(body["result"]["_meta"]["owallet/spent_cents"], 1500);
+
+    // A client spend limit with nothing left refuses before any redemption.
+    let res = s
+        .post("/mcp")
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "pay_order",
+                "arguments": {"seller_slug": "alice", "order_id": "ord_xyz"},
+                "_meta": {"owallet/spend_limit_usd": 0}
+            }
+        }))
+        .await;
+    res.assert_status_ok();
+    let body: Value = res.json();
+    assert_eq!(body["result"]["isError"], true, "{body}");
+    let text = body["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("spending limit"), "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1425,11 +1468,11 @@ async fn mcp_buy_composes_purchase_then_send_usdc() {
         structured.get("chain").is_none(),
         "chain must NOT be in the strict-shape output: {structured:?}",
     );
-    // Rendered text confirms the send + steers to wait_for_order (#295).
+    // Rendered text confirms the send + steers to get_order (#295).
     let text = body["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("ord_buy_001"), "rendered text: {text}");
     assert!(text.contains("Payment sent"), "rendered text: {text}");
-    assert!(text.contains("wait_for_order"), "next-step steer: {text}");
+    assert!(text.contains("get_order"), "next-step steer: {text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1781,7 +1824,7 @@ async fn mcp_create_order_passes_through_on_listing_fetch_failure() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_wait_for_order_returns_snap_plus_waited_seconds_and_timed_out_false() {
+async fn mcp_get_order_wait_returns_snap_plus_waited_seconds_and_timed_out_false() {
     let overpay = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/api/v1/orders/[A-Za-z0-9_-]+$"))
@@ -1813,11 +1856,11 @@ async fn mcp_wait_for_order_returns_snap_plus_waited_seconds_and_timed_out_false
             "jsonrpc": "2.0", "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "wait_for_order",
+                "name": "get_order",
                 "arguments": {
                     "order_id": "ord_wait_1",
+                    "wait_until": "delivered",
                     "timeout_seconds": 5,
-                    "poll_interval_seconds": 1,
                 }
             }
         }))
@@ -1841,7 +1884,7 @@ async fn mcp_wait_for_order_returns_snap_plus_waited_seconds_and_timed_out_false
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_wait_for_order_timeout_returns_snap_with_timed_out_true() {
+async fn mcp_get_order_wait_timeout_returns_snap_with_timed_out_true() {
     let overpay = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/api/v1/orders/[A-Za-z0-9_-]+$"))
@@ -1871,13 +1914,13 @@ async fn mcp_wait_for_order_timeout_returns_snap_with_timed_out_true() {
             "jsonrpc": "2.0", "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "wait_for_order",
+                "name": "get_order",
                 "arguments": {
                     "order_id": "ord_wait_2",
+                    "wait_until": "delivered",
                     // Loop exits at the first iteration because
-                    // `elapsed + poll >= timeout` (1s + 1s >= 1s).
+                    // `elapsed + poll >= timeout` (0s + 2s >= 1s).
                     "timeout_seconds": 1,
-                    "poll_interval_seconds": 1,
                 }
             }
         }))
@@ -1899,7 +1942,7 @@ async fn mcp_wait_for_order_timeout_returns_snap_with_timed_out_true() {
 /// timed-out snapshot must still carry the output so far — a client that
 /// didn't stream progress sees nothing else.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_wait_for_order_timeout_keeps_partial_output() {
+async fn mcp_get_order_wait_timeout_keeps_partial_output() {
     let overpay = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path_regex(r"^/api/v1/orders/[A-Za-z0-9_-]+$"))
@@ -1936,12 +1979,12 @@ async fn mcp_wait_for_order_timeout_keeps_partial_output() {
             "jsonrpc": "2.0", "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "wait_for_order",
+                "name": "get_order",
                 "arguments": {
                     "order_id": "ord_wait_3",
-                    // Two polls: the second one times out (1s + 1s >= 2s).
-                    "timeout_seconds": 2,
-                    "poll_interval_seconds": 1,
+                    "wait_until": "delivered",
+                    // Two polls, 2s apart: the second one times out (2s + 2s >= 4s).
+                    "timeout_seconds": 4,
                 }
             }
         }))
@@ -2024,13 +2067,15 @@ async fn mcp_buy_no_usdc_seller_returns_error_dict_not_iserror() {
 }
 
 // ---------------------------------------------------------------------------
-// Purchase cache: get_order_status caching/stripping + the new tools
+// get_order: content paging + the purchase cache
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_get_order_status_caches_terminal_and_strips_large_content() {
+async fn mcp_get_order_pages_large_content_and_answers_finished_orders_from_cache() {
     let overpay = MockServer::start().await;
-    let big = "X".repeat(3000);
+    let big: String = (0..20_000)
+        .map(|i| char::from(b'a' + (i % 26) as u8))
+        .collect();
     Mock::given(method("GET"))
         .and(path_regex(r"^/api/v1/orders/[^/]+$"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -2041,120 +2086,49 @@ async fn mcp_get_order_status_caches_terminal_and_strips_large_content() {
                 "delivered_content_type": "text/plain",
             }
         })))
+        // Once delivered, the order is cached; later pages come from there.
+        .expect(1)
         .mount(&overpay)
         .await;
     let tmp = TempDir::new().unwrap();
     let s = router_with_overpay_and_rpc(&tmp, &overpay.uri(), "http://127.0.0.1:1").await;
 
-    // get_order_status strips the >2KB delivered_content to a pointer.
-    let res = s
-        .post("/mcp")
-        .json(&json!({
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "get_order_status", "arguments": {"order_id": "ord1"}}
-        }))
-        .await;
-    res.assert_status_ok();
-    let body: Value = res.json();
-    assert_eq!(body["result"]["isError"], false, "body: {body}");
-    let data = &body["result"]["structuredContent"]["data"];
-    assert!(
-        data["delivered_content"].is_null(),
-        "content should be stripped"
-    );
-    assert_eq!(data["delivered_content_cached"]["size_bytes"], 3000);
-    assert!(data["delivered_content_cached"]["hint"]
-        .as_str()
-        .unwrap()
-        .contains("get_purchase"));
-    // Rendered text surfaces the cached-content pointer + steer (#295).
-    let text = body["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("3000"), "cached size in text: {text}");
-    assert!(text.contains("get_purchase"), "steer: {text}");
-
-    // get_purchase returns the full cached content.
-    let res2 = s
-        .post("/mcp")
-        .json(&json!({
-            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "get_purchase", "arguments": {"order_id": "ord1"}}
-        }))
-        .await;
-    let body2: Value = res2.json();
-    assert_eq!(body2["result"]["isError"], false);
-    assert_eq!(
-        body2["result"]["structuredContent"]["delivered_content"]
-            .as_str()
-            .unwrap()
-            .len(),
-        3000
-    );
-
-    // list_purchases omits the heavy fields.
-    let res3 = s
-        .post("/mcp")
-        .json(&json!({
-            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-            "params": {"name": "list_purchases", "arguments": {}}
-        }))
-        .await;
-    let body3: Value = res3.json();
-    let purchases = &body3["result"]["structuredContent"]["purchases"];
-    assert_eq!(body3["result"]["structuredContent"]["count"], 1);
-    assert_eq!(purchases[0]["order_id"], "ord1");
-    assert!(purchases[0].get("delivered_content").is_none());
-    assert!(purchases[0].get("snapshot").is_none());
-    let text3 = body3["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text3.contains("1 cached"), "rendered text: {text3}");
-    assert!(text3.contains("ord1"), "rendered text: {text3}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_get_order_status_include_delivered_content_keeps_it() {
-    let overpay = MockServer::start().await;
-    let big = "Y".repeat(3000);
-    Mock::given(method("GET"))
-        .and(path_regex(r"^/api/v1/orders/[^/]+$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "data": {"id": "ord2", "fulfillment_status": "delivered", "delivered_content": big}
-        })))
-        .mount(&overpay)
-        .await;
-    let tmp = TempDir::new().unwrap();
-    let s = router_with_overpay_and_rpc(&tmp, &overpay.uri(), "http://127.0.0.1:1").await;
-
-    let res = s
-        .post("/mcp")
-        .json(&json!({
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "get_order_status",
-                       "arguments": {"order_id": "ord2", "include_delivered_content": true}}
-        }))
-        .await;
-    let body: Value = res.json();
-    let data = &body["result"]["structuredContent"]["data"];
-    assert_eq!(data["delivered_content"].as_str().unwrap().len(), 3000);
-    assert!(data["delivered_content_cached"].is_null());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_get_purchase_returns_not_cached_for_unknown() {
-    let tmp = TempDir::new().unwrap();
-    let s = router_with_overpay_and_rpc(&tmp, "http://127.0.0.1:1", "http://127.0.0.1:1").await;
-    let res = s
-        .post("/mcp")
-        .json(&json!({
-            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "get_purchase", "arguments": {"order_id": "nope"}}
-        }))
-        .await;
-    let body: Value = res.json();
-    assert_eq!(body["result"]["structuredContent"]["error"], "not_cached");
-    assert_eq!(body["result"]["structuredContent"]["order_id"], "nope");
-    // not_cached renders as an info nudge steering to get_order_status (#295).
-    let text = body["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("nope"), "rendered text: {text}");
-    assert!(text.contains("get_order_status"), "steer: {text}");
+    let mut read = String::new();
+    let mut offset: Option<u64> = None;
+    for id in 1.. {
+        let mut args = json!({"order_id": "ord1"});
+        if let Some(o) = offset {
+            args["content_offset"] = json!(o);
+        }
+        let res = s
+            .post("/mcp")
+            .json(&json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": {"name": "get_order", "arguments": args}
+            }))
+            .await;
+        res.assert_status_ok();
+        let body: Value = res.json();
+        assert_eq!(body["result"]["isError"], false, "body: {body}");
+        let data = &body["result"]["structuredContent"]["data"];
+        assert_eq!(data["delivered_content_bytes"], 20_000);
+        let page = data["delivered_content"].as_str().unwrap();
+        // The model reads the text block — the whole page must be in it.
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(page), "page missing from text: {text}");
+        read.push_str(page);
+        match data["next_offset"].as_u64() {
+            Some(next) => {
+                assert!(
+                    text.contains(&format!("content_offset={next}")),
+                    "steer: {text}"
+                );
+                offset = Some(next);
+            }
+            None => break,
+        }
+    }
+    assert_eq!(read, big);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2289,9 +2263,9 @@ async fn mcp_tools_call_streams_over_sse_when_accepted() {
 
 /// A `tools/call` that keeps the order in flight for one poll streams a
 /// `notifications/progress` event before the final response. Exercises the
-/// full progress path end to end with `wait_for_order`.
+/// full progress path end to end with a waiting `get_order`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_wait_for_order_streams_progress_then_result() {
+async fn mcp_get_order_wait_streams_progress_then_result() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // First poll: still shipping. Second poll: delivered → return.
@@ -2333,12 +2307,11 @@ async fn mcp_wait_for_order_streams_progress_then_result() {
             "id": 43,
             "method": "tools/call",
             "params": {
-                "name": "wait_for_order",
+                "name": "get_order",
                 "arguments": {
                     "order_id": "O9",
-                    "until_status": "delivered",
-                    "timeout_seconds": 30,
-                    "poll_interval_seconds": 1
+                    "wait_until": "delivered",
+                    "timeout_seconds": 30
                 },
                 "_meta": { "progressToken": "p9" }
             }
@@ -2372,7 +2345,7 @@ async fn mcp_wait_for_order_streams_progress_then_result() {
 /// shows up as token deltas on the buyer's SSE stream, each carrying only
 /// what is new since the previous notification.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_wait_for_order_streams_seller_output_as_deltas() {
+async fn mcp_get_order_wait_streams_seller_output_as_deltas() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // The seller's buffer grows across polls, then the order delivers.
@@ -2424,11 +2397,11 @@ async fn mcp_wait_for_order_streams_seller_output_as_deltas() {
             "id": 44,
             "method": "tools/call",
             "params": {
-                "name": "wait_for_order",
+                "name": "get_order",
                 "arguments": {
                     "order_id": "O10",
-                    "timeout_seconds": 30,
-                    "poll_interval_seconds": 1
+                    "wait_until": "delivered",
+                    "timeout_seconds": 30
                 },
                 "_meta": { "progressToken": "p10" }
             }

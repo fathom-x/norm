@@ -23,6 +23,7 @@ use owallet_crypto::derive_from_stored_seed;
 use owallet_crypto::evm::Address;
 
 use crate::progress::ProgressSink;
+use crate::projection::DELIVERED_CONTENT_MODEL_CAP;
 use crate::state::{McpState, OwnedAuth, ResolveAuthError};
 
 /// One tool entry in the catalog returned by `tools/list`.
@@ -52,8 +53,6 @@ pub enum ToolError {
     Zcash(#[from] owallet_zcash::ZcashError),
     #[error("not yet implemented in this build")]
     NotImplemented,
-    #[error("wait_for_order: target {target} not reached within {seconds}s")]
-    WaitTimeout { target: String, seconds: u64 },
     #[error(
         "this provider key is chat-scoped — spending tools need a key minted with the \
          spend scope (owallet dashboard → provider keys)"
@@ -66,6 +65,8 @@ pub enum ToolError {
     ProviderKeySends,
     #[error("{0}")]
     ProviderKeyBudget(String),
+    #[error("{0}")]
+    SpendLimit(String),
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -88,12 +89,12 @@ pub fn catalog() -> Vec<ToolSpec> {
         ToolSpec {
             name: "get_account_info",
             description:
-                "Free — a read, no order is placed and nothing is billed. Show the active wallet's balances (ETH / USDC / ZEC), Overpay link status, and merchant credit balances (when linked). Addresses and account identifiers are shown on the owallet dashboard, not here.",
+                "Free read. Show the active wallet's balances (ETH / USDC / ZEC), Overpay link status, and merchant credit balances (when linked). Addresses and account identifiers are shown on the owallet dashboard, not here.",
             input_schema: schema_object(json!({})),
         },
         ToolSpec {
             name: "list_marketplace",
-            description: "Free — a read, no order is placed and nothing is billed. Browse Overpay marketplace listings. Supports optional category / seller / cursor filters.",
+            description: "Free read. Browse Overpay marketplace listings. Supports optional category / seller / cursor filters.",
             input_schema: schema_object(json!({
                 "category":    {"type": "string"},
                 "seller_slug": {"type": "string"},
@@ -103,7 +104,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_wallet_orders",
-            description: "Free — a read, no order is placed and nothing is billed. List orders, newest first. By default only the orders this conversation placed (its model turns and purchases), ending with what the conversation has cost in total; pass scope=\"all\" for every order on the wallet. Each row gives when the order was placed, the amount authorized and what was finally charged, so no per-order lookup is needed for costs. If this client does not identify conversations, all orders are listed and the result says so. Requires authorization.",
+            description: "Free read. List orders, newest first. By default only the orders this conversation placed (its model turns and purchases), ending with what the conversation has cost in total; pass scope=\"all\" for every order on the wallet. Each row gives when the order was placed, the amount authorized and what was finally charged, so no per-order lookup is needed for costs. If this client does not identify conversations, all orders are listed and the result says so. Requires authorization.",
             input_schema: schema_object(json!({
                 "scope":              {"type": "string", "enum": ["session", "all"], "default": "session",
                                        "description": "\"session\" (default): only orders placed by this conversation. \"all\": every order on the wallet."},
@@ -115,7 +116,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_listing",
-            description: "Free — a read, no order is placed and nothing is billed. \
+            description: "Free read. \
                           Fetch a single marketplace listing including \
                           its buyer_note_schema and checkout_schema. Call \
                           this before create_order on a listing whose \
@@ -128,17 +129,10 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "create_order",
-            description: "Free to call, and no money moves yet — the order is created \
-                          unpaid until it is settled (e.g. with pay_order). \
+            description: "Free; no money moves until the order is paid (pay_order). \
                           Create a pending order for a marketplace listing. \
-                          Requires authorization. `buyer_note` may be a \
-                          string (free-form) or any JSON value (object / \
-                          array / etc.) — when the listing declares a \
-                          buyer_note_schema the tool pre-validates the \
-                          note locally against it and rejects with the \
-                          violations spelled out, so an invalid note is \
-                          caught before order creation rather than at \
-                          seller-bot fulfillment.",
+                          A buyer_note is checked against the listing's \
+                          buyer_note_schema, if it declares one.",
             input_schema: schema_with_required(
                 json!({
                     "listing_id": {"type": "string"},
@@ -154,40 +148,16 @@ pub fn catalog() -> Vec<ToolSpec> {
             ),
         },
         ToolSpec {
-            name: "get_order_status",
-            description: "Free — a read, no order is placed and nothing is billed. Snapshot of a single order (status, fulfillment_status, tracking). Terminal orders are cached locally; large delivered_content is stripped to a pointer unless `include_delivered_content` is true — fetch it later with get_purchase.",
+            name: "get_order",
+            description: "Free read. One order's status, price, tracking and delivered content. Content over 8 KB comes in pages: pass the returned next_offset back as content_offset. With wait_until (e.g. \"delivered\"), polls until the order reaches that status or fails, up to timeout_seconds.",
             input_schema: schema_with_required(
                 json!({
-                    "order_id":                  {"type": "string"},
-                    "include_delivered_content": {"type": "boolean", "default": false},
+                    "order_id":        {"type": "string"},
+                    "wait_until":      {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "default": 60, "minimum": 1, "maximum": 600},
+                    "content_offset":  {"type": "integer", "minimum": 0},
                 }),
                 &["order_id"],
-            ),
-        },
-        ToolSpec {
-            name: "wait_for_order",
-            description:
-                "Free — a read, no order is placed and nothing is billed. Poll until the order reaches `until_status` (default \"delivered\") or a terminal status (delivered / failed / cancelled / rejected), then return its final snapshot plus `waited_seconds` and `timed_out`. Caches terminal orders and strips large delivered_content unless `include_delivered_content` is true. When the call is streamed (Accept: text/event-stream plus a `_meta.progressToken`) and the seller publishes its work in progress, each progress notification carries the newly generated text in `data.delta`.",
-            input_schema: schema_with_required(
-                json!({
-                    "order_id":                  {"type": "string"},
-                    "until_status":              {"type": "string", "default": "delivered"},
-                    "timeout_seconds":           {"type": "integer", "default": 60, "minimum": 1, "maximum": 600},
-                    "poll_interval_seconds":     {"type": "integer", "default": 5,  "minimum": 1, "maximum": 60},
-                    "include_delivered_content": {"type": "boolean", "default": false},
-                }),
-                &["order_id"],
-            ),
-        },
-        ToolSpec {
-            name: "redeem_merchant_credits",
-            description: "The call itself is not billed, but it moves real money: it spends the wallet's prepaid merchant credits. Apply previously-purchased merchant credits to settle an order. Returns the amount redeemed and the remaining credit balance.",
-            input_schema: schema_with_required(
-                json!({
-                    "seller_slug": {"type": "string"},
-                    "order_id":    {"type": "string"},
-                }),
-                &["seller_slug", "order_id"],
             ),
         },
         ToolSpec {
@@ -240,35 +210,19 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "sync_zcash",
-            description: "Free — a read, no order is placed and nothing is billed. Sync the wallet's Zcash (Orchard) state from lightwalletd and return `{height, balance_zec, balance_zat, spendable_zat}`.",
+            description: "Free read. Sync the wallet's Zcash (Orchard) state from lightwalletd and return `{height, balance_zec, balance_zat, spendable_zat}`.",
             input_schema: schema_object(json!({})),
         },
         ToolSpec {
-            name: "list_purchases",
-            description: "Free — a read, no order is placed and nothing is billed. List orders this wallet has cached locally from past purchases. The cache fills automatically when an order reaches a terminal fulfillment status. Call this before issuing a new `buy` to check whether a deliverable is already paid for. `delivered_content` is omitted — fetch it with get_purchase.",
-            input_schema: schema_object(json!({
-                "limit":              {"type": "integer", "default": 50},
-                "fulfillment_status": {"type": "string"},
-            })),
-        },
-        ToolSpec {
-            name: "get_purchase",
-            description: "Free — a read, no order is placed and nothing is billed. Return the cached order payload (including delivered_content and the listing schema) for this wallet. Returns `{error: \"not_cached\"}` if the order isn't cached yet — call get_order_status or wait_for_order first to populate it.",
-            input_schema: schema_with_required(
-                json!({"order_id": {"type": "string"}}),
-                &["order_id"],
-            ),
-        },
-        ToolSpec {
             name: "sync_purchases",
-            description: "Free — a read, no order is placed and nothing is billed. Backfill the local purchase cache from Overpay: fetch delivered orders and re-fetch each one's detail (so delivered_content is included), upserting into the cache. Idempotent. Returns `{synced, errors}`.",
+            description: "Free read. Backfill the local purchase cache from Overpay: fetch delivered orders and re-fetch each one's detail (so delivered_content is included), upserting into the cache. Idempotent. Returns `{synced, errors}`.",
             input_schema: schema_object(json!({
                 "api_key": {"type": "string"},
             })),
         },
         ToolSpec {
             name: "load_core_credits",
-            description: "The call itself is not billed and moves no money — the returned invoice moves real money only when paid from a Lightning wallet. Create a Lightning invoice to load Overpay core credits. Returns a BOLT11 invoice with a scannable QR code. Pay from any Lightning wallet; credits are funded automatically once the invoice settles. Call wait_for_order(order_id, until_status=\"delivered\") to confirm the credits land.",
+            description: "The call itself is not billed and moves no money — the returned invoice moves real money only when paid from a Lightning wallet. Create a Lightning invoice to load Overpay core credits. Returns a BOLT11 invoice with a scannable QR code. Pay from any Lightning wallet; credits are funded automatically once the invoice settles. Call get_order(order_id, wait_until=\"delivered\") to confirm the credits land.",
             input_schema: schema_with_required(
                 json!({
                     "amount_usd": {"type": "number", "description": "Amount to load in USD (must meet the site minimum)"},
@@ -296,6 +250,94 @@ pub fn catalog() -> Vec<ToolSpec> {
 pub struct ToolOutput {
     pub text: String,
     pub data: Value,
+    /// What this call spent from the wallet, in micro-dollars: a one-shot
+    /// marketplace purchase's settled charge, or what `pay_order`
+    /// redeemed. `None` for tools that spend nothing. `buy` is
+    /// deliberately not counted — it converts USDC into prepaid credits,
+    /// which count when a purchase redeems them, so counting both would
+    /// double-charge one purchase. The `/mcp` transport reports it as
+    /// `_meta["owallet/spent_cents"]` so a client can add a purchase to what
+    /// its conversation has spent (norm's `/budget`).
+    pub spent_micros: Option<i64>,
+}
+
+/// `_meta` key a `tools/call` result carries [`ToolOutput::spent_micros`]
+/// under, in cents (fractional below a cent, like `/v1`'s `charged_cents`).
+pub const SPENT_CENTS_META: &str = "owallet/spent_cents";
+/// `_meta` key a `tools/call` request may carry to cap what the call may
+/// spend, in USD — the `/mcp` twin of `/v1`'s `x-owallet-spend-limit-usd`
+/// header, per call because one MCP session serves many conversations.
+pub const SPEND_LIMIT_META: &str = "owallet/spend_limit_usd";
+
+/// The static tools needing a provider key's `spend` scope.
+fn spend_scoped(name: &str) -> bool {
+    matches!(name, "create_order" | "pay_order" | "buy")
+}
+
+/// Whether `tools/list` advertises static tool `name` to this session.
+/// Every listed tool costs context on every turn of the client's model, so
+/// the list leaves out what the session can't use: `sync_purchases` for
+/// everyone (the purchase cache fills itself; the dashboard still calls it
+/// through [`dispatch`]), the raw-address sends and their `sync_zcash`
+/// helper for provider keys (always refused — `get_account_info` still
+/// shows the last-known ZEC balance), and the spending tools for a key
+/// without the `spend` scope. Hidden tools stay callable by name; the
+/// gates in [`dispatch`] are what enforce the rules.
+pub fn listed(state: &McpState, name: &str) -> bool {
+    if name == "sync_purchases" {
+        return false;
+    }
+    if state.provider_key_id.is_none() {
+        return true;
+    }
+    if matches!(name, "send_usdc" | "send_zcash" | "sync_zcash") {
+        return false;
+    }
+    state.provider_key_can_spend || !spend_scoped(name)
+}
+
+/// Does calling `name` spend from the wallet? `pay_order`, `buy`, and
+/// every one-shot marketplace tool (anything outside the static
+/// catalog: `run_python` and the marked listings, each a paid order).
+pub fn spends(name: &str) -> bool {
+    matches!(name, "pay_order" | "buy") || !catalog().iter().any(|t| t.name == name)
+}
+
+/// Refuse a spending call a client-supplied limit ([`SPEND_LIMIT_META`])
+/// does not cover: nothing once the limit is used up, and `buy` above the
+/// limit (its amount is in the arguments). A one-shot's price is known
+/// only once it settles, so like `/v1`'s turns it is refused only once
+/// nothing is left — the client counts what it spent and lowers the next
+/// call's limit.
+pub fn check_spend_limit(
+    name: &str,
+    args: &Value,
+    limit_usd: Option<f64>,
+) -> Result<(), ToolError> {
+    let Some(limit) = limit_usd else {
+        return Ok(());
+    };
+    if !spends(name) {
+        return Ok(());
+    }
+    if limit <= 0.0 {
+        return Err(ToolError::SpendLimit(
+            "spending limit reached: the client allows this call no further spend \
+             (raise the conversation budget to continue)"
+                .into(),
+        ));
+    }
+    let amount = args
+        .get("amount_usd")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if name == "buy" && amount > limit {
+        return Err(ToolError::SpendLimit(format!(
+            "spending limit reached: ${amount:.2} requested but only ${limit:.2} of this \
+             conversation's budget remains (raise the conversation budget to continue)"
+        )));
+    }
+    Ok(())
 }
 
 /// Dispatch a `tools/call` to the right handler, then render its `Value`
@@ -319,15 +361,14 @@ pub async fn dispatch(
     // daily budget (released below if nothing left the wallet).
     let buy_reservation_usd = gate_provider_key(state, name, &args)?;
 
+    let mut spent_micros = None;
     let data: Value = match name {
         "get_account_info" => get_account_info(state).await?,
         "list_marketplace" => list_marketplace(state, args).await?,
         "get_wallet_orders" => get_wallet_orders(state, args).await?,
         "get_listing" => get_listing(state, args).await?,
         "create_order" => create_order(state, args).await?,
-        "get_order_status" => get_order_status(state, args).await?,
-        "wait_for_order" => wait_for_order(state, args, progress).await?,
-        "redeem_merchant_credits" => redeem_merchant_credits(state, args).await?,
+        "get_order" => get_order(state, args, progress).await?,
         "pay_order" => pay_order(state, args).await?,
         // A hard error here means no payment was broadcast — hand a
         // provider-key session's reservation back before propagating.
@@ -347,12 +388,13 @@ pub async fn dispatch(
         "send_usdc" => send_usdc(state, args).await?,
         "send_zcash" => send_zcash(state, args).await?,
         "sync_zcash" => sync_zcash(state, args).await?,
-        "list_purchases" => list_purchases(state, args).await?,
-        "get_purchase" => get_purchase(state, args).await?,
         "sync_purchases" => sync_purchases(state, args).await?,
         "load_core_credits" => load_core_credits(state, args).await?,
         other => match marketplace_tool_call(state, other, &args, progress).await? {
-            Some(data) => data,
+            Some((data, micros)) => {
+                spent_micros = Some(micros);
+                data
+            }
             None => {
                 return Err(ToolError::InvalidArg {
                     arg: "name",
@@ -364,8 +406,15 @@ pub async fn dispatch(
     if state.provider_key_id.is_some() {
         settle_provider_key_budget(state, name, &data, buy_reservation_usd);
     }
+    if name == "pay_order" {
+        spent_micros = Some(redeemed_cents(&data).map_or(0, crate::openai_compat::cents_to_micros));
+    }
     let text = crate::render::render(name, &data);
-    Ok(ToolOutput { text, data })
+    Ok(ToolOutput {
+        text,
+        data,
+        spent_micros,
+    })
 }
 
 /// `/v1`'s money rules applied to a provider-key `/mcp` session, before
@@ -387,18 +436,14 @@ fn gate_provider_key(state: &McpState, name: &str, args: &Value) -> Result<Optio
     // nothing leaves this wallet. Gating it left a chat-scoped key (what norm
     // mints by default) with no in-chat way to top up the very credits that
     // pay for chat.
-    let spend_scoped = matches!(
-        name,
-        "create_order" | "pay_order" | "redeem_merchant_credits" | "buy"
-    );
-    if spend_scoped && !state.provider_key_can_spend {
+    if spend_scoped(name) && !state.provider_key_can_spend {
         return Err(ToolError::ProviderKeyScope);
     }
     match name {
         // A redemption's amount is knowable only after the fact, so an
         // exhausted budget refuses up front and the actual amount is
         // recorded after — the same soft gate as /v1's pay_order.
-        "pay_order" | "redeem_merchant_credits" => {
+        "pay_order" => {
             if let Some(key) = v1::read_key(state, Some(key_id)) {
                 if key.remaining_today_usd_micros() == Some(0) {
                     return Err(exhausted_budget_error(&key));
@@ -443,15 +488,8 @@ fn settle_provider_key_budget(
     use crate::openai_compat as v1;
     let key_id = state.provider_key_id.as_deref();
     match name {
-        "pay_order" | "redeem_merchant_credits" => {
-            let cents = data
-                .get("amount_redeemed_cents")
-                .and_then(Value::as_f64)
-                .or_else(|| {
-                    data.pointer("/data/amount_redeemed_cents")
-                        .and_then(Value::as_f64)
-                });
-            if let Some(cents) = cents {
+        "pay_order" => {
+            if let Some(cents) = redeemed_cents(data) {
                 v1::record_key_budget(state, key_id, cents / 100.0);
             }
         }
@@ -462,6 +500,17 @@ fn settle_provider_key_budget(
         }
         _ => {}
     }
+}
+
+/// What a `pay_order` result says it redeemed, in cents (possibly
+/// fractional) — flat or under the Rails `data` envelope.
+fn redeemed_cents(data: &Value) -> Option<f64> {
+    data.get("amount_redeemed_cents")
+        .and_then(Value::as_f64)
+        .or_else(|| {
+            data.pointer("/data/amount_redeemed_cents")
+                .and_then(Value::as_f64)
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +567,8 @@ pub async fn marketplace_specs(state: &McpState) -> Vec<Value> {
     specs
 }
 
-/// Execute a one-shot marketplace tool by name, or `None` when the name
+/// Execute a one-shot marketplace tool by name, returning its data and
+/// what the purchase charged in micro-dollars, or `None` when the name
 /// is neither `run_python` nor a currently-marked listing (the caller
 /// falls through to its unknown-tool error). Purchase failures surface as
 /// [`ToolError::Internal`] with the `/v1` helper's own message — payment
@@ -529,7 +579,7 @@ async fn marketplace_tool_call(
     name: &str,
     args: &Value,
     progress: Option<&ProgressSink>,
-) -> Result<Option<Value>, ToolError> {
+) -> Result<Option<(Value, i64)>, ToolError> {
     use crate::openai_compat as v1;
 
     // With progress streaming, each poll's notification resets the MCP
@@ -554,8 +604,9 @@ async fn marketplace_tool_call(
         }
     }
 
-    // A standalone MCP purchase has no chat turn to report usage on; the
-    // budget recording happens inside the shared place-and-pay path.
+    // A standalone MCP purchase has no chat turn to report usage on, so its
+    // charge goes back to the caller as the result's spend; the key budget
+    // recording happens inside the shared place-and-pay path.
     let mut usage = v1::TurnUsage::default();
 
     if name == v1::RUN_PYTHON_TOOL_NAME {
@@ -573,7 +624,7 @@ async fn marketplace_tool_call(
         )
         .await
         .map_err(|e| ToolError::Internal(e.message().to_string()))?;
-        return Ok(Some(data));
+        return Ok(Some((data, usage.charged_micros())));
     }
 
     let tools = v1::fetch_listing_tools(state).await.unwrap_or_default();
@@ -581,7 +632,7 @@ async fn marketplace_tool_call(
         return Ok(None);
     };
     let (_npub, auth) = state.resolve_owned_auth()?;
-    let data = v1::run_listing_tool(
+    let mut data = v1::run_listing_tool(
         state,
         &auth,
         &tool,
@@ -595,7 +646,39 @@ async fn marketplace_tool_call(
     )
     .await
     .map_err(|e| ToolError::Internal(e.message().to_string()))?;
-    Ok(Some(data))
+    point_to_next_page(&mut data);
+    Ok(Some((data, usage.charged_micros())))
+}
+
+/// A one-shot's delivered content is cut at one page; say where the rest
+/// starts, so the caller can read it with `get_order` (the purchase is in
+/// the local cache by now).
+fn point_to_next_page(data: &mut Value) {
+    if data.get("delivered_content_truncated") != Some(&Value::Bool(true)) {
+        return;
+    }
+    let Some(next) = data
+        .get("delivered_content")
+        .and_then(Value::as_str)
+        .map(str::len)
+    else {
+        return;
+    };
+    let order_id = data
+        .get("order_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let Some(obj) = data.as_object_mut() else {
+        return;
+    };
+    obj.insert("next_offset".into(), json!(next));
+    obj.insert(
+        "hint".into(),
+        json!(format!(
+            "Content continues: get_order(order_id=\"{order_id}\", content_offset={next})."
+        )),
+    );
 }
 
 /// [`dispatch`], then sanitize the result for transmission off-machine
@@ -625,7 +708,11 @@ pub async fn dispatch_sanitized(
     }
     let data = crate::projection::sanitize(name, &raw.data);
     let text = crate::render::render(name, &data);
-    Ok(ToolOutput { text, data })
+    Ok(ToolOutput {
+        text,
+        data,
+        spent_micros: raw.spent_micros,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1205,11 +1292,6 @@ const PURCHASE_CACHE_STATUSES: &[&str] = &[
     "awaiting_seller",
 ];
 
-/// Above this many bytes, `delivered_content` is stripped from
-/// get_order_status / wait_for_order responses (once cached) to keep agent
-/// context windows small.
-const DELIVERED_CONTENT_STRIP_THRESHOLD: usize = 2048;
-
 /// Pull the order dict out of a Rails response envelope (handles `{data: …}`
 /// and flat). Mirrors `_unwrap_order_payload`.
 fn unwrap_order_payload(payload: &Value) -> Option<&Value> {
@@ -1229,7 +1311,7 @@ fn unwrap_order_payload(payload: &Value) -> Option<&Value> {
 /// cacheable fulfillment status, a wallet is active, and the DB is unlocked.
 /// Returns whether a row was written. Silent on any failure. Mirrors
 /// `_maybe_cache_purchase`.
-fn maybe_cache_purchase(state: &McpState, payload: &Value) -> bool {
+pub(crate) fn maybe_cache_purchase(state: &McpState, payload: &Value) -> bool {
     let Some(order) = unwrap_order_payload(payload) else {
         return false;
     };
@@ -1277,111 +1359,19 @@ fn strip_content_if_url_present(payload: &mut Value) {
     }
 }
 
-/// Drop bulky `delivered_content` from a response once it's been cached,
-/// replacing it with a small `delivered_content_cached` pointer. Mutates
-/// `payload` in place. Mirrors `_strip_large_delivered_content`.
-fn strip_large_delivered_content(state: &McpState, payload: &mut Value) {
-    // Locate the order object (envelope `data` or flat).
-    let is_enveloped = payload.get("data").map(Value::is_object).unwrap_or(false);
-    let is_flat = payload.get("order_id").is_some() || payload.get("id").is_some();
-    let order = if is_enveloped {
-        payload.get_mut("data")
-    } else if is_flat {
-        Some(&mut *payload)
-    } else {
-        None
-    };
-    let Some(order) = order else {
-        return;
-    };
-
-    // Read what we need, then drop the immutable borrow before mutating.
-    let size_bytes = match order.get("delivered_content").and_then(Value::as_str) {
-        Some(c) if c.len() > DELIVERED_CONTENT_STRIP_THRESHOLD => c.len(),
-        _ => return,
-    };
-    let content_type = order.get("delivered_content_type").cloned();
-    let order_id = order
-        .get("order_id")
-        .or_else(|| order.get("id"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let (Some(npub), Some(order_id)) = (state.resolve_npub(), order_id) else {
-        return;
-    };
-    // Only strip when we actually have a local cached copy to fall back on.
-    {
-        let Ok(db) = state.db.lock() else {
-            return;
-        };
-        if db.read_purchase(&npub, &order_id).ok().flatten().is_none() {
-            return;
-        }
-    }
-    if let Some(obj) = order.as_object_mut() {
-        obj.remove("delivered_content");
-        obj.insert(
-            "delivered_content_cached".into(),
-            json!({
-                "size_bytes": size_bytes,
-                "content_type": content_type,
-                "hint": format!(
-                    "Call get_purchase(order_id='{order_id}') to retrieve the full content from the local cache."
-                ),
-            }),
-        );
-    }
-}
-
 #[derive(Debug, Deserialize)]
-struct OrderIdArgs {
+struct GetOrderArgs {
     order_id: String,
-    /// Keep `delivered_content` inline even when it's been cached locally.
-    /// Default false — large blobs are stripped to a pointer. Matches
-    /// `get_order_status`'s arg in wallet_mcp/server.py.
+    /// Poll until the order's fulfillment status reaches this (or a
+    /// terminal one). Absent: a single snapshot.
     #[serde(default)]
-    include_delivered_content: bool,
-}
-
-async fn get_order_status(state: &McpState, args: Value) -> Result<Value, ToolError> {
-    let args: OrderIdArgs = serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
-        arg: "arguments",
-        reason: e.to_string(),
-    })?;
-    let (_npub, auth) = state.resolve_owned_auth()?;
-
-    let mut data = state
-        .overpay
-        .get_order_value(&args.order_id, auth.as_auth())
-        .await?;
-    // Cache terminal orders, then strip the bulky delivered_content unless
-    // the caller explicitly asked to keep it inline.
-    maybe_cache_purchase(state, &data);
-    strip_content_if_url_present(&mut data);
-    if !args.include_delivered_content {
-        strip_large_delivered_content(state, &mut data);
-    }
-    Ok(data)
-}
-
-#[derive(Debug, Deserialize)]
-struct WaitForOrderArgs {
-    order_id: String,
-    /// Python's tool name; the older `target_fulfillment_status` is
-    /// kept as an alias so existing Rust callers don't break.
-    #[serde(default = "default_until_status", alias = "target_fulfillment_status")]
-    until_status: String,
+    wait_until: Option<String>,
     #[serde(default = "default_timeout")]
     timeout_seconds: u64,
-    #[serde(default = "default_poll")]
-    poll_interval_seconds: u64,
-    /// Keep `delivered_content` inline even once cached. Default false.
+    /// Byte offset into `delivered_content` — the `next_offset` a previous
+    /// page returned.
     #[serde(default)]
-    include_delivered_content: bool,
-}
-
-fn default_until_status() -> String {
-    "delivered".into()
+    content_offset: usize,
 }
 
 /// Python `wait_for_order` defaults `timeout_seconds=60` (`server.py:1998`).
@@ -1389,37 +1379,89 @@ fn default_timeout() -> u64 {
     60
 }
 
-fn default_poll() -> u64 {
-    5
-}
+/// How often `get_order` re-fetches an order it is waiting on.
+const ORDER_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-async fn wait_for_order(
+/// One order: a snapshot, or — with `wait_until` — the snapshot once the
+/// order reaches that status or a terminal one, or the timeout runs out. A
+/// finished order is answered from the local purchase cache when it is
+/// there (it can't change any more), and every terminal snapshot is cached.
+/// The delivered content comes back one [`DELIVERED_CONTENT_MODEL_CAP`]
+/// page at a time, so a large deliverable is readable in full without
+/// flooding the caller's context.
+async fn get_order(
     state: &McpState,
     args: Value,
     progress: Option<&ProgressSink>,
 ) -> Result<Value, ToolError> {
-    let args: WaitForOrderArgs =
-        serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
-            arg: "arguments",
-            reason: e.to_string(),
-        })?;
-    // Cap the timeout matching `wait_for_order` in server.py:2020 (max
-    // 600s) and clamp poll interval to [1, 60] like server.py:2021.
-    let timeout = args.timeout_seconds.clamp(1, 600);
-    let poll = args.poll_interval_seconds.clamp(1, 60);
+    let args: GetOrderArgs = serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
+        arg: "arguments",
+        reason: e.to_string(),
+    })?;
+    let (mut snap, waited) = match args.wait_until.as_deref() {
+        Some(until) => {
+            let timeout = args.timeout_seconds.clamp(1, 600);
+            let (snap, elapsed, timed_out) =
+                poll_order(state, &args.order_id, until, timeout, progress).await?;
+            (snap, Some((elapsed, timed_out)))
+        }
+        None => match cached_finished_order(state, &args.order_id) {
+            Some(snap) => (snap, None),
+            None => {
+                let (_npub, auth) = state.resolve_owned_auth()?;
+                let snap = state
+                    .overpay
+                    .get_order_value(&args.order_id, auth.as_auth())
+                    .await?;
+                (snap, None)
+            }
+        },
+    };
+    maybe_cache_purchase(state, &snap);
+    strip_content_if_url_present(&mut snap);
+    page_delivered_content(&mut snap, args.content_offset);
+    Ok(match waited {
+        Some((elapsed, timed_out)) => splice_wait_meta(snap, elapsed, timed_out),
+        None => snap,
+    })
+}
 
+/// The cached copy of an order that can no longer change (a terminal
+/// fulfillment status), in the Rails `{"data": …}` envelope.
+fn cached_finished_order(state: &McpState, order_id: &str) -> Option<Value> {
+    let npub = state.resolve_npub()?;
+    let db = state.db.lock().ok()?;
+    let row = db.read_purchase(&npub, order_id).ok().flatten()?;
+    let status = row.fulfillment_status.as_deref()?;
+    if !FulfillmentStatus::from(status).is_terminal() {
+        return None;
+    }
+    row.snapshot
+        .is_object()
+        .then(|| json!({ "data": row.snapshot }))
+}
+
+/// Poll an order until its fulfillment status is `until` or terminal, or
+/// `timeout` seconds pass. Returns the last snapshot, the seconds waited,
+/// and whether it timed out. Streams progress (and any seller output
+/// produced so far) to SSE clients that asked for it.
+async fn poll_order(
+    state: &McpState,
+    order_id: &str,
+    until: &str,
+    timeout: u64,
+    progress: Option<&ProgressSink>,
+) -> Result<(Value, u64, bool), ToolError> {
     let (_npub, auth) = state.resolve_owned_auth()?;
     // Raw Rails passthrough — each snapshot is `{"data": {...}}` so the tool
     // output shape matches Python (fathom-x/overpay#288). Offloaded content
     // is not fetched here; the result points at it instead.
-    let waiter = OrderWaiter::new(state.overpay.sdk(), &args.order_id, auth.as_auth())
-        .until(Until::Status(FulfillmentStatus::from(
-            args.until_status.as_str(),
-        )))
+    let waiter = OrderWaiter::new(state.overpay.sdk(), order_id, auth.as_auth())
+        .until(Until::Status(FulfillmentStatus::from(until)))
         .resolve_delivered(false)
         .stop_before_overrun()
         .timeout(Duration::from_secs(timeout))
-        .poll_interval(Duration::from_secs(poll));
+        .poll_interval(ORDER_POLL_INTERVAL);
     let mut events = std::pin::pin!(waiter.events());
     // Counts polls that found the order still in flight — the `progress`
     // value on each streamed `notifications/progress`.
@@ -1428,64 +1470,90 @@ async fn wait_for_order(
         let event = event?;
         let elapsed = event.elapsed.as_secs();
         if event.state != WaitState::Pending {
-            let mut snap = event.snapshot;
-            maybe_cache_purchase(state, &snap);
-            strip_content_if_url_present(&mut snap);
-            if !args.include_delivered_content {
-                strip_large_delivered_content(state, &mut snap);
-            }
-            return Ok(splice_wait_meta(
-                snap,
-                elapsed,
-                event.state == WaitState::TimedOut,
-            ));
+            return Ok((event.snapshot, elapsed, event.state == WaitState::TimedOut));
         }
 
         // Still in flight — stream a progress update to SSE clients that
         // opted in. Inert (no allocation sent) when the call is buffered or
         // no `progressToken` was given.
-        if let Some(sink) = progress {
-            if sink.wants_progress() {
-                tick += 1;
-                let status = event
-                    .snapshot
-                    .get("data")
-                    .and_then(|d| d.get("fulfillment_status"))
-                    .or_else(|| event.snapshot.get("fulfillment_status"))
-                    .and_then(|v| v.as_str());
-                let status_label = status.unwrap_or("unknown");
-                let delta = event.delta.as_deref();
+        if let Some(sink) = progress.filter(|s| s.wants_progress()) {
+            tick += 1;
+            let status = event
+                .snapshot
+                .get("data")
+                .and_then(|d| d.get("fulfillment_status"))
+                .or_else(|| event.snapshot.get("fulfillment_status"))
+                .and_then(|v| v.as_str());
+            let status_label = status.unwrap_or("unknown");
+            let delta = event.delta.as_deref();
 
-                // When the seller is producing text, the delta *is* the
-                // news — send it as the message so a client rendering the
-                // progress feed watches the answer arrive. Otherwise fall
-                // back to the status line.
-                let message = match delta {
-                    Some(d) => d.to_string(),
-                    None => format!(
-                        "order {} still in flight (status: {status_label}) — waited {elapsed}s",
-                        args.order_id
-                    ),
-                };
-                sink.emit(
-                    tick,
-                    None,
-                    message,
-                    json!({
-                        "order_id": args.order_id,
-                        "fulfillment_status": status,
-                        "waited_seconds": elapsed,
-                        "delta": delta,
-                        "partial_seq": event.partial_seq,
-                    }),
-                );
-            }
+            // When the seller is producing text, the delta *is* the news —
+            // send it as the message so a client rendering the progress
+            // feed watches the answer arrive. Otherwise fall back to the
+            // status line.
+            let message = match delta {
+                Some(d) => d.to_string(),
+                None => format!(
+                    "order {order_id} still in flight (status: {status_label}) — waited {elapsed}s"
+                ),
+            };
+            sink.emit(
+                tick,
+                None,
+                message,
+                json!({
+                    "order_id": order_id,
+                    "fulfillment_status": status,
+                    "waited_seconds": elapsed,
+                    "delta": delta,
+                    "partial_seq": event.partial_seq,
+                }),
+            );
         }
     }
     Err(ToolError::InvalidArg {
         arg: "order_id",
-        reason: format!("stopped polling order {} before it finished", args.order_id),
+        reason: format!("stopped polling order {order_id} before it finished"),
     })
+}
+
+/// Cut `delivered_content` down to the page starting at `offset` bytes
+/// (snapped to a character boundary). When the content doesn't fit in one
+/// page, the order also carries `delivered_content_bytes` (the full size),
+/// `content_offset` (where this page starts) and, unless this is the last
+/// page, `next_offset`.
+fn page_delivered_content(payload: &mut Value, offset: usize) {
+    let is_enveloped = payload.get("data").map(Value::is_object).unwrap_or(false);
+    let order = if is_enveloped {
+        payload.get_mut("data")
+    } else {
+        Some(&mut *payload)
+    };
+    let Some(order) = order.and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(content) = order.get("delivered_content").and_then(Value::as_str) else {
+        return;
+    };
+    let total = content.len();
+    let mut start = offset.min(total);
+    while !content.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (start + DELIVERED_CONTENT_MODEL_CAP).min(total);
+    while !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    if start == 0 && end == total {
+        return;
+    }
+    let page = content[start..end].to_string();
+    order.insert("delivered_content".into(), json!(page));
+    order.insert("delivered_content_bytes".into(), json!(total));
+    order.insert("content_offset".into(), json!(start));
+    if end < total {
+        order.insert("next_offset".into(), json!(end));
+    }
 }
 
 /// Splice Python's `waited_seconds` + `timed_out` extra fields onto the
@@ -1506,114 +1574,8 @@ fn splice_wait_meta(mut snap: Value, waited_seconds: u64, timed_out: bool) -> Va
 }
 
 // ---------------------------------------------------------------------------
-// Purchase cache tools (server.py:2626-2760)
+// Purchase cache backfill (server.py:2626-2760) — dashboard-only
 // ---------------------------------------------------------------------------
-
-/// Read the active wallet's npub, or return Python's `{"error": …}` dict
-/// when there's no wallet / the DB is locked.
-fn require_unlocked_npub(state: &McpState) -> std::result::Result<String, Value> {
-    let Some(npub) = state.resolve_npub() else {
-        return Err(json!({"error": "No wallet key configured."}));
-    };
-    let unlocked = state.db.lock().map(|db| db.is_unlocked()).unwrap_or(false);
-    if !unlocked {
-        return Err(json!({"error": "Wallet DB is locked. Unlock owallet first."}));
-    }
-    Ok(npub)
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[serde(default)]
-struct ListPurchasesArgs {
-    limit: Option<i64>,
-    fulfillment_status: Option<String>,
-}
-
-async fn list_purchases(state: &McpState, args: Value) -> Result<Value, ToolError> {
-    let args: ListPurchasesArgs =
-        serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
-            arg: "arguments",
-            reason: e.to_string(),
-        })?;
-    let npub = match require_unlocked_npub(state) {
-        Ok(n) => n,
-        Err(e) => return Ok(e),
-    };
-    let rows = {
-        let db = state
-            .db
-            .lock()
-            .map_err(|e| ToolError::Internal(format!("db mutex: {e}")))?;
-        db.list_purchases(
-            &npub,
-            args.limit.unwrap_or(50),
-            0,
-            args.fulfillment_status.as_deref(),
-        )
-        .map_err(|e| ToolError::Internal(e.to_string()))?
-    };
-    // Strip the heavy fields from list rows — callers fetch them per order
-    // via `get_purchase`.
-    let summaries: Vec<Value> = rows
-        .iter()
-        .map(|r| {
-            let mut v = serde_json::to_value(r).unwrap_or(Value::Null);
-            if let Some(obj) = v.as_object_mut() {
-                obj.remove("delivered_content");
-                obj.remove("snapshot");
-                obj.remove("delivered_content_schema");
-            }
-            v
-        })
-        .collect();
-    Ok(json!({ "npub": npub, "count": summaries.len(), "purchases": summaries }))
-}
-
-#[derive(Debug, Deserialize)]
-struct GetPurchaseArgs {
-    order_id: String,
-}
-
-async fn get_purchase(state: &McpState, args: Value) -> Result<Value, ToolError> {
-    let args: GetPurchaseArgs =
-        serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
-            arg: "arguments",
-            reason: e.to_string(),
-        })?;
-    let npub = match require_unlocked_npub(state) {
-        Ok(n) => n,
-        Err(e) => return Ok(e),
-    };
-    let record = {
-        let db = state
-            .db
-            .lock()
-            .map_err(|e| ToolError::Internal(format!("db mutex: {e}")))?;
-        db.read_purchase(&npub, &args.order_id)
-            .map_err(|e| ToolError::Internal(e.to_string()))?
-    };
-    match record {
-        Some(r) => {
-            let mut v = serde_json::to_value(r).map_err(|e| ToolError::Internal(e.to_string()))?;
-            // When a download URL is available the raw blob adds no value and
-            // would blow up the MCP response. Drop it from both the top-level
-            // fields and the raw snapshot so the agent sees the URL instead.
-            if v.get("delivered_content_url")
-                .and_then(Value::as_str)
-                .is_some_and(|s| !s.is_empty())
-            {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.remove("delivered_content");
-                    if let Some(snapshot) = obj.get_mut("snapshot").and_then(Value::as_object_mut) {
-                        snapshot.remove("delivered_content");
-                    }
-                }
-            }
-            Ok(v)
-        }
-        None => Ok(json!({ "error": "not_cached", "order_id": args.order_id })),
-    }
-}
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
@@ -1737,31 +1699,6 @@ async fn sync_purchases(state: &McpState, args: Value) -> Result<Value, ToolErro
 }
 
 // ---------------------------------------------------------------------------
-// redeem_merchant_credits — apply stored credits to an existing order
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct RedeemCreditsArgs {
-    seller_slug: String,
-    order_id: String,
-}
-
-async fn redeem_merchant_credits(state: &McpState, args: Value) -> Result<Value, ToolError> {
-    let args: RedeemCreditsArgs =
-        serde_json::from_value(args).map_err(|e| ToolError::InvalidArg {
-            arg: "arguments",
-            reason: e.to_string(),
-        })?;
-    let (_npub, auth) = state.resolve_owned_auth()?;
-    // Raw Rails passthrough — see fathom-x/overpay#288.
-    state
-        .overpay
-        .redeem_merchant_credits_value(&args.seller_slug, &args.order_id, auth.as_auth())
-        .await
-        .map_err(Into::into)
-}
-
-// ---------------------------------------------------------------------------
 // pay_order — settle an order with credits, resolving the seller if needed
 // ---------------------------------------------------------------------------
 
@@ -1836,7 +1773,7 @@ async fn pay_order(state: &McpState, args: Value) -> Result<Value, ToolError> {
         .await?;
     // Flatten the Rails `{data: {...}}` envelope and splice in what the
     // caller needs to follow up, so the result is one self-describing
-    // object (unlike the raw-passthrough redeem_merchant_credits tool).
+    // object.
     let mut out = match redeem.get("data") {
         Some(Value::Object(m)) => m.clone(),
         _ => serde_json::Map::new(),
@@ -2257,5 +2194,38 @@ mod partial_output_tests {
         let mut streamed = 0;
         assert_eq!(new_output_since(None, &mut streamed), None);
         assert_eq!(streamed, 0);
+    }
+
+    #[test]
+    fn delivered_content_is_paged_on_character_boundaries() {
+        let cap = DELIVERED_CONTENT_MODEL_CAP;
+        // Multi-byte characters straddle every page boundary.
+        let content = "é".repeat(cap);
+        let total = content.len();
+        let mut read = String::new();
+        let mut offset = 0;
+        loop {
+            let mut snap = json!({"data": {"id": "O1", "delivered_content": content}});
+            page_delivered_content(&mut snap, offset);
+            let order = &snap["data"];
+            assert_eq!(order["delivered_content_bytes"], total);
+            assert_eq!(order["content_offset"], offset);
+            let page = order["delivered_content"].as_str().unwrap();
+            assert!(page.len() <= cap);
+            read.push_str(page);
+            match order.get("next_offset").and_then(Value::as_u64) {
+                Some(next) => offset = next as usize,
+                None => break,
+            }
+        }
+        assert_eq!(read, content);
+
+        // Content that fits is left alone, with no paging fields.
+        let mut small = json!({"data": {"id": "O1", "delivered_content": "the goods"}});
+        page_delivered_content(&mut small, 0);
+        assert_eq!(
+            small,
+            json!({"data": {"id": "O1", "delivered_content": "the goods"}})
+        );
     }
 }

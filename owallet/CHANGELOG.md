@@ -4,6 +4,51 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### `/mcp` purchases report their spend and honour a per-call limit
+
+- A `tools/call` result now carries `_meta["owallet/spent_cents"]` for
+  calls that spend from the wallet: a one-shot marketplace tool's settled
+  charge, or what `pay_order` redeemed (fractional below a cent, like
+  `/v1`'s `charged_cents`; `buy` is not counted — the credits it buys
+  count when redeemed). norm adds it to the conversation's spend.
+- A `tools/call` request may carry `_meta["owallet/spend_limit_usd"]`, the
+  `/mcp` twin of `/v1`'s `x-owallet-spend-limit-usd`: spending calls are
+  refused once nothing is left, and `buy` above it.
+- Sub-cent amounts in tool output also read in cents
+  (`charged $0.002774 = 0.2774¢`): models restating a cost in cents
+  slipped a decimal converting.
+
+### Slimmer `/mcp` tool list
+
+- `redeem_merchant_credits` is removed: `pay_order` does the same redeem,
+  resolves the seller when it is omitted, and skips already-paid orders.
+- `tools/list` leaves out what the session can't use: `sync_purchases`
+  for everyone (still callable; the cache fills itself), the raw-address
+  sends and `sync_zcash` for provider keys, and the spending tools for
+  keys without the `spend` scope.
+- Shorter descriptions: the free-read cost marker is now "Free read.",
+  and `create_order` loses client-author detail.
+
+### `get_order` replaces four order/purchase tools
+
+- `get_order(order_id, wait_until?, timeout_seconds?, content_offset?)`
+  replaces `get_order_status`, `wait_for_order`, `get_purchase` and
+  `list_purchases`. Without `wait_until` it is a snapshot; with it, it
+  polls (streaming progress over SSE as `wait_for_order` did). Finished
+  orders are answered from the local purchase cache. `get_wallet_orders`
+  is the order list; the cache stays browsable on the dashboard.
+- Delivered content is returned in full, 8 KB per page
+  (`delivered_content_bytes`, `content_offset`, `next_offset`), in the
+  text block a model actually reads. Before, the text showed at most 500
+  characters of an order's content (2,000 via `get_purchase`), so a
+  model could never read a long deliverable, and content of 500–2,048
+  bytes was cut with no way to get the rest.
+- One-shot marketplace tools now write their order to the purchase cache,
+  and a deliverable cut at 8 KB says where it continues
+  (`next_offset` + a `get_order(..., content_offset=…)` pointer).
+- `/v1`'s `get_order_status` wallet tool is unchanged for its callers; it
+  is now backed by `get_order`.
+
 ### One-shot tool purchases no longer fail on a fractional balance
 
 - Every `overpay-sdk` field the contract types as `Cents` is now the SDK's

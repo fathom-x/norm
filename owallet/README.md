@@ -38,8 +38,8 @@ owallet/
                       via librustzcash; data in the per-wallet state dir
                       (<data dir>/<npub>/zcash/, 0700; plaintext, like zkv)
     owallet-mcp/      Hand-rolled JSON-RPC 2.0 MCP transport + tool registry
-                      (the tools mirror wallet_mcp/server.py, incl. the
-                      local purchase-cache tools list/get/sync_purchases)
+                      (the tools mirror wallet_mcp/server.py; get_order
+                      reads through the local purchase cache)
     owallet-http/     axum router: dashboard + OAuth Authorization Server
                       + `/mcp` mount
     owallet/          The `owallet` binary itself (clap CLI)

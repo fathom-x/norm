@@ -189,9 +189,8 @@ const MAX_TOOL_ITERATIONS: u32 = 10;
 /// *something* has to bound how long we hold the HTTP connection open for
 /// a stuck order.
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-/// Poll cadence, matching `wait_for_order`'s own floor/default — see that
-/// tool's docs for why 1s: the marketplace's own broadcast fan-out
-/// (Solid Cable) polls at roughly the same granularity today.
+/// Poll cadence: the marketplace's own broadcast fan-out (Solid Cable)
+/// polls at roughly the same granularity today.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_millis(400);
 
 /// `OWALLET_V1_POLL_MS` overrides [`POLL_INTERVAL`] (clamped to 100 ms..10 s)
@@ -1004,6 +1003,9 @@ pub(crate) async fn run_listing_tool(
             timeout,
         ));
     }
+    // Into the local purchase cache, so `get_order` can page through a
+    // deliverable the result below had to cut short.
+    crate::tools::maybe_cache_purchase(state, &snap);
     net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
     let mut out = extract_listing_delivered(&order_id, &snap);
     out["charged_cents"] = cents_json(net_charged_cents(&snap, redeemed_cents));
@@ -1105,8 +1107,7 @@ fn pending_order_result(
             timeout.as_secs()
         ),
         "hint": format!(
-            "wait_for_order(order_id=\"{order_id}\", until_status=\"delivered\") to keep following it, \
-             or get_order_status(order_id=\"{order_id}\") later"
+            "get_order(order_id=\"{order_id}\", wait_until=\"delivered\") to keep following it"
         ),
     })
 }
@@ -1126,7 +1127,7 @@ fn unreadable_order_result(order_id: &str, redeemed_cents: f64, err: &OpenAiErro
             err.message()
         ),
         "hint": format!(
-            "get_order_status(order_id=\"{order_id}\") to see where it stands"
+            "get_order(order_id=\"{order_id}\") to see where it stands"
         ),
     })
 }
@@ -1471,7 +1472,7 @@ fn micros_to_usd(micros: i64) -> f64 {
 }
 
 /// Cents that may be fractional → micro-dollars, the key budget's unit.
-fn cents_to_micros(cents: f64) -> i64 {
+pub(crate) fn cents_to_micros(cents: f64) -> i64 {
     (cents * owallet_db::MICROS_PER_CENT as f64).round() as i64
 }
 
@@ -1903,14 +1904,10 @@ async fn execute_wallet_tool(
             }
         }
         GET_ORDER_STATUS_TOOL => {
-            // Ask the MCP handler to keep delivered_content inline (it
-            // otherwise strips large blobs to a local-cache pointer the
-            // model can't follow); the projection applies its own cap.
-            let mut dispatch_args = arguments.clone();
-            if let Some(obj) = dispatch_args.as_object_mut() {
-                obj.insert("include_delivered_content".into(), json!(true));
-            }
-            match crate::tools::dispatch(state, "get_order_status", dispatch_args, None).await {
+            // Only the order id: the model-facing definition here has no
+            // waiting or paging, and the projection applies its own cap.
+            let dispatch_args = json!({"order_id": arguments.get("order_id")});
+            match crate::tools::dispatch(state, "get_order", dispatch_args, None).await {
                 Ok(out) => stamp_as_of(state, project_order_status(&out.data)).to_string(),
                 Err(e) => json!({"error": e.to_string()}).to_string(),
             }
@@ -2925,7 +2922,7 @@ fn cents_json(cents: f64) -> Value {
 }
 
 /// Micro-dollars as a JSON cents number (see [`cents_json`]).
-fn micros_as_cents_json(micros: i64) -> Value {
+pub(crate) fn micros_as_cents_json(micros: i64) -> Value {
     if micros % owallet_db::MICROS_PER_CENT == 0 {
         json!(micros / owallet_db::MICROS_PER_CENT)
     } else {
@@ -3015,6 +3012,11 @@ impl TurnUsage {
             "charged_cents": micros_as_cents_json(self.charged_micros),
             "wallet_spent_cents": micros_as_cents_json(self.wallet_spent_micros),
         })
+    }
+
+    /// What the turn's orders charged, in micro-dollars.
+    pub(crate) fn charged_micros(&self) -> i64 {
+        self.charged_micros
     }
 
     /// Carry the request's wallet-tool spend onto the reported usage.
@@ -3345,6 +3347,9 @@ pub(crate) async fn run_python_tool(
             timeout,
         ));
     }
+    // Into the local purchase cache, so `get_order` can page through a
+    // deliverable the result below had to cut short.
+    crate::tools::maybe_cache_purchase(state, &snap);
     net_key_budget_from_delivery(state, key_id, &snap, redeemed_cents);
     if order_status(&snap) != Some("delivered") {
         // Failed / cancelled: the listing-tool projection already words
@@ -5450,10 +5455,7 @@ mod tests {
             out["error"].as_str().unwrap().contains("do not buy again"),
             "{out}"
         );
-        assert!(
-            out["hint"].as_str().unwrap().contains("wait_for_order"),
-            "{out}"
-        );
+        assert!(out["hint"].as_str().unwrap().contains("get_order"), "{out}");
         assert_eq!(
             usage.charged_micros, 50_000,
             "the paid deposit still counts toward the turn"
@@ -5468,10 +5470,7 @@ mod tests {
             "run_python",
             &crate::projection::sanitize("run_python", &out),
         );
-        assert!(
-            text.contains("O7") && text.contains("wait_for_order"),
-            "{text}"
-        );
+        assert!(text.contains("O7") && text.contains("get_order"), "{text}");
     }
 
     /// An image delivery (a generated PNG behind `delivered_content_url`)
@@ -5717,7 +5716,7 @@ mod tests {
     }
 
     /// A seller's buffer growing across polls, then delivering — mirrors
-    /// `mcp_wait_for_order_streams_seller_output_as_deltas` in
+    /// `mcp_get_order_wait_streams_seller_output_as_deltas` in
     /// `owallet-http/tests/mcp_test.rs`, adapted to this endpoint's own
     /// polling loop and OpenAI chunk shape.
     struct GrowingBuffer {
@@ -8887,9 +8886,15 @@ mod tests {
             .unwrap();
         let key_state = state.with_provider_key(key.id.clone(), false);
 
-        crate::tools::dispatch_sanitized(&key_state, "run_python", json!({"code": "1"}), None)
-            .await
-            .expect("one-shot allowed for a chat key");
+        let out =
+            crate::tools::dispatch_sanitized(&key_state, "run_python", json!({"code": "1"}), None)
+                .await
+                .expect("one-shot allowed for a chat key");
+        assert_eq!(
+            out.spent_micros,
+            Some(20_000),
+            "the purchase reports what it charged, for the client's conversation total"
+        );
         let keys = state
             .db
             .lock()
@@ -8948,6 +8953,11 @@ mod tests {
         .await
         .expect("spend key pays");
         assert_eq!(out.data["status"], "fully_paid", "{}", out.data);
+        assert_eq!(
+            out.spent_micros,
+            Some(20_000),
+            "the redemption is reported as spend"
+        );
 
         let keys = state
             .db
@@ -8961,6 +8971,116 @@ mod tests {
             20_000,
             "the redemption records against the key, same as /v1"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tools_list_leaves_out_what_the_session_cannot_use() {
+        use crate::tools::listed;
+        let overpay = MockServer::start().await;
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let (key, _) = state
+            .db
+            .lock()
+            .unwrap()
+            .create_provider_key("npub1abandon", "k", "chat spend", None)
+            .unwrap();
+
+        // No key (OAuth / local): everything but the self-filling cache sync.
+        assert!(listed(&state, "send_usdc") && listed(&state, "sync_zcash"));
+        assert!(!listed(&state, "sync_purchases"));
+
+        // A provider key never gets raw-address sends, so neither they nor
+        // their ZEC sync helper are advertised.
+        let spender = state.with_provider_key(key.id.clone(), true);
+        for tool in ["send_usdc", "send_zcash", "sync_zcash", "sync_purchases"] {
+            assert!(!listed(&spender, tool), "{tool}");
+        }
+        assert!(listed(&spender, "pay_order") && listed(&spender, "get_account_info"));
+
+        // Without the spend scope, the spending tools would only refuse.
+        let chat = state.with_provider_key(key.id, false);
+        for tool in ["create_order", "pay_order", "buy"] {
+            assert!(!listed(&chat, tool), "{tool}");
+        }
+        assert!(listed(&chat, "load_core_credits") && listed(&chat, "get_order"));
+    }
+
+    #[test]
+    fn mcp_spend_limit_refuses_only_spending_calls_it_cannot_cover() {
+        use crate::tools::check_spend_limit;
+        // Free tools pass whatever the limit; no limit passes everything.
+        assert!(check_spend_limit("get_account_info", &json!({}), Some(0.0)).is_ok());
+        assert!(check_spend_limit("create_order", &json!({}), Some(0.0)).is_ok());
+        assert!(check_spend_limit("pay_order", &json!({}), None).is_ok());
+        // Spending tools — `pay_order`, `buy`, and one-shots (any name
+        // outside the static catalog) — refuse once nothing is left, and
+        // a sub-cent remainder still covers a sub-cent purchase.
+        for tool in ["pay_order", "buy", "run_python", "amazon_search"] {
+            let err = check_spend_limit(tool, &json!({}), Some(0.0)).expect_err(tool);
+            assert!(err.to_string().contains("spending limit"), "{tool}: {err}");
+            assert!(
+                check_spend_limit(tool, &json!({}), Some(0.004)).is_ok(),
+                "{tool}"
+            );
+        }
+        // `buy` states its amount, so it must fit what remains.
+        assert!(check_spend_limit("buy", &json!({"amount_usd": 5.0}), Some(1.0)).is_err());
+        assert!(check_spend_limit("buy", &json!({"amount_usd": 1.0}), Some(1.0)).is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mcp_listing_tool_cut_short_continues_through_get_order() {
+        let overpay = MockServer::start().await;
+        mount_both_listings(&overpay).await;
+        mount_order_router_capturing(&overpay).await;
+        mount_listing_tool_catalog(&overpay).await;
+        mount_redeem_fully_paid(&overpay, "weather").await;
+        let long = "z".repeat(DELIVERED_CONTENT_MODEL_CAP + 3000);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/orders/F-0"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "id": "F-0", "fulfillment_status": "delivered",
+                    "delivered_content": long,
+                }
+            })))
+            // The continuation is read from the local cache.
+            .expect(1)
+            .mount(&overpay)
+            .await;
+
+        let tmp = TempDir::new().unwrap();
+        let state = seeded_state(&overpay.uri(), &tmp);
+        let out = crate::tools::dispatch_sanitized(
+            &state,
+            "forecast",
+            json!({"input": "Galveston"}),
+            None,
+        )
+        .await
+        .expect("one-shot forecast");
+        assert_eq!(out.data["delivered_content_truncated"], true);
+        assert_eq!(out.data["next_offset"], DELIVERED_CONTENT_MODEL_CAP);
+        assert!(
+            out.text
+                .contains(&format!("content_offset={DELIVERED_CONTENT_MODEL_CAP}")),
+            "{}",
+            out.text
+        );
+
+        let rest = crate::tools::dispatch_sanitized(
+            &state,
+            "get_order",
+            json!({"order_id": "F-0", "content_offset": DELIVERED_CONTENT_MODEL_CAP}),
+            None,
+        )
+        .await
+        .expect("continuation");
+        let order = &rest.data["data"];
+        assert_eq!(order["delivered_content"], "z".repeat(3000));
+        assert!(order.get("next_offset").is_none(), "{order}");
+        assert!(rest.text.contains(&"z".repeat(3000)), "{}", rest.text);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

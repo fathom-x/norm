@@ -129,7 +129,7 @@ fn orders_nip98_sees_seeded_order() {
     assert_eq!(order["fulfillment_status"], "delivered");
     assert_eq!(order["product_title"], "Digital Good");
     // Sanitized list rows are compact — the listing pointer is
-    // detail-level now (get_order_status), and the detail endpoint under
+    // detail-level now (get_order), and the detail endpoint under
     // NIP-98 needs payer_address the MCP handler doesn't yet send, so
     // this NIP-98-focused test stops at the list assertions.
 }
@@ -137,8 +137,8 @@ fn orders_nip98_sees_seeded_order() {
 /// E2E: full MCP-driven buy flow against a schema-bearing listing.
 ///
 /// Buyer (owallet, bearer-authenticated) drives the whole flow over MCP —
-/// `create_order` → `redeem_merchant_credits` → bot fulfills →
-/// `get_order_status` confirms delivered. The listing carries a
+/// `create_order` → `pay_order` → bot fulfills →
+/// `get_order` confirms delivered. The listing carries a
 /// `buyer_note_schema` mandating an object with a `code` field; the bot
 /// JSON-parses buyer_note and echoes the `code` value back, so a regression
 /// that sent a free-text buyer_note (the live bug) would fail here.
@@ -189,10 +189,9 @@ fn mcp_buy_flow_delivers_schema_buyer_note() {
     assert_eq!(created["payment_status"], "pending");
 
     let redeemed = owallet.call_tool(
-        "redeem_merchant_credits",
+        "pay_order",
         json!({ "seller_slug": seller["seller_slug"], "order_id": order_id }),
     );
-    // Sanitized redeem results are flat (matching pay_order's shape).
     assert_eq!(redeemed["status"], "fully_paid", "{redeemed}");
 
     // Route paid → awaiting_seller, then the bot delivers by echoing `code`.
@@ -208,7 +207,7 @@ fn mcp_buy_flow_delivers_schema_buyer_note() {
         "bot did not deliver: {delivered:?}"
     );
 
-    let status = owallet.call_tool("get_order_status", json!({ "order_id": order_id }));
+    let status = owallet.call_tool("get_order", json!({ "order_id": order_id }));
     let status = &status["data"];
     assert_eq!(status["payment_status"], "paid");
     assert_eq!(status["fulfillment_status"], "delivered");
