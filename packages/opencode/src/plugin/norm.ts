@@ -55,6 +55,25 @@ export async function NormOwalletPlugin(input: PluginInput): Promise<Hooks> {
       if (!budget || budget.remaining === null) return
       output.headers[NormBudget.SPEND_LIMIT_HEADER] = budget.remaining.toFixed(2)
     },
+    // Purchases through the owallet MCP server (one-shot listing tools like
+    // a marketplace search, pay_order, …) bypass /v1, so its header never
+    // reaches them: send the same remaining allowance in the call's `_meta`,
+    // where owallet refuses a spending call the conversation can't cover.
+    "tool.execute.before": async (hook, output) => {
+      if (Norm.disabled() || !hook.tool.startsWith(Norm.MCP_TOOL_PREFIX)) return
+      const budget = await NormBudget.status(sessions, hook.sessionID).catch(() => undefined)
+      if (!budget || budget.remaining === null) return
+      output.meta = { ...output.meta, [Norm.MCP_SPEND_LIMIT_META]: budget.remaining }
+    },
+    // ...and owallet reports what such a call spent in the result's `_meta`.
+    // Lift it where the session processor adds it to the turn's cost, so it
+    // counts toward "this chat" and the budget like the turn's own charge.
+    "tool.execute.after": async (hook, output) => {
+      if (Norm.disabled() || !hook.tool.startsWith(Norm.MCP_TOOL_PREFIX)) return
+      const cents = Norm.mcpSpentCents(output)
+      if (cents === undefined) return
+      output.metadata = { ...output.metadata, overpay: { chargedCents: cents } }
+    },
     config: async (config) => {
       // Offer the marketplace's real model list (GET /v1/models), not just
       // the seeded `default` sentinel. Entries the user configured

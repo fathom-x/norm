@@ -89,6 +89,16 @@ syncs stay cheap:
   `src/session/session.ts`'s `getUsage` prefers it over the token x price
   arithmetic. Without these the sidebar reads `$0.00 spent` for turns
   that spent real money.
+  Purchases through the `owallet` MCP server (one-shot listing tools,
+  `pay_order`, …) never touch `/v1`, so the norm plugin covers them
+  separately: `tool.execute.before` adds the conversation's remaining
+  `/budget` to the tools/call `_meta` as `owallet/spend_limit_usd`
+  (beside the `overpay.com/session-id` that `src/session/tools.ts` seeds
+  it with), and `tool.execute.after` lifts owallet's
+  `_meta["owallet/spent_cents"]` into `metadata.overpay.chargedCents`,
+  which `src/session/processor.ts` adds to the turn's cost — on both the
+  message (what the sidebar and `/budget` sum) and the step's
+  `step-finish` part (what the session total in the footer sums).
 
 - **Compact session layout** (TUI): the session column has no side or
   bottom padding; the input is a plain "> " in the agent's color (no

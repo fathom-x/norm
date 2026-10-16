@@ -73,6 +73,8 @@ interface ProcessorContext extends Input {
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
+  /** norm: owallet MCP spend in the current step, for its step-finish part. */
+  toolSpend: number
 }
 
 type StreamEvent = LLMEvent
@@ -112,6 +114,7 @@ const layer = Layer.effect(
         needsCompaction: false,
         currentText: undefined,
         reasoningMap: {},
+        toolSpend: 0,
       }
       let aborted = false
 
@@ -411,6 +414,19 @@ const layer = Layer.effect(
               attachments: attachments.length ? attachments : undefined,
             }
             yield* completeToolCall(value.id, output)
+            // norm: an owallet MCP purchase reports what it spent (the norm
+            // plugin lifts it into `metadata.overpay.chargedCents`). It is
+            // real money spent on this turn, so it joins the turn's cost
+            // beside the inference charge — and with it the conversation's
+            // spend that the sidebar shows and /budget limits. The session's
+            // running total sums step-finish parts, not messages, so the
+            // step's finish part carries it too (`toolSpend`).
+            const spent = output.metadata.overpay?.chargedCents
+            if (typeof spent === "number" && Number.isFinite(spent) && spent > 0) {
+              ctx.assistantMessage.cost += spent / 100
+              ctx.toolSpend += spent / 100
+              yield* session.updateMessage(ctx.assistantMessage)
+            }
             return
           }
 
@@ -452,8 +468,9 @@ const layer = Layer.effect(
               sessionID: ctx.assistantMessage.sessionID,
               type: "step-finish",
               tokens: usage.tokens,
-              cost: usage.cost,
+              cost: usage.cost + ctx.toolSpend,
             })
+            ctx.toolSpend = 0
             yield* session.updateMessage(ctx.assistantMessage)
             if (ctx.snapshot) {
               const patch = yield* snapshot.patch(ctx.snapshot)

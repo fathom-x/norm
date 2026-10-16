@@ -813,6 +813,60 @@ it.live("session.processor effect tests complete AI SDK tool calls when native f
   ),
 )
 
+it.live("session.processor effect tests add an overpay tool purchase to the turn's cost", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        yield* llm.tool("owallet_amazon_search", { query: "socks" })
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "tool")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "tool" }],
+          tools: {
+            owallet_amazon_search: tool({
+              description: "Search Amazon",
+              inputSchema: z.object({ query: z.string() }),
+              // What the norm plugin lifts out of owallet's `_meta["owallet/spent_cents"]`.
+              execute: async () => ({ title: "", output: "results", metadata: { overpay: { chargedCents: 3 } } }),
+            }),
+          },
+        })
+
+        const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: msg.id })
+        expect(stored.info.role).toBe("assistant")
+        if (stored.info.role !== "assistant") return
+        expect(stored.info.cost).toBeCloseTo(0.03)
+        // The session total (the footer's figure) sums step-finish parts.
+        const total = yield* session.get(chat.id)
+        expect(total.cost).toBeCloseTo(0.03)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
 it.live("session.processor effect tests mark pending tools as aborted on cleanup", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>

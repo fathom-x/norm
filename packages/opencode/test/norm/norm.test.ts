@@ -221,7 +221,7 @@ test("system prompt describes the catalog, addresses and paid-call retries hones
   try {
     const prompt = Norm.systemPrompt()
     expect(prompt).toContain("list_marketplace")
-    expect(prompt).toContain("create_order → pay_order → wait_for_order")
+    expect(prompt).toContain("create_order, pay_order and get_order")
     expect(prompt).not.toContain("authoritative list of marketplace capabilities")
     expect(prompt).not.toContain("each carries an as_of")
     expect(prompt).toContain("http://127.0.0.1:9999/wallet")
