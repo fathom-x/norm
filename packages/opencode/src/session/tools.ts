@@ -402,14 +402,25 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
       run.promise(
         Effect.gen(function* () {
           const ctx = context(args, opts)
-          yield* plugin.trigger(
+          // The call's `_meta` starts as norm's session id for owallet; plugins
+          // may add to it (norm's own adds the conversation's spend limit).
+          const meta: Record<string, unknown> | undefined = yield* Effect.promise(() =>
+            Norm.mcpCallMeta(key, input.session.id),
+          )
+          const before = yield* plugin.trigger(
             "tool.execute.before",
             { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
-            { args },
+            { args, meta },
           )
           const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
             yield* ctx.ask({ permission: key, metadata: {}, patterns: ["*"], always: ["*"] })
-            return yield* Effect.promise(() => execute(args, opts))
+            return yield* Effect.promise(() =>
+              McpCatalog.callTool(entry.def, entry.client, args, {
+                timeout: entry.timeout,
+                signal: opts.abortSignal,
+                meta: before.meta,
+              }),
+            )
           }).pipe(
             Effect.withSpan("Tool.execute", {
               attributes: {

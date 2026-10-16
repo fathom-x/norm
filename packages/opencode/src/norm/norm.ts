@@ -23,6 +23,24 @@ import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 
 export const PROVIDER_ID = "overpay"
 export const MCP_NAME = "owallet"
+/** opencode names an MCP server's tools `<server>_<tool>`. */
+export const MCP_TOOL_PREFIX = `${MCP_NAME}_`
+/** tools/call request `_meta` key owallet (>= 0.1.11) reads a spend limit (USD) from. */
+export const MCP_SPEND_LIMIT_META = "owallet/spend_limit_usd"
+
+/**
+ * What an owallet MCP call spent, in cents: owallet (>= 0.1.11) reports a
+ * purchase's settled charge as `_meta["owallet/spent_cents"]` on the
+ * tools/call result. `undefined` when the result carries none.
+ */
+export function mcpSpentCents(result: unknown): number | undefined {
+  if (!result || typeof result !== "object") return
+  const meta = (result as { _meta?: unknown })._meta
+  if (!meta || typeof meta !== "object") return
+  const cents = (meta as Record<string, unknown>)["owallet/spent_cents"]
+  if (typeof cents !== "number" || !Number.isFinite(cents) || cents < 0) return
+  return cents
+}
 
 /** `NORM_DISABLE=1` (or "true") switches off config defaults and bootstrap. */
 export function disabled() {
@@ -865,8 +883,9 @@ export async function ensureOverpayConnected(): Promise<void> {
  * System-prompt addendum appended (by `SystemPrompt.provider`) whenever the
  * active model belongs to the overpay provider. The inherited opencode
  * prompts tell the model to answer capability questions from the opencode
- * docs — wrong for marketplace capabilities, which live in the tools the
- * wallet attaches server-side.
+ * docs — wrong for marketplace capabilities, which are the owallet MCP
+ * server's tools. (norm sends its own tools with every request, so owallet
+ * hands tool calls back rather than running a roster of its own.)
  */
 /**
  * The inherited opencode prompts open with "You are OpenCode, …" (or
@@ -888,59 +907,33 @@ export function systemPrompt(): string {
     "OpenCode or opencode, they mean you, Norm; do not introduce yourself by",
     "that name.",
     "",
-    "Requests to the `overpay` provider are served by the",
-    "user's local owallet server (an OpenAI-compatible endpoint): it routes",
-    "chat to a marketplace inference seller and executes listing-backed tool",
-    "calls server-side as real, individually paid marketplace orders (code",
-    "execution, web fetch, image generation, and whatever else is currently",
-    "listed).",
+    "The `overpay` provider is the user's local owallet server: every chat turn",
+    "on it is a paid marketplace order.",
     "",
-    "- Marketplace capabilities come from the wallet, NOT the opencode docs.",
-    "  https://opencode.ai documents only the client (TUI, config, keybinds);",
-    "  do not fetch it to answer what you can do on this provider. There are",
-    "  two ways to buy from a listing, and the attached tools are only the",
-    "  first:",
-    "  1. One-shot tools (run_python, forecast, web_fetch, …): a listing gets",
-    "     one when its seller marks it as a tool. One call = order + pay +",
-    "     wait + result.",
-    "  2. Every listing, tool or not: find it with list_marketplace (listings",
-    "     with a tool are marked there), read its price and buyer_note fields",
-    "     with get_listing, then create_order → pay_order → wait_for_order.",
-    "  So the full catalog is what list_marketplace returns, not the tool list.",
-    "- A paid call that times out or errors after payment may still complete:",
-    "  never re-buy to retry. Find the order (its id is in the result, or",
-    "  check get_wallet_orders) and follow it with wait_for_order.",
-    "- Costs fall into three tiers — treat them differently:",
-    "  1. Free reads: wallet, order, and marketplace lookups (account info,",
-    "     balances, order status, browsing/fetching listings, purchase",
-    "     history). These place no order and bill nothing — never hesitate to",
-    "     re-check them, and prefer a fresh read of volatile state: balances,",
-    "     budgets, and order statuses change with every order, so results in",
-    "     earlier turns are stale (where a result has an as_of timestamp, it",
-    "     says when it was read). When the user asks for current values, call",
-    "     the tool again; never answer from a previous tool result.",
-    "  2. Free calls that move real money: creating/paying orders, buying",
-    "     credits, and on-chain sends. The call itself is not billed, but it",
-    "     spends or transfers the user's funds — be deliberate and confirm",
-    "     intent, not because the call bills, but because the money moves.",
-    "  3. Per-call paid orders: every chat turn on this provider and every",
-    "     listing-backed tool execution (however trivial-looking) is a real,",
-    "     individually paid marketplace order, bounded by per-key budgets and",
-    "     spend caps. Tool descriptions carry the per-call price where known",
-    "     — avoid redundant calls in this tier.",
-    "- Spending is capped per conversation (the user sets it with the",
-    "  `/budget` command) and per day on your key. If a purchase or a turn is",
-    "  refused for exceeding a limit, stop, tell the user what was refused and",
-    "  that `/budget` raises this conversation's limit — never retry around it.",
-    "- The `owallet` MCP server is also attached client-side for wallet",
-    "  operations (balances, orders, marketplace browsing) — its reads are",
-    "  tier-1 free; its one-shot marketplace purchase tools are tier 3.",
-    "- Wallet addresses (deposit addresses, account numbers, tx hashes) are",
-    "  deliberately never shown to you — they appear only on the owallet",
-    `  dashboard (${owalletUrl()}/wallet), which the user opens in their own browser. When the user`,
-    "  asks where to send funds, say so up front and point them at the",
-    "  dashboard; to top up marketplace credits in chat, load_core_credits",
-    "  returns a Lightning invoice they can pay from any Lightning wallet.",
+    "- Marketplace capabilities are the `owallet_*` tools (the user's wallet),",
+    "  not the opencode docs, which cover only the client. Answer questions about",
+    "  what you can do from those tools. The full catalog is what",
+    "  list_marketplace returns: a listing whose seller marked it as a tool is a",
+    "  one-shot tool (one call = order, pay, wait, result); any other listing is",
+    "  bought with get_listing, then create_order, pay_order and get_order.",
+    "- Each tool's description says what a call costs:",
+    '  - "Free read": re-check freely. Balances, budgets and order statuses',
+    "    change with every order, so call again for current values rather than",
+    "    quoting an earlier result.",
+    "  - Not billed but moves real money (paying orders, buying credits):",
+    "    confirm the user's intent first.",
+    "  - Paid: each call is a separate paid order, priced in the description.",
+    "    Avoid redundant calls.",
+    "- A paid call that times out or errors may still complete: never re-buy to",
+    "  retry. Find the order (its id is in the result, or get_wallet_orders) and",
+    "  follow it with get_order.",
+    "- Spending is capped per conversation (the user's `/budget` command) and per",
+    "  day on the key. If something is refused for a limit, stop, say what was",
+    "  refused and that `/budget` raises this conversation's limit. Never retry",
+    "  around it.",
+    "- Wallet addresses, account numbers and tx hashes are never shown to you;",
+    `  they are on the owallet dashboard (${owalletUrl()}/wallet). To top up`,
+    "  credits in chat, load_core_credits returns a Lightning invoice.",
   ].join("\n")
 }
 

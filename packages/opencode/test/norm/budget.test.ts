@@ -318,3 +318,72 @@ describe("turn cost from owallet's usage", () => {
     expect(overpayChargedCents({ usage: {} })).toBeUndefined()
   })
 })
+
+describe("owallet MCP purchases", () => {
+  let saved: string | undefined
+  beforeEach(async () => {
+    saved = process.env.NORM_DISABLE
+    await fs.rm(NormBudget.file(), { force: true })
+  })
+  afterEach(async () => {
+    if (saved === undefined) delete process.env.NORM_DISABLE
+    else process.env.NORM_DISABLE = saved
+    await fs.rm(NormBudget.file(), { force: true })
+  })
+
+  // The plugin with a fake v1 client whose one session has spent $0.50.
+  // Built with the layer off so bootstrap does nothing, then turned on.
+  const plugin = async () => {
+    const { NormOwalletPlugin } = await import("@/plugin/norm")
+    const client = {
+      session: {
+        get: async () => ({ data: {} }),
+        children: async () => ({ data: [] }),
+        messages: async () => ({ data: [{ info: { role: "assistant", cost: 0.5 } }] }),
+      },
+    }
+    process.env.NORM_DISABLE = "1"
+    const hooks = await NormOwalletPlugin({ client } as any)
+    delete process.env.NORM_DISABLE
+    return hooks
+  }
+
+  test("each owallet tool call carries the conversation's remaining budget", async () => {
+    const hooks = await plugin()
+    await NormBudget.set("ses_buy", 2)
+    const output: { args: any; meta?: Record<string, unknown> } = { args: {} }
+    await hooks["tool.execute.before"]!({ tool: "owallet_amazon_search", sessionID: "ses_buy", callID: "c1" }, output)
+    expect(output.meta).toEqual({ [Norm.MCP_SPEND_LIMIT_META]: 1.5 })
+
+    // Other tools, and a conversation with no limit, send nothing.
+    const other: { args: any; meta?: Record<string, unknown> } = { args: {} }
+    await hooks["tool.execute.before"]!({ tool: "github_search", sessionID: "ses_buy", callID: "c2" }, other)
+    expect(other.meta).toBeUndefined()
+    await NormBudget.set("ses_buy", null)
+    const unlimited: { args: any; meta?: Record<string, unknown> } = { args: {} }
+    await hooks["tool.execute.before"]!(
+      { tool: "owallet_amazon_search", sessionID: "ses_buy", callID: "c3" },
+      unlimited,
+    )
+    expect(unlimited.meta).toBeUndefined()
+  })
+
+  test("what an owallet tool call spent lands where the processor counts it", async () => {
+    const hooks = await plugin()
+    const result = { title: "", output: "", metadata: undefined as any, _meta: { "owallet/spent_cents": 3 } }
+    await hooks["tool.execute.after"]!({ tool: "owallet_amazon_search", sessionID: "s", callID: "c", args: {} }, result)
+    expect(result.metadata).toEqual({ overpay: { chargedCents: 3 } })
+
+    // Another MCP server's `_meta` is not owallet's to interpret.
+    const other = { title: "", output: "", metadata: undefined as any, _meta: { "owallet/spent_cents": 3 } }
+    await hooks["tool.execute.after"]!({ tool: "github_search", sessionID: "s", callID: "c", args: {} }, other)
+    expect(other.metadata).toBeUndefined()
+  })
+
+  test("mcpSpentCents reads only a sane spent amount", () => {
+    expect(Norm.mcpSpentCents({ _meta: { "owallet/spent_cents": 0 } })).toBe(0)
+    expect(Norm.mcpSpentCents({ _meta: { "owallet/spent_cents": -1 } })).toBeUndefined()
+    expect(Norm.mcpSpentCents({ _meta: { "owallet/spent_cents": "3" } })).toBeUndefined()
+    expect(Norm.mcpSpentCents({ content: [] })).toBeUndefined()
+  })
+})

@@ -265,7 +265,8 @@ export interface Hooks {
   ) => Promise<void>
   "tool.execute.before"?: (
     input: { tool: string; sessionID: string; callID: string },
-    output: { args: any },
+    /** `meta`: MCP tools only — sent as the tools/call request's `_meta`. */
+    output: { args: any; meta?: Record<string, unknown> },
   ) => Promise<void>
   "shell.env"?: (
     input: { cwd: string; sessionID?: string; callID?: string },
