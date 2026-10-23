@@ -4,6 +4,22 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### The SDK carries the marketplace's quote and checkout operations
+
+- In `overpay-sdk`: `OrdersApi::accept_quote`, `decline_quote` and
+  `update_checkout` for the buyer API's new `POST
+  /api/v1/orders/{id}/accept_quote`, `.../decline_quote` and `PATCH
+  .../checkout` (a `request_quote` listing is now created `awaiting_quote`
+  with no `payment` key, and paying an order whose listing wants checkout
+  data — a shipping address — first fails with `checkout_incomplete`);
+  the `quote_required`, `quote_not_active`, `checkout_invalid` and
+  `checkout_incomplete` error codes; the new contract fixtures. The new
+  order fields (`quantity`, `quote`, `checkout`) and listing fields
+  (`listing_type`, `requires_shipping_address`, `checkout_required`) ride
+  in the models' `extra` for now. owallet's tools don't use any of this
+  yet: ordering such a listing works, but `pay_order` answers with the
+  marketplace's 422 and no tool sends checkout data or accepts a quote.
+
 ### `/mcp` purchases report their spend and honour a per-call limit
 
 - A `tools/call` result now carries `_meta["owallet/spent_cents"]` for

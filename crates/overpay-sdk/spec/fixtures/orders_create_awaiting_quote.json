@@ -1,0 +1,49 @@
+{
+  "data": {
+    "id": "384c1d7f-9208-47e5-8fe4-cde1a19ab929",
+    "payment_status": "awaiting_quote",
+    "fulfillment_status": "pending",
+    "product_title": "Buy Anything from Amazon",
+    "free": true,
+    "product_price_cents": 0,
+    "product_price_usd": "Free",
+    "total_usd_cents": 0,
+    "total_usd": "Free",
+    "settled_amount_cents": 0,
+    "refunded_cents": 0,
+    "refund_status": "none",
+    "fulfillment_error": null,
+    "authorized_cents": null,
+    "captured_cents": null,
+    "released_cents": 0,
+    "rejection": null,
+    "spend_authorization_id": null,
+    "seller_revenue_cents": 0,
+    "platform_fee_cents": 0,
+    "platform_fee_usd": "$0.00",
+    "buyer_note": "https://amazon.com/dp/X",
+    "variant_key": null,
+    "client_session_id": null,
+    "quantity": 1,
+    "quote": null,
+    "checkout": {
+      "required": true,
+      "complete": false
+    },
+    "order_url": "http://www.example.com/orders/384c1d7f-9208-47e5-8fe4-cde1a19ab929",
+    "delivered_content_type": null,
+    "tracking_number": null,
+    "carrier": null,
+    "tracking_url": null,
+    "created_at": "2026-10-21T19:04:13.060Z",
+    "paid_at": null,
+    "delivered_at": null,
+    "expected_delivered_at": null,
+    "delivery_skew_seconds": null,
+    "settlement_tx_hash": null,
+    "listing": {
+      "id": "30ef636c-4108-50c1-8348-47ed1e5fbc72",
+      "title": "Buy Anything from Amazon"
+    }
+  }
+}

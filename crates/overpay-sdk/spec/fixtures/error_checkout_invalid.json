@@ -1,0 +1,7 @@
+{
+  "error": "checkout_data doesn't match the listing's checkout_schema",
+  "code": "checkout_invalid",
+  "errors": [
+    "object at `/shipping_address` is missing required properties: last_name, address_line1, city, state, zip_code, country, phone"
+  ]
+}
