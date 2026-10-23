@@ -142,6 +142,7 @@ async fn handle(
             // agent buys inline instead of walking the order primitives.
             let mut tools = tools::catalog()
                 .iter()
+                .filter(|t| tools::listed(&mcp_state, t.name))
                 .map(|t| serde_json::to_value(t).unwrap_or_default())
                 .collect::<Vec<_>>();
             tools.extend(tools::marketplace_specs(&mcp_state).await);
@@ -208,6 +209,9 @@ struct CallMeta {
     /// under an HMAC of it ([`McpState::order_session_label`]).
     #[serde(default, rename = "overpay.com/session-id")]
     session_id: Option<String>,
+    /// The most this call may spend, in USD — [`tools::SPEND_LIMIT_META`].
+    #[serde(default, rename = "owallet/spend_limit_usd")]
+    spend_limit_usd: Option<f64>,
 }
 
 /// The state for one `tools/call`: the connection's, bound to the session
@@ -226,7 +230,11 @@ async fn tools_call(state: &McpState, params: Value) -> Result<Value, JrpcError>
     })?;
 
     let state = call_state(state, params.meta.as_ref());
-    let outcome = tools::dispatch_sanitized(&state, &params.name, params.arguments, None).await;
+    let limit = params.meta.and_then(|m| m.spend_limit_usd);
+    let outcome = match tools::check_spend_limit(&params.name, &params.arguments, limit) {
+        Ok(()) => tools::dispatch_sanitized(&state, &params.name, params.arguments, None).await,
+        Err(e) => Err(e),
+    };
     Ok(tool_result_value(outcome))
 }
 
@@ -242,14 +250,22 @@ async fn tools_call(state: &McpState, params: Value) -> Result<Value, JrpcError>
 /// identically.
 fn tool_result_value(outcome: Result<tools::ToolOutput, ToolError>) -> Value {
     match outcome {
-        Ok(out) => json!({
-            "content": [{
-                "type": "text",
-                "text": out.text,
-            }],
-            "structuredContent": out.data,
-            "isError": false,
-        }),
+        Ok(out) => {
+            let mut result = json!({
+                "content": [{
+                    "type": "text",
+                    "text": out.text,
+                }],
+                "structuredContent": out.data,
+                "isError": false,
+            });
+            if let Some(micros) = out.spent_micros {
+                result["_meta"] = json!({
+                    tools::SPENT_CENTS_META: crate::openai_compat::micros_as_cents_json(micros),
+                });
+            }
+            result
+        }
         Err(e) => json!({
             "content": [{
                 "type": "text",
@@ -304,7 +320,14 @@ fn sse_tools_call(state: McpState, id: Value, params: Value) -> Response {
         };
 
         let state = call_state(&state, meta.as_ref());
-        let token = meta.and_then(|m| m.progress_token);
+        let (token, limit) = match meta {
+            Some(m) => (m.progress_token, m.spend_limit_usd),
+            None => (None, None),
+        };
+        if let Err(e) = tools::check_spend_limit(&name, &arguments, limit) {
+            yield Ok(sse_data(&RpcResponse::ok(id, tool_result_value(Err(e)))));
+            return;
+        }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
         let sink = ProgressSink::new(tx, token);
 

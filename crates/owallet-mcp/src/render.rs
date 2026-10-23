@@ -34,18 +34,12 @@ pub fn render(tool: &str, data: &Value) -> String {
         "list_marketplace" => render_listings(data),
         "get_listing" => render_listing(data),
         "get_wallet_orders" => render_orders(data),
-        "create_order" => render_order(tool, data),
-        "get_order_status" => render_order(tool, data),
-        "wait_for_order" => render_order(tool, data),
-        "redeem_merchant_credits" => render_redeem(data),
-        // Same result vocabulary as redeem (status / redeemed / balance) —
-        // pay_order returns it flat, which is what render_redeem reads.
+        "create_order" => render_order(data),
+        "get_order" => render_order(data),
         "pay_order" => render_redeem(data),
         "buy" => render_buy(data),
         "load_core_credits" => render_load_credits(data),
         "send_usdc" | "send_zcash" => render_send(data),
-        "list_purchases" => render_purchases(data),
-        "get_purchase" => render_purchase(data),
         "sync_purchases" => render_sync(data),
         // Any other name is a one-shot marketplace purchase tool
         // (run_python or a provider_tool listing) — dispatch rejected
@@ -94,7 +88,16 @@ fn render_one_shot(data: &Value) -> String {
             .and_then(Value::as_bool)
             == Some(true)
         {
-            out.push_str("\n… (truncated)");
+            match data.get("next_offset").and_then(Value::as_u64) {
+                Some(next) => {
+                    let id = field_str(data, &["order_id"]);
+                    let _ = write!(
+                        out,
+                        "\n… (continues: get_order(order_id=\"{id}\", content_offset={next}))"
+                    );
+                }
+                None => out.push_str("\n… (truncated)"),
+            }
         }
     } else if data.get("delivered_content_url").is_some() {
         // A file delivery (an image, a PDF…) — not text, so not inlined.
@@ -145,9 +148,6 @@ pub fn render_error(e: &ToolError) -> String {
         ToolError::MissingArg(_) | ToolError::InvalidArg { .. } => {
             "Next: fix the argument shown above and call the tool again."
         }
-        ToolError::WaitTimeout { .. } => {
-            "Next: call wait_for_order again to keep polling, or get_order_status for a one-shot check."
-        }
         ToolError::Overpay(_) => {
             "Next: verify the order/listing id and that the wallet is authorized, then retry."
         }
@@ -163,6 +163,9 @@ pub fn render_error(e: &ToolError) -> String {
         }
         ToolError::ProviderKeySends => {
             "Next: the wallet owner can send from the owallet dashboard's Send card."
+        }
+        ToolError::SpendLimit(_) => {
+            "Next: stop and tell the user what was refused — they can raise this conversation's limit (in norm: `/budget`). Do not retry around it."
         }
         ToolError::ProviderKeyBudget(_) => {
             "Next: wait for the daily reset, or ask the wallet owner to raise this key's budget on the dashboard."
@@ -185,15 +188,6 @@ pub fn render_error(e: &ToolError) -> String {
 fn render_soft_error(tool: &str, data: &Value) -> Option<String> {
     let obj = data.as_object()?;
     let err = obj.get("error").and_then(Value::as_str)?;
-
-    // get_purchase's not_cached miss is a routine "fetch it first" nudge,
-    // not really a failure.
-    if err == "not_cached" {
-        let oid = obj.get("order_id").and_then(Value::as_str).unwrap_or("?");
-        return Some(format!(
-            "ℹ️ Order {oid} isn't in the local cache yet.\nNext: call get_order_status(order_id=\"{oid}\") or wait_for_order to populate it, then get_purchase again."
-        ));
-    }
 
     let mut out = format!("⚠️ {err}");
     if let Some(oid) = obj.get("order_id").and_then(Value::as_str) {
@@ -324,7 +318,7 @@ fn render_listings(data: &Value) -> String {
     out.push_str(
         "A listing marked \"one-shot tool\" can be bought in a single call to that tool \
          (order + pay + wait + result). Every listing — marked or not — can be bought with \
-         create_order → pay_order → wait_for_order.\n",
+         create_order → pay_order → get_order.\n",
     );
     out.push_str("Next: call get_listing(listing_id) to see its price and buyer_note_schema, then create_order(listing_id).");
     out
@@ -427,7 +421,7 @@ fn render_schema(schema: &Value) -> String {
 /// Each row carries what the order finally cost and when it was placed, and
 /// the list ends with a total, so "what did these cost" is answered here: a
 /// model asked what a conversation spent used to open every order with
-/// `get_order_status` just to read the charge and tell the turns apart.
+/// `get_order` just to read the charge and tell the turns apart.
 fn render_orders(data: &Value) -> String {
     let items = data.get("data").and_then(Value::as_array);
     let Some(items) = items else {
@@ -528,7 +522,7 @@ fn render_orders(data: &Value) -> String {
     out.push_str(
         "Each row shows the amount authorized and, where it differs, what was finally charged; \
          that charge is the order's cost, so no per-order lookup is needed for costs. \
-         Next: get_order_status(order_id) for an order's content, or wait_for_order to block until one is delivered.",
+         Next: get_order(order_id) for an order's content, or with wait_until=\"delivered\" to wait for delivery.",
     );
     out
 }
@@ -561,9 +555,9 @@ fn order_time(o: &Value) -> Option<String> {
     Some(format!("{date} {minute}Z"))
 }
 
-/// `create_order` / `get_order_status` / `wait_for_order`: single order
-/// snapshot. The next step is keyed off the order's status.
-fn render_order(tool: &str, data: &Value) -> String {
+/// `create_order` / `get_order`: single order snapshot. The next step is
+/// keyed off the order's status.
+fn render_order(data: &Value) -> String {
     let order = data.get("data").unwrap_or(data);
     let id = field_str(order, &["order_id", "id"]);
     let pay = field_str(order, &["payment_status"]);
@@ -588,32 +582,39 @@ fn render_order(tool: &str, data: &Value) -> String {
         }
     }
 
-    // Stripped large delivered_content leaves a pointer dict behind.
-    if let Some(ptr) = order.get("delivered_content_cached") {
-        let size = ptr.get("size_bytes").and_then(Value::as_i64).unwrap_or(0);
-        let _ = write!(
-            out,
-            "\nDelivered content ({size} bytes) cached locally — fetch with get_purchase(order_id=\"{id}\")."
-        );
-    } else if let Some(url) = order.get("delivered_content_url").and_then(Value::as_str) {
+    if let Some(url) = order.get("delivered_content_url").and_then(Value::as_str) {
         // S3-backed content: the server returns a signed download URL instead of
         // the raw blob to keep this response lean.
         let _ = write!(out, "\nDelivered content: {url}");
     } else if let Some(c) = order.get("delivered_content").and_then(Value::as_str) {
-        // Small inline content: show it directly.
-        let _ = write!(out, "\nDelivered content: {}", truncate(c, 500));
+        // Already cut to one page by get_order — show all of it: the model
+        // reads only this text, so anything cut here is unreadable.
+        match order.get("delivered_content_bytes").and_then(Value::as_u64) {
+            Some(total) => {
+                let from = order
+                    .get("content_offset")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let to = from + c.len() as u64;
+                let _ = write!(
+                    out,
+                    "\nDelivered content (bytes {from}–{to} of {total}):\n{c}"
+                );
+            }
+            None => {
+                let _ = write!(out, "\nDelivered content:\n{c}");
+            }
+        }
     }
 
-    // wait_for_order splices these on; surface the poll outcome.
-    if tool == "wait_for_order" {
-        let waited = data.get("waited_seconds").and_then(Value::as_i64);
-        let timed_out = data.get("timed_out").and_then(Value::as_bool);
-        if let (Some(w), Some(to)) = (waited, timed_out) {
-            if to {
-                let _ = write!(out, "\nTimed out after {w}s (status not yet reached).");
-            } else {
-                let _ = write!(out, "\nReached after {w}s.");
-            }
+    // A waiting get_order splices these on; surface the poll outcome.
+    let waited = data.get("waited_seconds").and_then(Value::as_i64);
+    let timed_out = data.get("timed_out").and_then(Value::as_bool);
+    if let (Some(w), Some(to)) = (waited, timed_out) {
+        if to {
+            let _ = write!(out, "\nTimed out after {w}s (status not yet reached).");
+        } else {
+            let _ = write!(out, "\nReached after {w}s.");
         }
     }
 
@@ -624,8 +625,10 @@ fn render_order(tool: &str, data: &Value) -> String {
 /// Pick the most useful next action for an order given its statuses.
 fn order_next_step(id: &str, pay: &str, ful: &str, order: &Value) -> String {
     if ful == "delivered" {
-        if order.get("delivered_content_cached").is_some() {
-            return format!("Next: get_purchase(order_id=\"{id}\") to read the delivered content.");
+        if let Some(next) = order.get("next_offset").and_then(Value::as_u64) {
+            return format!(
+                "Next: get_order(order_id=\"{id}\", content_offset={next}) for the rest of the delivered content."
+            );
         }
         return "Next: done — the order is delivered.".to_string();
     }
@@ -645,10 +648,12 @@ fn order_next_step(id: &str, pay: &str, ful: &str, order: &Value) -> String {
                 "Next: send the quoted USDC to {addr} with send_usdc, or pay via the order page."
             );
         }
-        return format!("Next: pay this order, then wait_for_order(order_id=\"{id}\").");
+        return format!(
+            "Next: pay this order (pay_order), then get_order(order_id=\"{id}\", wait_until=\"delivered\")."
+        );
     }
     // Paid but still being fulfilled.
-    format!("Next: wait_for_order(order_id=\"{id}\", until_status=\"delivered\") to block until it ships.")
+    format!("Next: get_order(order_id=\"{id}\", wait_until=\"delivered\") to wait until it's delivered.")
 }
 
 /// `get_merchant_credits`: either a single seller's balance or a list.
@@ -672,20 +677,18 @@ fn render_credits(data: &Value) -> String {
                 balance_cell(c)
             );
         }
-        out.push_str(
-            "Next: redeem_merchant_credits(seller_slug, order_id) to apply a balance to an order.",
-        );
+        out.push_str("Next: pay_order(order_id) to apply a balance to an order.");
         return out;
     }
     // Single-seller shape (flat object).
     let seller = field_str(data, &["seller_slug", "seller"]);
     format!(
-        "Credit with @{seller}: {}\nNext: redeem_merchant_credits(seller_slug=\"{seller}\", order_id) to spend it.",
+        "Credit with @{seller}: {}\nNext: pay_order(order_id) to spend it.",
         balance_cell(data)
     )
 }
 
-/// `redeem_merchant_credits`: amount applied + remaining balance.
+/// `pay_order`: amount applied + remaining balance.
 fn render_redeem(data: &Value) -> String {
     let status = field_str(data, &["status"]);
     let applied = money_field(data, &["amount_redeemed_cents"]);
@@ -700,7 +703,7 @@ fn render_redeem(data: &Value) -> String {
     if let Some(msg) = data.get("message").and_then(Value::as_str) {
         let _ = write!(out, "\n{msg}");
     }
-    out.push_str("\nNext: get_order_status(order_id) to confirm the order is now settled.");
+    out.push_str("\nNext: get_order(order_id) to confirm the order is now settled.");
     out
 }
 
@@ -723,7 +726,7 @@ fn render_buy(data: &Value) -> String {
     }
     let _ = write!(
         out,
-        "\nNext: wait_for_order(order_id=\"{order_id}\", until_status=\"delivered\") to confirm the credits land."
+        "\nNext: get_order(order_id=\"{order_id}\", wait_until=\"delivered\") to confirm the credits land."
     );
     out
 }
@@ -753,49 +756,6 @@ fn render_send(data: &Value) -> String {
     }
 }
 
-/// `list_purchases`: count + compact rows.
-fn render_purchases(data: &Value) -> String {
-    let count = data.get("count").and_then(Value::as_i64).unwrap_or(0);
-    let rows = data.get("purchases").and_then(Value::as_array);
-    if count == 0 || rows.map(|r| r.is_empty()).unwrap_or(true) {
-        return "No cached purchases. Next: get_order_status/wait_for_order on an order, or sync_purchases to backfill from Overpay.".to_string();
-    }
-    let mut out = format!("{count} cached purchase(s):\n");
-    if let Some(rows) = rows {
-        for p in rows {
-            let id = field_str(p, &["order_id", "id"]);
-            let title = field_str(p, &["title"]);
-            let ful = field_str(p, &["fulfillment_status"]);
-            let _ = writeln!(out, "• {id} · {title} · {ful}");
-        }
-    }
-    out.push_str("Next: get_purchase(order_id) to read a purchase's delivered content.");
-    out
-}
-
-/// `get_purchase`: a cached order (not_cached handled as a soft error).
-fn render_purchase(data: &Value) -> String {
-    let id = field_str(data, &["order_id", "id"]);
-    let title = field_str(data, &["title"]);
-    let ful = field_str(data, &["fulfillment_status"]);
-    let mut out = format!("Purchase {id}: {title} · {ful}");
-    if let Some(url) = data.get("delivered_content_url").and_then(Value::as_str) {
-        let _ = write!(out, "\nDelivered content: {url}");
-    } else {
-        match data.get("delivered_content").and_then(Value::as_str) {
-            Some(c) if !c.is_empty() => {
-                let _ = write!(out, "\nDelivered content:\n{}", truncate(c, 2000));
-            }
-            _ => {
-                out.push_str(
-                    "\n(No delivered content stored. Full payload is in structuredContent.)",
-                );
-            }
-        }
-    }
-    out
-}
-
 /// `sync_purchases`: count synced + any errors.
 fn render_sync(data: &Value) -> String {
     let synced = data.get("synced").and_then(Value::as_i64).unwrap_or(0);
@@ -810,9 +770,7 @@ fn render_sync(data: &Value) -> String {
             }
         }
     }
-    out.push_str(
-        "\nNext: list_purchases to see the cached orders, or get_purchase(order_id) for one.",
-    );
+    out.push_str("\nThe cached orders are listed on the owallet dashboard.");
     out
 }
 
@@ -863,7 +821,7 @@ fn render_load_credits(data: &Value) -> String {
 
     out.push_str(
         "Next: scan the QR code with any Lightning wallet, \
-         then call wait_for_order(order_id, until_status=\"delivered\") to confirm the credits land.",
+         then call get_order(order_id, wait_until=\"delivered\") to confirm the credits land.",
     );
     out
 }
@@ -931,13 +889,24 @@ fn order_amount_cell(o: &Value) -> String {
 }
 
 /// Cents that may be fractional (sub-cent pricing) → `$X.YZ`, or up to six
-/// dollar decimals when the amount isn't a whole cent.
+/// dollar decimals when the amount isn't a whole cent. Under a dollar such
+/// an amount also gets its cents (`$0.002774 = 0.2774¢`): models asked
+/// about cost tend to restate it in cents, and slip a decimal converting.
 pub(crate) fn fmt_cents(cents: f64) -> String {
     if cents.fract() == 0.0 {
         return fmt_usd_cents(cents as i64);
     }
     let sign = if cents < 0.0 { "-" } else { "" };
-    format!("{sign}${}", trim_float(cents.abs() / 100.0))
+    let usd = format!("{sign}${}", trim_float(cents.abs() / 100.0));
+    if cents.abs() >= 100.0 {
+        return usd;
+    }
+    // A micro-dollar is 0.0001¢, so four decimals are exact.
+    let in_cents = format!("{:.4}", cents.abs());
+    format!(
+        "{usd} = {sign}{}¢",
+        in_cents.trim_end_matches('0').trim_end_matches('.')
+    )
 }
 
 /// A byte count, human-scaled: `512 B`, `1.0 KB`, `1.0 MB`.
@@ -1100,13 +1069,23 @@ mod tests {
         ]});
         let out = render("get_wallet_orders", &data);
         assert!(out.contains("OpenRouter Inference"), "{out}");
-        assert!(out.contains("$0.20 (charged $0.035)"), "{out}");
+        assert!(out.contains("$0.20 (charged $0.035 = 3.5¢)"), "{out}");
         assert!(
             out.contains("$0.05") && !out.contains("$0.05 (charged"),
             "{out}"
         );
-        let one = render("get_order_status", &json!({"data": data["data"][1]}));
+        let one = render("get_order", &json!({"data": data["data"][1]}));
         assert!(one.contains("$0.05"), "{one}");
+    }
+
+    #[test]
+    fn sub_cent_amounts_also_read_in_cents() {
+        assert_eq!(fmt_cents(0.2774), "$0.002774 = 0.2774¢");
+        assert_eq!(fmt_cents(0.005), "$0.00005 = 0.005¢");
+        assert_eq!(fmt_cents(-3.3546), "-$0.033546 = -3.3546¢");
+        // Whole cents, and anything from a dollar up, stay in dollars.
+        assert_eq!(fmt_cents(3.0), "$0.03");
+        assert_eq!(fmt_cents(123.4567), "$1.234567");
     }
 
     #[test]
@@ -1204,7 +1183,9 @@ mod tests {
         assert!(out.contains("• O2 · 2026-10-05 17:55Z · "), "{out}");
         assert!(out.contains("• O3 · payment=paid"), "{out}");
         assert!(
-            out.contains("Charged for the 3 paid order(s) listed: $0.000639 (authorized $0.45)."),
+            out.contains(
+                "Charged for the 3 paid order(s) listed: $0.000639 = 0.0639¢ (authorized $0.45)."
+            ),
             "{out}"
         );
         assert!(
@@ -1285,7 +1266,7 @@ mod tests {
         });
         let out = render("get_wallet_orders", &data);
         assert!(
-            out.contains("This conversation so far: 57 order(s), 55 paid, charged $0.016402 (authorized $8.25)."),
+            out.contains("This conversation so far: 57 order(s), 55 paid, charged $0.016402 = 1.6402¢ (authorized $8.25)."),
             "{out}"
         );
         assert!(
@@ -1318,35 +1299,44 @@ mod tests {
     #[test]
     fn order_pending_steers_to_pay() {
         let data = json!({"data": {"id": "O1", "payment_status": "pending", "fulfillment_status": "pending"}});
-        let out = render("get_order_status", &data);
+        let out = render("get_order", &data);
         assert!(out.to_lowercase().contains("pay"), "{out}");
     }
 
     #[test]
     fn order_paid_in_progress_steers_to_wait() {
         let data = json!({"data": {"id": "O1", "payment_status": "paid", "fulfillment_status": "awaiting_seller"}});
-        let out = render("get_order_status", &data);
-        assert!(out.contains("wait_for_order"), "{out}");
+        let out = render("get_order", &data);
+        assert!(out.contains("wait_until"), "{out}");
     }
 
     #[test]
-    fn order_delivered_with_cached_pointer_steers_to_get_purchase() {
+    fn order_content_is_shown_in_full_with_the_next_page() {
+        let long = "x".repeat(3000);
         let data = json!({"data": {
             "id": "O1", "payment_status": "paid", "fulfillment_status": "delivered",
-            "delivered_content_cached": {"size_bytes": 3000, "hint": "x"}
+            "delivered_content": long, "delivered_content_bytes": 9000,
+            "content_offset": 0, "next_offset": 3000
         }});
-        let out = render("get_order_status", &data);
-        assert!(out.contains("3000"), "size shown: {out}");
-        assert!(out.contains("get_purchase"), "{out}");
+        let out = render("get_order", &data);
+        assert!(out.contains(&"x".repeat(3000)), "whole page shown: {out}");
+        assert!(out.contains("bytes 0–3000 of 9000"), "{out}");
+        assert!(out.contains("content_offset=3000"), "{out}");
+
+        let small = json!({"data": {"id": "O1", "fulfillment_status": "delivered",
+            "delivered_content": "y".repeat(1500)}});
+        let out = render("get_order", &small);
+        assert!(out.contains(&"y".repeat(1500)), "{out}");
+        assert!(out.contains("done"), "{out}");
     }
 
     #[test]
-    fn wait_for_order_reports_waited_and_timed_out() {
+    fn waiting_get_order_reports_waited_and_timed_out() {
         let hit = json!({"data": {"id": "O1", "fulfillment_status": "delivered"}, "waited_seconds": 4, "timed_out": false});
-        let out = render("wait_for_order", &hit);
+        let out = render("get_order", &hit);
         assert!(out.contains("Reached after 4s"), "{out}");
         let to = json!({"data": {"id": "O1", "fulfillment_status": "shipping"}, "waited_seconds": 60, "timed_out": true});
-        let out2 = render("wait_for_order", &to);
+        let out2 = render("get_order", &to);
         assert!(out2.contains("Timed out after 60s"), "{out2}");
     }
 
@@ -1363,13 +1353,13 @@ mod tests {
         });
         let out = render("get_account_info", &data);
         assert!(out.contains("@alice") && out.contains("$12.34"), "{out}");
-        assert!(out.contains("redeem_merchant_credits"), "{out}");
+        assert!(out.contains("pay_order"), "{out}");
     }
 
     #[test]
     fn redeem_shows_applied_and_remaining() {
         let data = json!({"status": "applied", "amount_redeemed_cents": 1500, "credit_balance_cents": 3500, "message": "Applied $15.00"});
-        let out = render("redeem_merchant_credits", &data);
+        let out = render("pay_order", &data);
         assert!(out.contains("$15.00"), "applied: {out}");
         assert!(out.contains("$35.00"), "remaining: {out}");
     }
@@ -1385,7 +1375,7 @@ mod tests {
         assert!(out.contains("ord_buy_001"), "{out}");
         assert!(out.contains("7.5 USDC"), "{out}");
         assert!(out.contains("0x6d6b56…0e0e"), "short hash: {out}");
-        assert!(out.contains("wait_for_order"), "{out}");
+        assert!(out.contains("get_order"), "{out}");
     }
 
     #[test]
@@ -1413,28 +1403,6 @@ mod tests {
         );
         assert!(out.contains("0x6d6b56…0e0e"), "{out}");
         assert!(out.contains("automatically"), "{out}");
-    }
-
-    #[test]
-    fn purchases_list_and_empty() {
-        let data = json!({"count": 1, "purchases": [{"order_id": "ord1", "title": "T", "fulfillment_status": "delivered"}]});
-        let out = render("list_purchases", &data);
-        assert!(out.contains("1 cached") && out.contains("ord1"), "{out}");
-        let empty = render("list_purchases", &json!({"count": 0, "purchases": []}));
-        assert!(empty.contains("No cached purchases"), "{empty}");
-    }
-
-    #[test]
-    fn purchase_cached_and_not_cached() {
-        let cached = json!({"order_id": "ord1", "title": "T", "fulfillment_status": "delivered", "delivered_content": "the answer is 42"});
-        let out = render("get_purchase", &cached);
-        assert!(out.contains("the answer is 42"), "{out}");
-        let miss = json!({"error": "not_cached", "order_id": "nope"});
-        let out2 = render("get_purchase", &miss);
-        assert!(
-            out2.contains("nope") && out2.contains("get_order_status"),
-            "{out2}"
-        );
     }
 
     #[test]
@@ -1491,12 +1459,6 @@ mod tests {
         };
         let out3 = render_error(&e3);
         assert!(out3.contains("positive"), "{out3}");
-
-        let e4 = ToolError::WaitTimeout {
-            target: "delivered".into(),
-            seconds: 60,
-        };
-        assert!(render_error(&e4).contains("wait_for_order"));
     }
 
     #[test]

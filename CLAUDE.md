@@ -282,7 +282,7 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   must keep those keys or update both.
   The streaming diff (`PartialTracker` / `new_output_since`) and
   `partial_output` live in `overpay_sdk::flows`, shared by `/v1` and the
-  MCP `wait_for_order`.
+  MCP `get_order`.
   **The tool loop is server-side and transparent**: a tool call never
   reaches the HTTP caller — `run_agentic_loop` (buffered) / the streaming
   generator's own copy of the same loop shape executes `run_python` as a
@@ -399,9 +399,12 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
 
 - **Purchase cache.** `owallet-db`'s `purchases` table (plaintext, no
   unlock needed) + `upsert/list/read/delete/count_purchases`. The MCP
-  `get_order_status`/`wait_for_order` cache terminal orders and strip
-  `delivered_content` >2 KB; `list/get/sync_purchases` tools + the
-  `/wallet/purchases` dashboard read it. Timestamp coercion (int or
+  `get_order` tool and the one-shot listing tools cache terminal orders;
+  `get_order` answers finished orders from the cache and pages
+  `delivered_content` 8 KB at a time (`content_offset`/`next_offset`) —
+  norm's model only sees a result's text block, so every page must fit
+  there whole. The `/wallet/purchases` dashboard reads the cache and
+  backfills it through the unlisted `sync_purchases` tool. Timestamp coercion (int or
   ISO-8601 → unix) uses the `time` crate (parsing feature) in
   owallet-db; owallet-http formats dashboard
   timestamps in the wallet's timezone via `timefmt.rs` (`time` +
