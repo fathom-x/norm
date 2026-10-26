@@ -25,6 +25,9 @@ const IMPLEMENTED: &[(&str, &str)] = &[
     ("listOrders", "orders().list"),
     ("createOrder", "orders().create"),
     ("getOrder", "orders().get"),
+    ("acceptQuote", "orders().accept_quote"),
+    ("declineQuote", "orders().decline_quote"),
+    ("updateCheckout", "orders().update_checkout"),
     ("createSpendAuthorization", "spend_authorizations().create"),
     ("getSpendAuthorization", "spend_authorizations().get"),
     ("closeSpendAuthorization", "spend_authorizations().close"),
@@ -124,7 +127,9 @@ fn every_fixture_round_trips_through_its_model() {
             "getListing" => roundtrip::<Listing>(file, &body, data),
             "getSeller" => roundtrip::<Seller>(file, &body, data),
             "listOrders" => roundtrip::<Page<Order>>(file, &body, whole),
-            "getOrder" => roundtrip::<Order>(file, &body, data),
+            "getOrder" | "acceptQuote" | "declineQuote" | "updateCheckout" => {
+                roundtrip::<Order>(file, &body, data)
+            }
             "createOrder" => roundtrip::<CreatedOrder>(file, &body, whole),
             "createSpendAuthorization" | "getSpendAuthorization" | "closeSpendAuthorization" => {
                 roundtrip::<SpendAuthorization>(file, &body, data);
@@ -226,7 +231,9 @@ fn every_cents_field_accepts_a_fraction() {
             "getListing" => roundtrip::<Listing>(file, &body, data),
             "getSeller" => roundtrip::<Seller>(file, &body, data),
             "listOrders" => roundtrip::<Page<Order>>(file, &body, whole),
-            "getOrder" => roundtrip::<Order>(file, &body, data),
+            "getOrder" | "acceptQuote" | "declineQuote" | "updateCheckout" => {
+                roundtrip::<Order>(file, &body, data)
+            }
             "createOrder" => roundtrip::<CreatedOrder>(file, &body, whole),
             "createSpendAuthorization" | "getSpendAuthorization" | "closeSpendAuthorization" => {
                 roundtrip::<SpendAuthorization>(file, &body, data);

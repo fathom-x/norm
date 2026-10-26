@@ -385,7 +385,7 @@
         ],
         "operationId": "createOrder",
         "summary": "Place an order, optionally paying for it with merchant credits",
-        "description": "`pay: \"merchant_credits\"` settles the new order in the same request;\nthe outcome is reported in the top-level `payment` key. A redemption\nfailure does not fail the create: the order is returned pending.\n\nMetered listings accept a buyer-set `authorization_cents` (within the\nlisting's bounds) or a `spend_authorization_id`; both require\n`pay: \"merchant_credits\"` and are all-or-nothing — if credits don't\ncover them the order is cancelled and the call answers 402\n`insufficient_credits`.\n\nSend an `Idempotency-Key` to make retries safe: a retry with the same\nkey and body replays the first response (marked\n`Idempotent-Replayed: true`) instead of placing a second order.\n",
+        "description": "`pay: \"merchant_credits\"` settles the new order in the same request;\nthe outcome is reported in the top-level `payment` key. A redemption\nfailure does not fail the create: the order is returned pending.\n\nMetered listings accept a buyer-set `authorization_cents` (within the\nlisting's bounds) or a `spend_authorization_id`; both require\n`pay: \"merchant_credits\"` and are all-or-nothing — if credits don't\ncover them the order is cancelled and the call answers 402\n`insufficient_credits`.\n\nSend an `Idempotency-Key` to make retries safe: a retry with the same\nkey and body replays the first response (marked\n`Idempotent-Replayed: true`) instead of placing a second order.\n\nA `request_quote` listing (see `Listing.listing_type`) has no price\nyet: the order is created `awaiting_quote` with no `payment` key,\nand `pay`, `authorization_cents` or `spend_authorization_id` answer\n422 `quote_required`. Wait for the seller's quote (`quote` on the\norder), then `POST /api/v1/orders/{id}/accept_quote` (or `PATCH\n.../checkout`, which accepts on the way) and pay with credits.\n\nA listing with a `checkout_schema` (`checkout_required`, e.g. a\nshipping address) must be checked out before payment: paying first\nfails with `checkout_incomplete` (reported in `payment` here, or as\na 422 from the redeem endpoint).\n",
         "security": [
           {
             "bearerAuth": []
@@ -514,6 +514,145 @@
                       "$ref": "#/components/schemas/Order"
                     }
                   }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/orders/{id}/accept_quote": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "operationId": "acceptQuote",
+        "summary": "Accept the seller's quote on a request_quote order",
+        "description": "The order becomes `pending` at the quoted price, payable with credits\nfor the next hour. 422 `quote_not_active` when the order isn't\nquoted, or the quote has expired. Idempotent under `Idempotency-Key`.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The order, now pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/orders/{id}/decline_quote": {
+      "post": {
+        "tags": [
+          "Orders"
+        ],
+        "operationId": "declineQuote",
+        "summary": "Decline a quote, or withdraw an unanswered quote request",
+        "description": "The order is cancelled: `quote.declined` becomes true with no\n`decline_reason` (a seller's decline carries its reason). 422\n`quote_not_active` unless the order is `awaiting_quote` or `quoted`.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The order, now cancelled",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        }
+      }
+    },
+    "/api/v1/orders/{id}/checkout": {
+      "patch": {
+        "tags": [
+          "Orders"
+        ],
+        "operationId": "updateCheckout",
+        "summary": "Supply the pre-payment buyer input the listing asks for",
+        "description": "`checkout_data` is validated against the listing's `checkout_schema`\n(marketplace primitives such as `shipping_address:v1` expanded) and\nstored; keys the schema doesn't declare are dropped. 422\n`checkout_invalid` lists the schema `errors`. An active quote is\naccepted on the way, as the browser's form does; an expired one is\n422 `quote_not_active`. A paid, cancelled or expired order is 422\n`order_not_payable`. Idempotent under `Idempotency-Key`.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/OrderId"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCheckoutRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The order with its checkout state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
                 }
               }
             }
@@ -2937,6 +3076,13 @@
               "type": "string"
             },
             "description": "invalid_status_filter — the accepted values"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "checkout_invalid — what the listing's checkout_schema rejected"
           }
         },
         "additionalProperties": true
@@ -2976,6 +3122,10 @@
           "no_credits",
           "order_not_payable",
           "redemption_failed",
+          "quote_required",
+          "quote_not_active",
+          "checkout_invalid",
+          "checkout_incomplete",
           "idempotency_key_invalid",
           "idempotency_key_reused",
           "idempotency_request_in_progress",
@@ -3015,6 +3165,15 @@
           "authorization_too_low",
           "unsupported_input",
           "upstream_unavailable"
+        ]
+      },
+      "ListingType": {
+        "type": "string",
+        "description": "How a listing is bought. `fixed_price`: order and pay. `request_quote`:\nthe seller prices the order first (see createOrder). `service_lease`:\na prepaid, fixed-term service.\n",
+        "enum": [
+          "fixed_price",
+          "request_quote",
+          "service_lease"
         ]
       },
       "CreditSource": {
@@ -3188,6 +3347,17 @@
           "delivered_content_type": {
             "type": "string",
             "nullable": true
+          },
+          "listing_type": {
+            "$ref": "#/components/schemas/ListingType"
+          },
+          "requires_shipping_address": {
+            "type": "boolean",
+            "description": "The checkout_schema asks for a shipping address (the `shipping_address` primitive)."
+          },
+          "checkout_required": {
+            "type": "boolean",
+            "description": "The listing has a checkout_schema: the order needs\n`PATCH /api/v1/orders/{id}/checkout` before it can be paid.\n"
           },
           "seller": {
             "$ref": "#/components/schemas/SellerRef"
@@ -3486,6 +3656,15 @@
             "nullable": true,
             "description": "The buyer's own opaque label for the session this order belongs to, set at creation. Never shown to the seller."
           },
+          "quantity": {
+            "type": "integer"
+          },
+          "quote": {
+            "$ref": "#/components/schemas/Quote"
+          },
+          "checkout": {
+            "$ref": "#/components/schemas/Checkout"
+          },
           "order_url": {
             "type": "string"
           },
@@ -3562,6 +3741,87 @@
           }
         }
       },
+      "Quote": {
+        "type": "object",
+        "nullable": true,
+        "description": "The seller's quote on a request_quote order: null until the seller\nanswers (`awaiting_quote`). Once quoted, the order's price fields\ncarry the quoted amounts. `declined` with `decline_reason` when the\nseller turned the request down instead.\n",
+        "required": [
+          "declined"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "nullable": true
+          },
+          "product_image_url": {
+            "type": "string",
+            "nullable": true
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "quoted_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "declined": {
+            "type": "boolean"
+          },
+          "decline_reason": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "Checkout": {
+        "type": "object",
+        "description": "The pre-payment buyer input the listing asks for (its\ncheckout_schema): whether any is required, whether it is complete\n(payment is refused until it is), and — detail only — what was given.\n",
+        "required": [
+          "required",
+          "complete"
+        ],
+        "properties": {
+          "required": {
+            "type": "boolean"
+          },
+          "complete": {
+            "type": "boolean"
+          },
+          "data": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": true,
+            "description": "Detail only. The checkout data as stored (e.g. `shipping_address`)."
+          }
+        }
+      },
+      "OrderResponse": {
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Order"
+          }
+        }
+      },
+      "UpdateCheckoutRequest": {
+        "type": "object",
+        "required": [
+          "checkout_data"
+        ],
+        "properties": {
+          "checkout_data": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Per the listing's checkout_schema, e.g. {\"shipping_address\": {...}}."
+          }
+        }
+      },
       "CreateOrderRequest": {
         "type": "object",
         "required": [
@@ -3578,6 +3838,12 @@
           "variant": {
             "type": "string",
             "description": "An active variant key. Without it, the listing's variant_field in a JSON buyer_note implies one."
+          },
+          "quantity": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "How many, 1 to 100; 1 when absent."
           },
           "pay": {
             "type": "string",
@@ -3621,6 +3887,14 @@
           },
           "error": {
             "type": "string"
+          },
+          "code": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ErrorCode"
+              }
+            ],
+            "description": "With `failed`: why (e.g. `checkout_incomplete`, `no_credits`)."
           }
         }
       },

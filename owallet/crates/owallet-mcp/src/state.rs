@@ -279,6 +279,8 @@ pub(crate) fn session_label(secret: &[u8], client_session_id: &str) -> String {
     use hmac::{Hmac, Mac};
     let mut mac =
         Hmac::<sha2::Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
+    // Deliberately frozen: this domain label keys every derived session id,
+    // so it keeps its original name even though the seller is now "AI Inference".
     mac.update(b"owallet/openrouter-session-id/v1\0");
     mac.update(client_session_id.as_bytes());
     hex::encode(mac.finalize().into_bytes())

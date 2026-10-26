@@ -1,0 +1,4 @@
+{
+  "error": "Complete checkout (e.g. the shipping address) before paying",
+  "code": "checkout_incomplete"
+}

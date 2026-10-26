@@ -38,7 +38,7 @@ pub(crate) struct McpEntry {
 }
 
 /// One OpenAI-compatible `provider` entry for `opencode.json` — the model
-/// catalog is fetched live from the OpenRouter listing's own
+/// catalog is fetched live from the AI Inference listing's own
 /// `buyer_note_schema` on Overpay rather than duplicated here, for the
 /// same reason `resolve_models` in `openai_compat.rs` reads it live off
 /// the listing: it's curated on the Ruby side (`MODEL_OPTIONS`) and can
@@ -56,8 +56,8 @@ pub(crate) struct ProviderEntry {
 // the live catalog can't be fetched (see `build_provider_entries`); a
 // request against it works without a live catalog too, so the entry
 // `install` writes is never a dead end. Shared with `/v1`, as is how the
-// OpenRouter listing is found, so the two can't drift.
-use owallet_mcp::openai_compat::{DEFAULT_MODEL, OPENROUTER_LISTING_TITLE, OPENROUTER_SELLER_SLUG};
+// AI Inference listing is found, so the two can't drift.
+use owallet_mcp::openai_compat::{DEFAULT_MODEL, INFERENCE_LISTING_TITLE, INFERENCE_SELLER_SLUG};
 
 pub fn run(args: InstallArgs<'_>) -> Result<()> {
     let entries = build_entries(args.cli, args.port)?;
@@ -289,7 +289,7 @@ fn build_entries(cli: &Cli, port_override: Option<u16>) -> Result<Vec<McpEntry>>
         .collect())
 }
 
-/// Fetches the curated model catalog straight from the OpenRouter
+/// Fetches the curated model catalog straight from the AI Inference
 /// listing's own `buyer_note_schema` on Overpay — the exact source
 /// `/v1/models` in `openai_compat.rs` proxies (`resolve_models`), so
 /// fetching the listing directly instead of through a running `owallet
@@ -303,7 +303,7 @@ fn fetch_models(rails_url: &str) -> std::result::Result<Vec<String>, String> {
     super::overpay::block_on(async {
         let client = owallet_overpay::OverpayClient::new(rails_url).map_err(|e| e.to_string())?;
 
-        let listing_id = resolve_openrouter_listing_id(&client).await?;
+        let listing_id = resolve_inference_listing_id(&client).await?;
         let listing = client
             .get_listing_value(&listing_id)
             .await
@@ -320,28 +320,28 @@ fn fetch_models(rails_url: &str) -> std::result::Result<Vec<String>, String> {
             .unwrap_or_default();
         if models.is_empty() {
             return Err(format!(
-                "the '{OPENROUTER_LISTING_TITLE}' listing has no model enum in its buyer_note_schema"
+                "the '{INFERENCE_LISTING_TITLE}' listing has no model enum in its buyer_note_schema"
             ));
         }
         Ok(models)
     })
 }
 
-/// Resolve the OpenRouter Inference listing id by seller + title — the
+/// Resolve the AI Inference listing id by seller + title — the
 /// SDK's `find_listing_id`, as `/v1` uses.
-async fn resolve_openrouter_listing_id(
+async fn resolve_inference_listing_id(
     client: &owallet_overpay::OverpayClient,
 ) -> std::result::Result<String, String> {
     overpay_sdk::flows::find_listing_id(
         client.sdk(),
-        OPENROUTER_SELLER_SLUG,
-        OPENROUTER_LISTING_TITLE,
+        INFERENCE_SELLER_SLUG,
+        INFERENCE_LISTING_TITLE,
     )
     .await
         .map_err(|e| e.to_string())?
         .ok_or_else(|| {
             format!(
-                "could not find a '{OPENROUTER_LISTING_TITLE}' listing from seller '{OPENROUTER_SELLER_SLUG}' — is its bot registered?"
+                "could not find a '{INFERENCE_LISTING_TITLE}' listing from seller '{INFERENCE_SELLER_SLUG}' — is its bot registered?"
             )
         })
 }
@@ -1251,7 +1251,7 @@ mod tests {
             .and(path("/api/v1/listings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": [
-                    {"id": "l1", "title": "OpenRouter Inference", "seller_slug": "openrouter-bot"}
+                    {"id": "l1", "title": "AI Inference", "seller_slug": "ai-inference"}
                 ]
             })))
             .mount(&server)
@@ -1261,7 +1261,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {
                     "id": "l1",
-                    "title": "OpenRouter Inference",
+                    "title": "AI Inference",
                     "buyer_note_schema": {
                         "type": "object",
                         "properties": {
@@ -1302,7 +1302,7 @@ mod tests {
             .and(path("/api/v1/listings"))
             .respond_with(ResponseTemplate::new(502).set_body_json(json!({
                 "error": {
-                    "message": "could not find an 'OpenRouter Inference' listing",
+                    "message": "could not find an 'AI Inference' listing",
                     "type": "api_error", "param": null, "code": null
                 }
             })))
@@ -1314,7 +1314,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            err.contains("could not find an 'OpenRouter Inference' listing"),
+            err.contains("could not find an 'AI Inference' listing"),
             "the server's own reason must reach the user: {err}"
         );
         assert!(err.contains("502"), "status is still useful context: {err}");

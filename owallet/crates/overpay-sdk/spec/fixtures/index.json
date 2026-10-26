@@ -83,6 +83,34 @@
     "operation": "createOrder",
     "status": 201
   },
+  "orders_create_awaiting_quote.json": {
+    "operation": "createOrder",
+    "status": 201
+  },
+  "orders_show_quoted.json": {
+    "operation": "getOrder",
+    "status": 200
+  },
+  "orders_accept_quote.json": {
+    "operation": "acceptQuote",
+    "status": 200
+  },
+  "orders_show_quote_declined.json": {
+    "operation": "declineQuote",
+    "status": 200
+  },
+  "orders_checkout.json": {
+    "operation": "updateCheckout",
+    "status": 200
+  },
+  "error_checkout_invalid.json": {
+    "operation": "updateCheckout",
+    "status": 422
+  },
+  "error_checkout_incomplete.json": {
+    "operation": "redeemMerchantCredits",
+    "status": 422
+  },
   "orders_show_offloaded.json": {
     "operation": "getOrder",
     "status": 200

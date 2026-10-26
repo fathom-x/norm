@@ -1,3 +1,4 @@
+use reqwest::Method;
 use serde_json::{json, Map, Value};
 
 use crate::auth::Auth;
@@ -202,6 +203,44 @@ impl OrdersApi<'_> {
         let request = Request::get(format!("/api/v1/orders/{}", segment(id)))
             .query("since_seq", options.since_seq)
             .query("payer_address", options.payer_address.as_deref());
+        Ok(Response::new(self.0.execute(request, auth).await?))
+    }
+
+    /// Accept the seller's quote on a request_quote order: it becomes
+    /// pending, payable with credits for the next hour (422
+    /// `quote_not_active` otherwise). Retried under an automatic
+    /// `Idempotency-Key`.
+    pub async fn accept_quote(&self, id: &str, auth: Auth<'_>) -> Result<Response<Order>, Error> {
+        let request = Request::post(format!("/api/v1/orders/{}/accept_quote", segment(id)))
+            .json(json!({}))
+            .idempotency_key(self.0.auto_idempotency_key());
+        Ok(Response::new(self.0.execute(request, auth).await?))
+    }
+
+    /// Decline a quote, or withdraw an unanswered quote request: the
+    /// order is cancelled.
+    pub async fn decline_quote(&self, id: &str, auth: Auth<'_>) -> Result<Response<Order>, Error> {
+        let request =
+            Request::post(format!("/api/v1/orders/{}/decline_quote", segment(id))).json(json!({}));
+        Ok(Response::new(self.0.execute(request, auth).await?))
+    }
+
+    /// Supply the pre-payment buyer input the listing's `checkout_schema`
+    /// asks for (e.g. `{"shipping_address": {...}}`), validated like the
+    /// browser form (422 `checkout_invalid` with `errors`). Accepts an
+    /// active quote on the way. Retried under an automatic `Idempotency-Key`.
+    pub async fn update_checkout(
+        &self,
+        id: &str,
+        checkout_data: &Value,
+        auth: Auth<'_>,
+    ) -> Result<Response<Order>, Error> {
+        let request = Request::new(
+            Method::PATCH,
+            format!("/api/v1/orders/{}/checkout", segment(id)),
+        )
+        .json(json!({ "checkout_data": checkout_data }))
+        .idempotency_key(self.0.auto_idempotency_key());
         Ok(Response::new(self.0.execute(request, auth).await?))
     }
 
