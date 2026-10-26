@@ -39,11 +39,11 @@ export type Model = {
 export const DEFAULT_OUTPUT_TOKENS = 1_500
 /** opencode's own output cap (ProviderTransform.OUTPUT_TOKEN_MAX). */
 export const OUTPUT_TOKEN_MAX = 32_000
-// Mirrors owallet's `OPENROUTER_MIN_OUTPUT_TOKENS`: the reply the seller
+// Mirrors owallet's `INFERENCE_MIN_OUTPUT_TOKENS`: the reply the seller
 // reserves before it runs a turn at all.
 const MIN_OUTPUT_TOKENS = 256
 // owallet sizes a turn's input from its JSON bytes at 3 bytes per token
-// (`OPENROUTER_INPUT_BYTES_PER_TOKEN`); real tokenizers average nearer 4,
+// (`INFERENCE_INPUT_BYTES_PER_TOKEN`); real tokenizers average nearer 4,
 // so a usage-reported token count reads about 4/3 short of owallet's.
 const OWALLET_INPUT_INFLATION = 4 / 3
 

@@ -3,7 +3,7 @@
 //!
 //! Everything a tool returns over an externally-reachable surface can end
 //! up in a model's context and hence on a third party's servers — the
-//! OpenRouter seller on `/v1`, Anthropic's on `/mcp`. The rule on both is
+//! AI Inference seller on `/v1`, Anthropic's on `/mcp`. The rule on both is
 //! the same: **no on-chain data ever appears in a tool result** — no
 //! txids, tx hashes, wallet addresses, npubs, pubkeys, or account
 //! numbers. Order/listing ids, amounts, statuses, and spending limits
@@ -26,7 +26,7 @@ use serde_json::{json, Map, Value};
 
 /// Ceiling on how much `delivered_content` a projected `/v1` tool result
 /// hands the model. See the doc on `openai_compat`'s use — everything in
-/// `messages` re-ships to the OpenRouter seller every turn, so an
+/// `messages` re-ships to the AI Inference seller every turn, so an
 /// unbounded blob would blow the context for the rest of the chat. (The
 /// MCP surface has its own cache-pointer stripping in `tools.rs` and does
 /// not apply this cap.)

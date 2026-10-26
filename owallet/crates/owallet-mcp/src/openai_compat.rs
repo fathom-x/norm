@@ -8,11 +8,11 @@
 //! order — no Claude/OpenAI/etc API key needed, the wallet's own stored
 //! Overpay auth pays instead (merchant credits; see [`place_and_pay`]).
 //!
-//! Hardcoded to the "OpenRouter Inference" listing (`open_router_provider`
-//! bot, seller slug `openrouter-bot`) per the issue — the model catalog
+//! Hardcoded to the "AI Inference" listing (`ai_inference`
+//! bot, seller slug `ai-inference`) per the issue — the model catalog
 //! IS that listing's `buyer_note_schema.properties.model.enum`, read live
 //! rather than duplicated here, so the two can't drift (see
-//! `Bots::OpenRouterProvider::OpenrouterInferenceListing::MODEL_OPTIONS`
+//! `Bots::AiInference::AiInferenceListing::MODEL_OPTIONS`
 //! in the Rails/Ruby source for the list itself). One extra model id is
 //! always accepted on top of that live list — see [`DEFAULT_MODEL`].
 //!
@@ -40,7 +40,7 @@
 //! pass through **allowlist projections** ([`project_balances`] & co.)
 //! before becoming tool messages: everything the model sees is appended to
 //! `messages` and shipped inside the next turn's `buyer_note` to the
-//! OpenRouter seller — a third party — so no on-chain data (txids,
+//! AI Inference seller — a third party — so no on-chain data (txids,
 //! tx hashes, addresses) may ever appear in a wallet tool result, in
 //! either direction. Order ids, amounts, statuses, and spending limits
 //! only. Raw-address sends (`send_usdc` / `send_zcash`) are deliberately
@@ -89,10 +89,13 @@ use overpay_sdk::models::Cents;
 use overpay_sdk::CreateOrder;
 use owallet_overpay::OverpayError;
 
-/// The OpenRouter Inference listing's seller and title — how `/v1` (and
-/// `owallet install`) find it in the catalog.
-pub const OPENROUTER_SELLER_SLUG: &str = "openrouter-bot";
-pub const OPENROUTER_LISTING_TITLE: &str = "OpenRouter Inference";
+/// The AI Inference listing's seller and title — how `/v1` (and
+/// `owallet install`) find it in the catalog. They mirror the bot's
+/// `preferred_slug` in `bots/bot_manager/lib/bots/ai_inference/bot.rb` and
+/// the `sells` title in its `listings/ai_inference_listing.rb`; change them
+/// together.
+pub const INFERENCE_SELLER_SLUG: &str = "ai-inference";
+pub const INFERENCE_LISTING_TITLE: &str = "AI Inference";
 const PYTHON_SELLER_SLUG: &str = "exec";
 const PYTHON_LISTING_TITLE: &str = "Run Python Code";
 pub(crate) const RUN_PYTHON_TOOL_NAME: &str = "run_python";
@@ -113,15 +116,15 @@ const BUY_CREDITS_TOOL: &str = "buy_credits";
 /// may move (cumulative across every tool call in one chat completion).
 /// [`MAX_TOOL_ITERATIONS`] bounds how many turns a request gets; this
 /// bounds the dollars a prompt-injected or confused model can spend within
-/// them. Chat's own internal orders (the OpenRouter turn, `run_python`)
+/// them. Chat's own internal orders (the inference turn, `run_python`)
 /// are not counted *here* — per request they're bounded by the iteration
 /// cap — but they do count against the key's **daily budget**, which
 /// bounds everything the key costs per day.
 const DEFAULT_SPEND_CAP_USD: f64 = 20.0;
 /// Environment variable overriding [`DEFAULT_SPEND_CAP_USD`].
 const SPEND_CAP_ENV: &str = "OWALLET_V1_SPEND_CAP_USD";
-/// Set to `1` to send a `session_id` in OpenRouter buyer notes. Off by
-/// default: before fathom-x/overpay#445 is deployed, the OpenRouter listing
+/// Set to `1` to send a `session_id` in inference buyer notes. Off by
+/// default: before fathom-x/overpay#445 is deployed, the AI Inference listing
 /// fails any order whose buyer note carries an unknown key. Turn it on per
 /// environment once Overpay confirms that deploy.
 const SESSION_ID_ENV: &str = "OWALLET_V1_SESSION_ID";
@@ -141,7 +144,7 @@ const ORDER_SESSION_HEADER: &str = "x-order-session-id";
 pub const SPEND_LIMIT_HEADER: &str = "x-owallet-spend-limit-usd";
 /// Request header carrying the buyer's per-message limit (norm's `/budget`
 /// → "Per-message limit"): the most any single order this request places —
-/// each OpenRouter turn, each tool purchase — may authorize or cost, in
+/// each inference turn, each tool purchase — may authorize or cost, in
 /// USD. A turn that can't be sent within it is refused before any order,
 /// with what it would need. Combined with [`SPEND_LIMIT_HEADER`] (the lower
 /// of the two applies).
@@ -160,7 +163,7 @@ pub const TOOLS_HEADER: &str = "x-owallet-tools";
 /// `GET /v1/models` always lists it, first. No OpenRouter model id ever
 /// takes this shape (every real one is `vendor/model-name`), so it can't
 /// collide. It's forwarded to the listing's `buyer_note.model` as-is —
-/// `OpenrouterInferenceListing#coerce_model` already treats any string
+/// `AiInferenceListing#coerce_model` already treats any string
 /// outside its own `MODEL_OPTIONS` (this one included) as "use my own
 /// default", the same as an unlisted or stale model id would be, and
 /// resolves it to a real, concrete model id before it ever reaches
@@ -170,7 +173,7 @@ pub const TOOLS_HEADER: &str = "x-owallet-tools";
 /// `commands::install::build_provider_entries` in the `owallet` crate.
 pub const DEFAULT_MODEL: &str = "default";
 
-/// Hard cap on OpenRouter turns per chat completion request. Was 4 when
+/// Hard cap on inference turns per chat completion request. Was 4 when
 /// the only tool was `run_python` and every iteration implied a second
 /// paid order; most iterations are now cheap read-only wallet/marketplace
 /// calls, and the full purchase loop (browse → get_listing → create_order
@@ -183,7 +186,7 @@ pub const DEFAULT_MODEL: &str = "default";
 /// forcing the model to report what it actually did.
 const MAX_TOOL_ITERATIONS: u32 = 10;
 
-/// How long a single order (an OpenRouter turn, or a run_python execution)
+/// How long a single order (an inference turn, or a run_python execution)
 /// waits to finish before giving up. OpenAI's own API has no
 /// server-advertised timeout (that's a client-side concern), but
 /// *something* has to bound how long we hold the HTTP connection open for
@@ -213,7 +216,7 @@ pub(crate) fn poll_interval() -> Duration {
 /// environment — neither can be a literal constant — but it never changes
 /// for a given Overpay instance during a process's lifetime, so a plain
 /// cache (no invalidation) is enough.
-static OPENROUTER_LISTING_ID: OnceCell<String> = OnceCell::const_new();
+static INFERENCE_LISTING_ID: OnceCell<String> = OnceCell::const_new();
 static PYTHON_LISTING_ID: OnceCell<String> = OnceCell::const_new();
 
 /// Axum state: the wallet's shared `McpState` plus this endpoint's own
@@ -240,7 +243,7 @@ struct Ctx {
     /// a wallet-level dashboard setting takes precedence per request via
     /// [`effective_spend_cap`].
     spend_cap_usd: f64,
-    /// Whether OpenRouter buyer notes carry a `session_id` ([`SESSION_ID_ENV`]).
+    /// Whether inference buyer notes carry a `session_id` ([`SESSION_ID_ENV`]).
     send_session_id: bool,
     /// This request's opaque OpenRouter `session_id`, when one applies.
     /// Set per request; `None` at construction.
@@ -564,7 +567,7 @@ struct ModelPricing {
     /// listing; it mirrors the seller bot's `MIN_CHARGE_CENTS`.
     min_charge: f64,
     /// The variant's minimum commitment, in USD: the least a turn on this
-    /// model may be authorized for (see `size_openrouter_authorization`).
+    /// model may be authorized for (see `size_inference_authorization`).
     #[serde(skip_serializing_if = "Option::is_none")]
     min_authorization: Option<f64>,
     basis: &'static str,
@@ -580,7 +583,7 @@ struct LongContextPricing {
 }
 
 /// See [`ModelPricing::min_charge`].
-const OPENROUTER_MIN_CHARGE_USD: f64 = 0.0;
+const INFERENCE_MIN_CHARGE_USD: f64 = 0.0;
 
 #[derive(Serialize)]
 struct ModelList {
@@ -593,7 +596,7 @@ async fn list_models(
     headers: HeaderMap,
 ) -> Result<Json<ModelList>, OpenAiError> {
     let (mcp, _can_spend, _spend_key_id) = authenticate_provider_key(&ctx.mcp, &headers)?;
-    let listing = openrouter_listing(&mcp).await?;
+    let listing = inference_listing(&mcp).await?;
     // Always offered, first — see `DEFAULT_MODEL`'s doc comment. The seller
     // picks what it resolves to, so it has no price of its own.
     let mut data = vec![model_object(DEFAULT_MODEL.to_string())];
@@ -620,11 +623,11 @@ fn model_object(id: String) -> ModelObject {
 /// The curated model list, read live off the listing's own
 /// `buyer_note_schema` rather than duplicated here — see the module doc.
 async fn resolve_models(state: &McpState) -> Result<Vec<String>, OpenAiError> {
-    Ok(model_ids(&openrouter_listing(state).await?))
+    Ok(model_ids(&inference_listing(state).await?))
 }
 
-async fn openrouter_listing(state: &McpState) -> Result<Value, OpenAiError> {
-    let listing_id = resolve_openrouter_listing_id(state).await?;
+async fn inference_listing(state: &McpState) -> Result<Value, OpenAiError> {
+    let listing_id = resolve_inference_listing_id(state).await?;
     Ok(state.overpay.get_listing_value(&listing_id).await?)
 }
 
@@ -706,7 +709,7 @@ fn model_pricing(card: &Value) -> Option<ModelPricing> {
         cache_read: num(card, "cache_read_cents_per_mtok").map(usd),
         request: num(card, "request_cents").map(usd),
         long_context,
-        min_charge: OPENROUTER_MIN_CHARGE_USD,
+        min_charge: INFERENCE_MIN_CHARGE_USD,
         min_authorization: None,
         basis: "list",
         as_of: card
@@ -716,12 +719,12 @@ fn model_pricing(card: &Value) -> Option<ModelPricing> {
     })
 }
 
-async fn resolve_openrouter_listing_id(state: &McpState) -> Result<String, OpenAiError> {
+async fn resolve_inference_listing_id(state: &McpState) -> Result<String, OpenAiError> {
     resolve_listing_id_cached(
         state,
-        OPENROUTER_SELLER_SLUG,
-        OPENROUTER_LISTING_TITLE,
-        &OPENROUTER_LISTING_ID,
+        INFERENCE_SELLER_SLUG,
+        INFERENCE_LISTING_TITLE,
+        &INFERENCE_LISTING_ID,
     )
     .await
 }
@@ -1708,7 +1711,7 @@ fn project_listing_detail(data: &Value) -> Value {
 /// Allowlist projection of `get_wallet_orders`: one compact row per order,
 /// plus the pagination cursor. Each raw row carries `settlement_tx_hash`,
 /// `order_url`, tracking fields, and the `buyer_note` (an arbitrary
-/// seller-bound payload that should not be re-shipped to the OpenRouter
+/// seller-bound payload that should not be re-shipped to the AI Inference
 /// seller) — none of that exists here.
 fn project_orders_list(data: &Value) -> Value {
     let rows = data
@@ -2066,7 +2069,7 @@ impl ChatCompletionRequest {
 }
 
 /// Anthropic accepts at most 4 `cache_control` breakpoints per request, and
-/// the OpenRouter listing adds one of its own (on the newest message) for
+/// the AI Inference listing adds one of its own (on the newest message) for
 /// `anthropic/*` models — so at most this many client markers are forwarded.
 const MAX_CLIENT_CACHE_MARKERS: usize = 3;
 
@@ -2214,7 +2217,7 @@ fn derive_session_id(secret: &[u8], client_key: &str) -> String {
     crate::state::session_label(secret, client_key)
 }
 
-/// The `session_id` this request's OpenRouter orders should carry, or
+/// The `session_id` this request's inference orders should carry, or
 /// `None`. With a client conversation key: its HMAC. Without one: a random
 /// id for the server-side loop (so at least that request's own orders stick
 /// together), nothing for passthrough (OpenRouter's opening-message hash
@@ -2238,7 +2241,7 @@ fn request_session_id(ctx: &Ctx, client_key: Option<&str>, passthrough: bool) ->
     }
 }
 
-/// Add this request's `session_id` to an OpenRouter buyer note. OpenRouter
+/// Add this request's `session_id` to an inference buyer note. OpenRouter
 /// listing orders only — `run_python` and listing tools still reject
 /// unknown buyer-note keys.
 fn with_session_id(mut buyer_note: Value, ctx: &Ctx) -> Value {
@@ -2381,7 +2384,7 @@ async fn validate_request(
 
 /// Create and pay for an order against any listing this endpoint knows
 /// about, via merchant credits under `seller_slug`. Shared by the
-/// OpenRouter turn and each `run_python` tool execution — the only thing
+/// inference turn and each `run_python` tool execution — the only thing
 /// that differs between them is which listing/seller/buyer_note is used.
 async fn place_and_pay_order(
     state: &McpState,
@@ -2401,11 +2404,11 @@ async fn place_and_pay_order(
             .map_err(|e| OpenAiError::internal(format!("could not encode buyer_note: {e}")))?,
     };
 
-    // A metered OpenRouter turn: authorize what it needs up front (or the
+    // A metered inference turn: authorize what it needs up front (or the
     // seller's exposure guard refuses it), never more than the buyer's cap,
     // and refuse here — before any order — a turn the cap can't cover.
-    if seller_slug == OPENROUTER_SELLER_SLUG {
-        match openrouter_authorization(state, listing_id, buyer_note, cap).await {
+    if seller_slug == INFERENCE_SELLER_SLUG {
+        match inference_authorization(state, listing_id, buyer_note, cap).await {
             Some(TurnAuthorization::OverCap {
                 needed_cents,
                 input_tokens,
@@ -2565,17 +2568,17 @@ fn group_thousands(n: u64) -> String {
     out
 }
 
-/// Mirrors the OpenRouter listing's exposure guard: input bytes per token.
-const OPENROUTER_INPUT_BYTES_PER_TOKEN: f64 = 3.0;
+/// Mirrors the AI Inference listing's exposure guard: input bytes per token.
+const INFERENCE_INPUT_BYTES_PER_TOKEN: f64 = 3.0;
 /// Output a sized turn is authorized for when the request sets no lower
 /// `max_tokens`. The guard caps a turn's output at whatever its
 /// authorization has left after the input, so authorizing only the
 /// guard's 256-token floor would truncate every long-context reply. The
 /// charge is the actual cost; the rest of the hold goes back as credits.
-const OPENROUTER_OUTPUT_ALLOWANCE_TOKENS: f64 = 8192.0;
+const INFERENCE_OUTPUT_ALLOWANCE_TOKENS: f64 = 8192.0;
 /// Mirrors the guard's MIN_OUTPUT_TOKENS: the reply it reserves before it
 /// will run a turn at all, so the least a turn can be authorized for.
-const OPENROUTER_MIN_OUTPUT_TOKENS: f64 = 256.0;
+const INFERENCE_MIN_OUTPUT_TOKENS: f64 = 256.0;
 /// How long a fetched listing (its variants' rate cards) is reused.
 const LISTING_RATES_TTL: Duration = Duration::from_secs(300);
 
@@ -2658,7 +2661,7 @@ fn lower_cap(per_message_usd: Option<f64>, conversation_usd: Option<f64>) -> Opt
     }
 }
 
-/// What an OpenRouter turn should authorize.
+/// What an inference turn should authorize.
 #[derive(Debug, PartialEq)]
 enum TurnAuthorization {
     /// The listing's default authorization covers the turn (and fits the
@@ -2677,10 +2680,10 @@ enum TurnAuthorization {
     },
 }
 
-/// The authorization an OpenRouter turn needs, sized from the model's
+/// The authorization an inference turn needs, sized from the model's
 /// published rate card and bounded by `cap`. `None` when the listing, the
 /// model or its rates are unknown — the turn is then placed as before.
-async fn openrouter_authorization(
+async fn inference_authorization(
     state: &McpState,
     listing_id: &str,
     buyer_note: &Value,
@@ -2704,14 +2707,14 @@ async fn openrouter_authorization(
             v
         }
     };
-    size_openrouter_authorization(&listing, buyer_note, cap.map(|c| c.cents))
+    size_inference_authorization(&listing, buyer_note, cap.map(|c| c.cents))
 }
 
-/// Pure sizing half of [`openrouter_authorization`]: the seller guard's
+/// Pure sizing half of [`inference_authorization`]: the seller guard's
 /// arithmetic (input at the model's rate card, its long-context tier when
 /// the prompt reaches one, plus output, times the markup) against the
 /// listing's default authorization, its bounds, and the buyer's cap.
-fn size_openrouter_authorization(
+fn size_inference_authorization(
     listing: &Value,
     buyer_note: &Value,
     cap_cents: Option<i64>,
@@ -2735,7 +2738,7 @@ fn size_openrouter_authorization(
     ]))
     .ok()?
     .len() as f64;
-    let input_tokens = (bytes / OPENROUTER_INPUT_BYTES_PER_TOKEN).ceil();
+    let input_tokens = (bytes / INFERENCE_INPUT_BYTES_PER_TOKEN).ceil();
 
     let (mut input_rate, mut output_rate) = (
         num(rates, "input_cents_per_mtok")?,
@@ -2753,15 +2756,15 @@ fn size_openrouter_authorization(
         .get("max_tokens")
         .and_then(Value::as_f64)
         .filter(|t| *t > 0.0)
-        .map_or(OPENROUTER_OUTPUT_ALLOWANCE_TOKENS, |t| {
-            t.min(OPENROUTER_OUTPUT_ALLOWANCE_TOKENS)
+        .map_or(INFERENCE_OUTPUT_ALLOWANCE_TOKENS, |t| {
+            t.min(INFERENCE_OUTPUT_ALLOWANCE_TOKENS)
         });
     let markup = 1.0 + num(rates, "markup").unwrap_or(0.2);
     let input_cost = input_rate * input_tokens / 1e6 + num(rates, "request_cents").unwrap_or(0.0);
     // What a roomy reply needs, and the least the seller's guard runs the
     // turn for at all (its MIN_OUTPUT_TOKENS reserve).
     let wanted = ((input_cost + output_rate * output_tokens / 1e6) * markup).ceil();
-    let least = ((input_cost + output_rate * OPENROUTER_MIN_OUTPUT_TOKENS / 1e6) * markup).ceil();
+    let least = ((input_cost + output_rate * INFERENCE_MIN_OUTPUT_TOKENS / 1e6) * markup).ceil();
 
     let min =
         num(variant, "min_authorization_cents").or_else(|| num(data, "min_authorization_cents"));
@@ -2822,7 +2825,7 @@ fn size_openrouter_authorization(
 
 /// Net a metered order's settlement refund back out of the key's daily
 /// budget. The pay step records the gross deposit; a metered listing
-/// (OpenRouter inference) settles the order down to its actual cost
+/// (AI Inference) settles the order down to its actual cost
 /// right after delivery and states that final `charged_cents` in the
 /// delivered payload, so the difference goes back to the budget — the
 /// budget stays a bound on what the key actually cost, not on gross
@@ -2876,7 +2879,7 @@ async fn get_order_resolved(
 
 /// Poll an order silently until it reaches a terminal status. Used by the
 /// buffered path and by every `run_python` tool execution (which never
-/// streams — the caller only sees the outer OpenRouter turns' text). The
+/// streams — the caller only sees the outer inference turns' text). The
 /// streaming path's own per-turn loop duplicates the polling shape rather
 /// than calling this, since it also has to diff `partial_content` and
 /// yield SSE events along the way.
@@ -2931,7 +2934,7 @@ pub(crate) fn micros_as_cents_json(micros: i64) -> Value {
 }
 
 /// Everything one chat completion spent and consumed, accumulated across
-/// every order it placed — the OpenRouter turns *and* the tool calls, each
+/// every order it placed — the inference turns *and* the tool calls, each
 /// of which is a separately paid marketplace order. A tool call can cost
 /// far more than the inference around it (image generation), so a total
 /// that counted only the model turns would understate real spend badly.
@@ -2972,9 +2975,9 @@ impl TurnUsage {
             .saturating_add(cents_to_micros(net_charged_cents(snap, redeemed_cents)));
     }
 
-    /// Token counts from an OpenRouter delivery. Tool-call orders have no
+    /// Token counts from an inference delivery. Tool-call orders have no
     /// tokens of their own — only their cost lands on the turn.
-    fn add_tokens(&mut self, delivered: &OpenRouterDelivered) {
+    fn add_tokens(&mut self, delivered: &InferenceDelivered) {
         self.prompt_tokens = self.prompt_tokens.saturating_add(delivered.prompt_tokens);
         self.completion_tokens = self
             .completion_tokens
@@ -3026,9 +3029,9 @@ impl TurnUsage {
     }
 }
 
-/// What the OpenRouter listing actually delivered, parsed out of the order
+/// What the AI Inference listing actually delivered, parsed out of the order
 /// snapshot's (JSON-string-encoded) `delivered_content`.
-struct OpenRouterDelivered {
+struct InferenceDelivered {
     text: String,
     model: String,
     error: bool,
@@ -3049,9 +3052,9 @@ fn sum_known(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     }
 }
 
-fn extract_openrouter_delivered(snap: &Value) -> Result<OpenRouterDelivered, OpenAiError> {
+fn extract_inference_delivered(snap: &Value) -> Result<InferenceDelivered, OpenAiError> {
     let inner = delivered_content_json(snap)?;
-    Ok(OpenRouterDelivered {
+    Ok(InferenceDelivered {
         text: inner
             .get("description")
             .and_then(Value::as_str)
@@ -3189,7 +3192,7 @@ fn rejection_error(order: &Value) -> Option<OpenAiError> {
 /// A seller's error *delivery* (sellers before Overpay rejections deliver
 /// `{error: true, description, reason_code}` instead) as the same errors
 /// [`rejection_error`] gives a rejection.
-fn delivered_error(delivered: OpenRouterDelivered) -> OpenAiError {
+fn delivered_error(delivered: InferenceDelivered) -> OpenAiError {
     match delivered.reason_code.as_deref() {
         Some("authorization_too_low") => OpenAiError::limit(
             ErrorCode::AuthorizationTooLow,
@@ -3400,7 +3403,7 @@ struct ChatMessageOut {
     tool_calls: Option<Vec<Value>>,
 }
 
-/// One OpenRouter turn's outcome once the agentic loop is done: either a
+/// One inference turn's outcome once the agentic loop is done: either a
 /// final answer, or (internally, before the loop decides) a tool call to
 /// execute and feed back. `tool_calls` is non-empty only in passthrough
 /// mode, where the caller executes them.
@@ -3412,8 +3415,8 @@ struct AgentResult {
     usage: TurnUsage,
 }
 
-/// Runs the OpenRouter <-> `run_python` loop to a final answer: place +
-/// pay for an OpenRouter turn, and if it comes back with tool_calls,
+/// Runs the inference <-> `run_python` loop to a final answer: place +
+/// pay for an inference turn, and if it comes back with tool_calls,
 /// execute each (a real, separately-paid order against the Python
 /// listing), record the assistant's tool-call turn and each tool's result
 /// on `messages`, and loop. Ends when a turn produces no tool_calls, or
@@ -3424,7 +3427,7 @@ async fn run_agentic_loop(
     mut messages: Vec<Value>,
     requested_model: &str,
 ) -> Result<AgentResult, OpenAiError> {
-    let listing_id = resolve_openrouter_listing_id(&ctx.mcp).await?;
+    let listing_id = resolve_inference_listing_id(&ctx.mcp).await?;
     let defs = tool_defs(ctx, ctx.can_spend).await?;
     let mut ledger = SpendLedger::new(effective_spend_cap(ctx));
     let mut last_model = requested_model.to_string();
@@ -3450,7 +3453,7 @@ async fn run_agentic_loop(
             &ctx.mcp,
             auth,
             &listing_id,
-            OPENROUTER_SELLER_SLUG,
+            INFERENCE_SELLER_SLUG,
             &buyer_note,
             ctx.key_id.as_deref(),
             turn_cap(ctx),
@@ -3460,7 +3463,7 @@ async fn run_agentic_loop(
             wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
         net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
         usage.add_order(&snap, redeemed_cents);
-        let delivered = extract_openrouter_delivered(&snap)?;
+        let delivered = extract_inference_delivered(&snap)?;
         if delivered.error {
             return Err(delivered_error(delivered));
         }
@@ -3510,7 +3513,7 @@ async fn run_agentic_loop(
         &ctx.mcp,
         auth,
         &listing_id,
-        OPENROUTER_SELLER_SLUG,
+        INFERENCE_SELLER_SLUG,
         &buyer_note,
         ctx.key_id.as_deref(),
         turn_cap(ctx),
@@ -3519,7 +3522,7 @@ async fn run_agentic_loop(
     let snap = wait_for_order_terminal(&ctx.mcp, auth, &order_id, ctx.timeout, ctx.poll).await?;
     net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
     usage.add_order(&snap, redeemed_cents);
-    let delivered = extract_openrouter_delivered(&snap)?;
+    let delivered = extract_inference_delivered(&snap)?;
     if delivered.error {
         return Err(delivered_error(delivered));
     }
@@ -3579,7 +3582,7 @@ async fn run_passthrough_turn(
     tools: &[Value],
     tool_choice: Option<&Value>,
 ) -> Result<AgentResult, OpenAiError> {
-    let listing_id = resolve_openrouter_listing_id(&ctx.mcp).await?;
+    let listing_id = resolve_inference_listing_id(&ctx.mcp).await?;
     let mut buyer_note = with_session_id(
         passthrough_buyer_note(requested_model, messages, tools),
         ctx,
@@ -3593,7 +3596,7 @@ async fn run_passthrough_turn(
         &ctx.mcp,
         auth,
         &listing_id,
-        OPENROUTER_SELLER_SLUG,
+        INFERENCE_SELLER_SLUG,
         &buyer_note,
         ctx.key_id.as_deref(),
         turn_cap(ctx),
@@ -3603,7 +3606,7 @@ async fn run_passthrough_turn(
     net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
     let mut usage = TurnUsage::default();
     usage.add_order(&snap, redeemed_cents);
-    let delivered = extract_openrouter_delivered(&snap)?;
+    let delivered = extract_inference_delivered(&snap)?;
     if delivered.error {
         return Err(delivered_error(delivered));
     }
@@ -3757,23 +3760,23 @@ fn error_events(id: &str, model: &str, err: OpenAiError) -> [Event; 3] {
 /// executing tool calls, yielding chunks — runs as axum drains the
 /// response body, not when this function is called.
 ///
-/// Loops over OpenRouter turns exactly like [`run_agentic_loop`] (place +
+/// Loops over inference turns exactly like [`run_agentic_loop`] (place +
 /// pay, and if the turn ends in tool_calls, execute each — a real,
 /// separately-paid order per call — and go again), but streams each turn's
 /// text as it's produced instead of returning it all at once. `streamed`
 /// resets to 0 at the start of every new turn — `partial_content` belongs
 /// to one order, not the whole conversation. A `run_python` execution
 /// streams too: the `code_executor` bot publishes its own live stdout via
-/// `partial_content` the same way the OpenRouter listing streams text (see
+/// `partial_content` the same way the AI Inference listing streams text (see
 /// PR #382), so this polls and forwards it — wrapped in a markdown code
 /// fence, since to the client it's just more assistant content — instead
 /// of leaving the connection silent for as long as the sandbox runs. Any
-/// poll (OpenRouter or Python) that has nothing new to stream sends an SSE
+/// poll (inference or Python) that has nothing new to stream sends an SSE
 /// comment line instead: invisible to a client's content parsing, but
 /// enough to keep an idle-timeout intermediary from thinking the
 /// connection died.
 ///
-/// `id` is fixed to the *first* OpenRouter order's id and reused for every
+/// `id` is fixed to the *first* inference order's id and reused for every
 /// chunk of the entire response, including later internal turns and any
 /// tool execution — real OpenAI-compatible clients expect one response's
 /// `id` to be stable across every chunk they receive, even though this
@@ -3797,7 +3800,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 return;
             }
         };
-        let listing_id = match resolve_openrouter_listing_id(&ctx.mcp).await {
+        let listing_id = match resolve_inference_listing_id(&ctx.mcp).await {
             Ok(id) => id,
             Err(e) => {
                 for ev in error_events("error", &requested_model, e) { yield Ok(ev); }
@@ -3815,7 +3818,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             if let Some(choice) = req.tool_choice.as_ref().filter(|_| !tools.is_empty()) {
                 buyer_note["tool_choice"] = choice.clone();
             }
-            let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
+            let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, INFERENCE_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
                 Ok(placed) => placed,
                 Err(e) => {
                     for ev in error_events("error", &requested_model, e) { yield Ok(ev); }
@@ -3861,7 +3864,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             let mut usage = TurnUsage::default();
             usage.add_order(&snap, redeemed_cents);
 
-            let delivered = match extract_openrouter_delivered(&snap) {
+            let delivered = match extract_inference_delivered(&snap) {
                 Ok(d) => d,
                 Err(e) => {
                     for ev in error_events(&order_id, &requested_model, e) { yield Ok(ev); }
@@ -3922,7 +3925,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
                 "tools": defs.clone(),
                 "tool_choice": "auto",
             }), &ctx);
-            let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
+            let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, INFERENCE_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
                 Ok(placed) => placed,
                 Err(e) => {
                     let id = if response_id.is_empty() { "error" } else { response_id.as_str() };
@@ -3971,7 +3974,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
             usage.add_order(&snap, redeemed_cents);
 
-            let delivered = match extract_openrouter_delivered(&snap) {
+            let delivered = match extract_inference_delivered(&snap) {
                 Ok(d) => d,
                 Err(e) => {
                     for ev in error_events(&response_id, &last_model, e) { yield Ok(ev); }
@@ -4177,7 +4180,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
             "tools": defs.clone(),
             "tool_choice": "none",
         }), &ctx);
-        let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, OPENROUTER_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
+        let (order_id, redeemed_cents) = match place_and_pay_order(&ctx.mcp, &auth, &listing_id, INFERENCE_SELLER_SLUG, &buyer_note, ctx.key_id.as_deref(), turn_cap(&ctx)).await {
             Ok(placed) => placed,
             Err(e) => {
                 let id = if response_id.is_empty() { "error" } else { response_id.as_str() };
@@ -4224,7 +4227,7 @@ fn stream_chat_completion(ctx: Ctx, req: ChatCompletionRequest) -> Response {
         };
         net_key_budget_from_delivery(&ctx.mcp, ctx.key_id.as_deref(), &snap, redeemed_cents);
         usage.add_order(&snap, redeemed_cents);
-        let delivered = match extract_openrouter_delivered(&snap) {
+        let delivered = match extract_inference_delivered(&snap) {
             Ok(d) => d,
             Err(e) => {
                 for ev in error_events(&response_id, &last_model, e) { yield Ok(ev); }
@@ -4376,8 +4379,8 @@ mod tests {
         assert_eq!(client_conversation_key(&blank, &HeaderMap::new()), None);
     }
 
-    /// Every OpenRouter buyer note in the request, parsed.
-    async fn openrouter_notes(overpay: &MockServer) -> Vec<Value> {
+    /// Every inference buyer note in the request, parsed.
+    async fn inference_notes(overpay: &MockServer) -> Vec<Value> {
         overpay
             .received_requests()
             .await
@@ -4440,10 +4443,10 @@ mod tests {
         }))
         .await
         .assert_status_ok();
-        openrouter_notes(&overpay)
+        inference_notes(&overpay)
             .await
             .pop()
-            .expect("an OpenRouter order")
+            .expect("an inference order")
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4549,12 +4552,12 @@ mod tests {
         // Two turns of one request: a cache write, then a hit.
         let mut usage = TurnUsage::default();
         usage.add_tokens(
-            &extract_openrouter_delivered(&delivered(0, 1900))
+            &extract_inference_delivered(&delivered(0, 1900))
                 .ok()
                 .unwrap(),
         );
         usage.add_tokens(
-            &extract_openrouter_delivered(&delivered(1900, 0))
+            &extract_inference_delivered(&delivered(1900, 0))
                 .ok()
                 .unwrap(),
         );
@@ -4569,7 +4572,7 @@ mod tests {
             "usage": {"prompt_tokens": 3, "completion_tokens": 1},
         })).unwrap()}});
         let mut usage = TurnUsage::default();
-        usage.add_tokens(&extract_openrouter_delivered(&bare).ok().unwrap());
+        usage.add_tokens(&extract_inference_delivered(&bare).ok().unwrap());
         // Unknown, not zero: the field is absent.
         assert!(usage.to_json()["prompt_tokens_details"]
             .get("cached_tokens")
@@ -4610,13 +4613,13 @@ mod tests {
     const MODELS: &[&str] = &["openai/gpt-5-mini", "anthropic/claude-haiku-4.5"];
     const ABANDON_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon \
                                      abandon abandon abandon abandon about";
-    const OPENROUTER_ID: &str = "L1";
+    const INFERENCE_ID: &str = "L1";
     const PYTHON_ID: &str = "PY1";
 
-    fn openrouter_listing_body(listing_id: &str) -> Value {
+    fn inference_listing_body(listing_id: &str) -> Value {
         json!({"data": {
             "id": listing_id,
-            "title": "OpenRouter Inference",
+            "title": "AI Inference",
             "buyer_note_schema": {
                 "type": "object",
                 "properties": {
@@ -4648,7 +4651,7 @@ mod tests {
 
     /// Every request resolves *both* listings unconditionally (the
     /// run_python tool definition is built up front, before the first
-    /// OpenRouter turn even runs) — so every completions test needs both
+    /// inference turn even runs) — so every completions test needs both
     /// stubbed, not just the one it's actually exercising. Query-param
     /// matching on `seller` disambiguates the two list calls; exact `path`
     /// matching on the by-id calls avoids one regex catching both ids.
@@ -4705,18 +4708,12 @@ mod tests {
     }
 
     async fn mount_both_listings(overpay: &MockServer) {
-        mount_seller_listing(
-            overpay,
-            "openrouter-bot",
-            OPENROUTER_ID,
-            "OpenRouter Inference",
-        )
-        .await;
+        mount_seller_listing(overpay, "ai-inference", INFERENCE_ID, "AI Inference").await;
         mount_seller_listing(overpay, "exec", PYTHON_ID, "Run Python Code").await;
         Mock::given(method("GET"))
-            .and(path(format!("/api/v1/listings/{OPENROUTER_ID}")))
+            .and(path(format!("/api/v1/listings/{INFERENCE_ID}")))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(openrouter_listing_body(OPENROUTER_ID)),
+                ResponseTemplate::new(200).set_body_json(inference_listing_body(INFERENCE_ID)),
             )
             .mount(overpay)
             .await;
@@ -4744,7 +4741,7 @@ mod tests {
     }
 
     async fn mount_fully_paid(overpay: &MockServer, order_id: &str) {
-        mount_fully_paid_for(overpay, order_id, "openrouter-bot").await;
+        mount_fully_paid_for(overpay, order_id, "ai-inference").await;
     }
 
     async fn mount_fully_paid_for(overpay: &MockServer, order_id: &str, seller_slug: &str) {
@@ -4778,7 +4775,7 @@ mod tests {
 
     /// The exact `run_python` tool definition `run_python_tool_def` builds
     /// from `python_listing_body`'s fixture schema+description — every
-    /// OpenRouter turn carries this in `buyer_note.tools`, so a test that
+    /// inference turn carries this in `buyer_note.tools`, so a test that
     /// asserts on the exact buyer_note string needs it too.
     fn expected_run_python_tool_def() -> Value {
         json!({
@@ -4820,7 +4817,7 @@ mod tests {
         .unwrap()
     }
 
-    /// A realistic OpenRouter delivery. The `usage` block mirrors what the
+    /// A realistic inference delivery. The `usage` block mirrors what the
     /// seller actually states (see the metered-settlement test below), so
     /// the turn-usage accounting is exercised by every test that delivers.
     fn delivered_content(description: &str, model: &str, error: bool) -> String {
@@ -4918,7 +4915,7 @@ mod tests {
             .and(path("/api/v1/merchant_credits"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": [{
-                    "holder_type": "user", "seller_slug": "openrouter-bot",
+                    "holder_type": "user", "seller_slug": "ai-inference",
                     "balance_cents": 480, "id": "MC1"
                 }]
             })))
@@ -4942,7 +4939,7 @@ mod tests {
             assert!(body.get(leak).is_none(), "{leak} must not leak: {body}");
         }
         let credits = body["merchant_credits"].as_array().expect("credits");
-        assert_eq!(credits[0]["seller_slug"], "openrouter-bot");
+        assert_eq!(credits[0]["seller_slug"], "ai-inference");
         assert_eq!(credits[0]["balance_cents"], 480);
         assert!(
             credits[0].get("id").is_none(),
@@ -5044,14 +5041,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn models_carry_each_variants_price_context_and_availability() {
         let overpay = MockServer::start().await;
-        mount_seller_listing(
-            &overpay,
-            "openrouter-bot",
-            OPENROUTER_ID,
-            "OpenRouter Inference",
-        )
-        .await;
-        let mut listing = openrouter_listing_body(OPENROUTER_ID);
+        mount_seller_listing(&overpay, "ai-inference", INFERENCE_ID, "AI Inference").await;
+        let mut listing = inference_listing_body(INFERENCE_ID);
         listing["data"]["variants"] = json!([
             {
                 "key": "openai/gpt-5-mini", "title": "OpenAI: GPT-5 Mini", "active": true,
@@ -5068,7 +5059,7 @@ mod tests {
              "active": false, "rate_card": {}},
         ]);
         Mock::given(method("GET"))
-            .and(path(format!("/api/v1/listings/{OPENROUTER_ID}")))
+            .and(path(format!("/api/v1/listings/{INFERENCE_ID}")))
             .respond_with(ResponseTemplate::new(200).set_body_json(listing))
             .mount(&overpay)
             .await;
@@ -5181,7 +5172,7 @@ mod tests {
             .mount(&overpay)
             .await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/merchant_credits/openrouter-bot/redeem"))
+            .and(path("/api/v1/merchant_credits/ai-inference/redeem"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {"status": "fully_paid", "amount_redeemed_cents": 2, "credit_balance_cents": 100}
             })))
@@ -5289,7 +5280,7 @@ mod tests {
             .mount(&overpay)
             .await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/merchant_credits/openrouter-bot/redeem"))
+            .and(path("/api/v1/merchant_credits/ai-inference/redeem"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {"status": "fully_paid", "amount_redeemed_cents": 2, "credit_balance_cents": 100}
             })))
@@ -5345,7 +5336,7 @@ mod tests {
             .mount(&overpay)
             .await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/merchant_credits/openrouter-bot/redeem"))
+            .and(path("/api/v1/merchant_credits/ai-inference/redeem"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {"status": "fully_paid", "amount_redeemed_cents": 2, "credit_balance_cents": 100}
             })))
@@ -5614,7 +5605,7 @@ mod tests {
             .mount(&overpay)
             .await;
         Mock::given(method("POST"))
-            .and(path("/api/v1/merchant_credits/openrouter-bot/redeem"))
+            .and(path("/api/v1/merchant_credits/ai-inference/redeem"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "data": {"status": "partial", "amount_redeemed_cents": 0,
                          "credit_balance_cents": 0, "message": "No available credits"}
@@ -5659,7 +5650,7 @@ mod tests {
                 "data": {
                     "id": "O3", "fulfillment_status": "delivered",
                     "delivered_content": delivered_content(
-                        "OpenRouter could not serve this request: model deprecated",
+                        "The model provider could not serve this request: model deprecated",
                         "openai/gpt-5-mini", true
                     ),
                 }
@@ -5900,21 +5891,21 @@ mod tests {
     }
 
     /// Routes `POST /api/v1/orders` to a fresh, incrementing order id per
-    /// listing (`OR-0`, `OR-1`, … for OpenRouter; `PY-0`, `PY-1`, … for the
+    /// listing (`OR-0`, `OR-1`, … for AI Inference; `PY-0`, `PY-1`, … for the
     /// Python listing) based on the request's `listing_id` — so a test
-    /// spanning multiple OpenRouter turns and tool executions can mount a
+    /// spanning multiple inference turns and tool executions can mount a
     /// distinct, deterministic GET response for each one.
     #[derive(Default)]
     struct OrderCreateRouter {
-        openrouter_calls: AtomicUsize,
+        inference_calls: AtomicUsize,
         python_calls: AtomicUsize,
         forecast_calls: AtomicUsize,
         /// The buyer_note of the last forecast order, for verbatim-string
         /// assertions (a `buyer_input :text` note must arrive unquoted).
         forecast_note: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
-        /// The buyer_note of the last OpenRouter order — passthrough tests
+        /// The buyer_note of the last inference order — passthrough tests
         /// assert the caller's tools rode it verbatim.
-        openrouter_note: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+        inference_note: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
     }
     impl Respond for OrderCreateRouter {
         fn respond(&self, req: &Request) -> ResponseTemplate {
@@ -5923,12 +5914,9 @@ mod tests {
                 .get("listing_id")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let id = if listing_id == OPENROUTER_ID {
-                *self.openrouter_note.lock().unwrap() = body.get("buyer_note").cloned();
-                format!(
-                    "OR-{}",
-                    self.openrouter_calls.fetch_add(1, Ordering::SeqCst)
-                )
+            let id = if listing_id == INFERENCE_ID {
+                *self.inference_note.lock().unwrap() = body.get("buyer_note").cloned();
+                format!("OR-{}", self.inference_calls.fetch_add(1, Ordering::SeqCst))
             } else if listing_id == PYTHON_ID {
                 format!("PY-{}", self.python_calls.fetch_add(1, Ordering::SeqCst))
             } else if listing_id == FORECAST_ID {
@@ -5960,26 +5948,26 @@ mod tests {
             })
             .mount(overpay)
             .await;
-        mount_redeem_fully_paid(overpay, "openrouter-bot").await;
+        mount_redeem_fully_paid(overpay, "ai-inference").await;
         mount_redeem_fully_paid(overpay, "exec").await;
         note
     }
 
-    /// Like [`mount_order_router`] but hands back the last OpenRouter
+    /// Like [`mount_order_router`] but hands back the last inference
     /// order's buyer_note (a JSON-encoded string — parse before asserting).
-    async fn mount_order_router_capturing_openrouter(
+    async fn mount_order_router_capturing_inference(
         overpay: &MockServer,
     ) -> std::sync::Arc<std::sync::Mutex<Option<Value>>> {
         let note = std::sync::Arc::new(std::sync::Mutex::new(None));
         Mock::given(method("POST"))
             .and(path("/api/v1/orders"))
             .respond_with(OrderCreateRouter {
-                openrouter_note: note.clone(),
+                inference_note: note.clone(),
                 ..Default::default()
             })
             .mount(overpay)
             .await;
-        mount_redeem_fully_paid(overpay, "openrouter-bot").await;
+        mount_redeem_fully_paid(overpay, "ai-inference").await;
         mount_redeem_fully_paid(overpay, "exec").await;
         note
     }
@@ -6128,13 +6116,13 @@ mod tests {
         let body: Value = res.json();
         assert_eq!(body["choices"][0]["message"]["content"], "The answer is 2.");
         assert_eq!(body["choices"][0]["finish_reason"], "stop");
-        // The chatcmpl id is the *last* OpenRouter order's id -- the turn
+        // The chatcmpl id is the *last* inference order's id -- the turn
         // that actually produced the answer -- not the first (tool-calling)
         // turn.
         assert_eq!(body["id"], "chatcmpl-OR-1");
 
         // Usage covers the whole turn, not just the turn that answered:
-        // three real orders were placed and paid (two OpenRouter turns plus
+        // three real orders were placed and paid (two inference turns plus
         // the run_python order), each redeeming the mock's 2¢. A tool order
         // carries no tokens of its own, so only the two model turns'
         // token counts land.
@@ -6189,7 +6177,7 @@ mod tests {
     async fn passthrough_returns_client_tool_calls_instead_of_executing() {
         let overpay = MockServer::start().await;
         mount_both_listings(&overpay).await;
-        let note = mount_order_router_capturing_openrouter(&overpay).await;
+        let note = mount_order_router_capturing_inference(&overpay).await;
 
         // The model calls the *caller's* tool. In server mode this name
         // would be rejected as unknown and looped on; in passthrough it
@@ -6254,7 +6242,7 @@ mod tests {
     async fn a_plain_completion_sends_no_tools_and_runs_one_turn() {
         let overpay = MockServer::start().await;
         mount_both_listings(&overpay).await;
-        let note = mount_order_router_capturing_openrouter(&overpay).await;
+        let note = mount_order_router_capturing_inference(&overpay).await;
         Mock::given(method("GET"))
             .and(path("/api/v1/orders/OR-0"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -6336,7 +6324,7 @@ mod tests {
     async fn passthrough_round_trips_tool_results_to_a_final_answer() {
         let overpay = MockServer::start().await;
         mount_both_listings(&overpay).await;
-        let note = mount_order_router_capturing_openrouter(&overpay).await;
+        let note = mount_order_router_capturing_inference(&overpay).await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/orders/OR-0"))
@@ -6392,7 +6380,7 @@ mod tests {
     async fn an_empty_tools_array_stays_in_server_mode() {
         let overpay = MockServer::start().await;
         mount_both_listings(&overpay).await;
-        let note = mount_order_router_capturing_openrouter(&overpay).await;
+        let note = mount_order_router_capturing_inference(&overpay).await;
 
         Mock::given(method("GET"))
             .and(path("/api/v1/orders/OR-0"))
@@ -6500,7 +6488,7 @@ mod tests {
         mount_both_listings(&overpay).await;
         mount_order_router(&overpay).await;
 
-        // Every OpenRouter turn calls the tool again -- the conversation
+        // Every inference turn calls the tool again -- the conversation
         // never converges to a final answer, and even the forced
         // tool_choice:"none" landing turn yields tool calls with no text
         // (this mock matches OR-10 too), so the cap error still fires.
@@ -6908,7 +6896,7 @@ mod tests {
 
     /// The Python tool order's own poll sequence: one partial chunk of live
     /// stdout, then delivered -- mirrors `SecondTurnStream` but for the
-    /// tool-execution leg rather than an OpenRouter turn.
+    /// tool-execution leg rather than an inference turn.
     struct PythonToolStream {
         calls: AtomicUsize,
     }
@@ -7104,7 +7092,7 @@ mod tests {
         );
         assert!(
             content.ends_with("The answer is 4."),
-            "the final OpenRouter turn's answer must still follow: {content:?}\n{text}"
+            "the final inference turn's answer must still follow: {content:?}\n{text}"
         );
     }
 
@@ -7843,7 +7831,7 @@ mod tests {
         // OR-2 (2¢) overshoots; the pay_order call then refuses on the
         // exhausted budget, and the loop breaks to the landing turn OR-3.
         // expect(1) on the acme redeem endpoint proves only the first
-        // settlement happened (chat orders redeem under openrouter-bot).
+        // settlement happened (chat orders redeem under ai-inference).
         for turn in ["OR-0", "OR-2"] {
             Mock::given(method("GET"))
                 .and(path(format!("/api/v1/orders/{turn}")))
@@ -8540,12 +8528,12 @@ mod tests {
         );
     }
 
-    /// The OpenRouter listing as metered pricing publishes it: a 25¢
+    /// The AI Inference listing as metered pricing publishes it: a 25¢
     /// deposit, one variant with a rate card ($3/M in, $15/M out, a pricier
     /// tier from 50k input tokens) and authorization bounds.
     fn metered_listing() -> Value {
         json!({"data": {
-            "id": OPENROUTER_ID, "pricing_mode": "metered", "price_cents": 25,
+            "id": INFERENCE_ID, "pricing_mode": "metered", "price_cents": 25,
             "min_authorization_cents": 1, "max_authorization_cents": 500,
             "variants": [{
                 "key": "anthropic/claude-sonnet-5",
@@ -8569,11 +8557,11 @@ mod tests {
     /// plus an output allowance at the long-context tier, capped at the
     /// variant's maximum.
     #[test]
-    fn openrouter_turns_are_authorized_for_what_they_need() {
+    fn inference_turns_are_authorized_for_what_they_need() {
         use TurnAuthorization::*;
         let listing = metered_listing();
         let model = "anthropic/claude-sonnet-5";
-        let size = |note: &Value| size_openrouter_authorization(&listing, note, None);
+        let size = |note: &Value| size_inference_authorization(&listing, note, None);
         let above = |cents| {
             Some(Authorize {
                 cents,
@@ -8600,7 +8588,7 @@ mod tests {
         let mut fixed = metered_listing();
         fixed["data"]["pricing_mode"] = json!("fixed");
         assert_eq!(
-            size_openrouter_authorization(&fixed, &note_with_bytes(model, 3_000_000), None),
+            size_inference_authorization(&fixed, &note_with_bytes(model, 3_000_000), None),
             None
         );
     }
@@ -8616,7 +8604,7 @@ mod tests {
         let listing = metered_listing();
         let model = "anthropic/claude-sonnet-5";
         let size = |bytes, cap| {
-            size_openrouter_authorization(&listing, &note_with_bytes(model, bytes), Some(cap))
+            size_inference_authorization(&listing, &note_with_bytes(model, bytes), Some(cap))
         };
 
         // ~40k tokens wants 30¢: a $1 cap leaves it as is.
@@ -8668,10 +8656,10 @@ mod tests {
     /// authorization; when credits can't cover that hold, the turn falls
     /// back to the default authorization instead of failing outright.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_long_openrouter_turn_sends_its_authorization() {
+    async fn a_long_inference_turn_sends_its_authorization() {
         let overpay = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(format!("/api/v1/listings/{OPENROUTER_ID}")))
+            .and(path(format!("/api/v1/listings/{INFERENCE_ID}")))
             .respond_with(ResponseTemplate::new(200).set_body_json(metered_listing()))
             .mount(&overpay)
             .await;
@@ -8695,8 +8683,8 @@ mod tests {
         let placed = place_and_pay_order(
             &state,
             &auth,
-            OPENROUTER_ID,
-            OPENROUTER_SELLER_SLUG,
+            INFERENCE_ID,
+            INFERENCE_SELLER_SLUG,
             &note,
             None,
             None,
@@ -8709,7 +8697,7 @@ mod tests {
         // the turn is placed the old way and the seller decides.
         let poor = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(format!("/api/v1/listings/{OPENROUTER_ID}")))
+            .and(path(format!("/api/v1/listings/{INFERENCE_ID}")))
             .respond_with(ResponseTemplate::new(200).set_body_json(metered_listing()))
             .mount(&poor)
             .await;
@@ -8731,15 +8719,15 @@ mod tests {
             .expect(1)
             .mount(&poor)
             .await;
-        mount_redeem_fully_paid(&poor, OPENROUTER_SELLER_SLUG).await;
+        mount_redeem_fully_paid(&poor, INFERENCE_SELLER_SLUG).await;
         let tmp = TempDir::new().unwrap();
         let state = seeded_state(&poor.uri(), &tmp);
         let (_npub, auth) = state.resolve_owned_auth().unwrap();
         let (order_id, _) = place_and_pay_order(
             &state,
             &auth,
-            OPENROUTER_ID,
-            OPENROUTER_SELLER_SLUG,
+            INFERENCE_ID,
+            INFERENCE_SELLER_SLUG,
             &note,
             None,
             None,
@@ -8755,7 +8743,7 @@ mod tests {
     async fn a_turn_over_the_per_message_limit_places_no_order() {
         let overpay = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path(format!("/api/v1/listings/{OPENROUTER_ID}")))
+            .and(path(format!("/api/v1/listings/{INFERENCE_ID}")))
             .respond_with(ResponseTemplate::new(200).set_body_json(metered_listing()))
             .mount(&overpay)
             .await;
@@ -8777,8 +8765,8 @@ mod tests {
         let err = place_and_pay_order(
             &state,
             &auth,
-            OPENROUTER_ID,
-            OPENROUTER_SELLER_SLUG,
+            INFERENCE_ID,
+            INFERENCE_SELLER_SLUG,
             &note,
             None,
             Some(cap),
@@ -8820,16 +8808,16 @@ mod tests {
         let unavailable = json!({"data": {
             "fulfillment_status": "rejected",
             "rejection": {"reason_code": "upstream_unavailable",
-                          "message": "No OpenRouter provider can serve x right now. Nothing was charged."},
+                          "message": "No provider can serve x right now. Nothing was charged."},
         }});
         let err = delivered_content_json(&unavailable).unwrap_err();
         assert_eq!(err.code(), Some("model_unavailable"));
         assert_eq!(
             err.message(),
-            "No OpenRouter provider can serve x right now. Nothing was charged."
+            "No provider can serve x right now. Nothing was charged."
         );
         // An older seller's error *delivery* reads the same way.
-        let legacy = OpenRouterDelivered {
+        let legacy = InferenceDelivered {
             text: "This request needs an authorization of at least 51¢.".into(),
             model: String::new(),
             error: true,

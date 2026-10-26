@@ -195,6 +195,9 @@ pub struct OwalletServer {
     pub address: String,
     pub npub: String,
     mcp_token: String,
+    /// A chat-scoped `owk_` provider key for this wallet — what an
+    /// OpenAI-compatible client sends to `/v1/*`.
+    pub provider_key: String,
 }
 
 impl OwalletServer {
@@ -245,7 +248,7 @@ impl OwalletServer {
         let mcp_token = format!("e2e_mcp_{port}");
 
         // Seed tokens into the (not-yet-serving) DB on a private connection.
-        {
+        let provider_key = {
             let mut db = Database::open(&db_path).expect("open wallet db");
             assert!(db.unlock(DB_PASSWORD).expect("unlock"), "wrong db password");
             db.write_access_token(
@@ -262,7 +265,10 @@ impl OwalletServer {
                 db.write_token(&npub, &base_url, bearer, "overpay-oauth")
                     .expect("store Overpay bearer");
             }
-        }
+            db.create_provider_key(&npub, "e2e", "chat", None)
+                .expect("mint provider key")
+                .1
+        };
 
         let mut serve = Command::new(bin);
         with_env(&mut serve);
@@ -289,7 +295,40 @@ impl OwalletServer {
             address,
             npub,
             mcp_token,
+            provider_key,
         }
+    }
+
+    /// `GET` an OpenAI-compatible `/v1` path with the provider key.
+    pub fn v1_get(&self, path: &str) -> (u16, Value) {
+        let resp = http_client(Duration::from_secs(30))
+            .get(format!("{}/v1{path}", self.base_url))
+            .bearer_auth(&self.provider_key)
+            .send()
+            .unwrap_or_else(|e| panic!("GET /v1{path}: {e}"));
+        let status = resp.status().as_u16();
+        (status, resp.json().expect("/v1 response JSON"))
+    }
+
+    /// `POST` JSON to an OpenAI-compatible `/v1` path with the provider
+    /// key, plus any extra headers.
+    pub fn v1_post(
+        &self,
+        path: &str,
+        body: Value,
+        headers: &[(&str, &str)],
+        timeout: Duration,
+    ) -> (u16, Value) {
+        let mut req = http_client(timeout)
+            .post(format!("{}/v1{path}", self.base_url))
+            .bearer_auth(&self.provider_key)
+            .json(&body);
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let resp = req.send().unwrap_or_else(|e| panic!("POST /v1{path}: {e}"));
+        let status = resp.status().as_u16();
+        (status, resp.json().expect("/v1 response JSON"))
     }
 
     /// Invoke an MCP tool over `/mcp` and return its `structuredContent`.

@@ -4,6 +4,33 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### `/v1` follows the inference seller's rename to "AI Inference"
+
+- The inference seller bot was renamed: its seller slug is now
+  `ai-inference` and its listing is titled "AI Inference". `/v1` and
+  `owallet install` look the listing up by exactly that slug and title
+  (`INFERENCE_SELLER_SLUG` / `INFERENCE_LISTING_TITLE`, formerly
+  `OPENROUTER_*`), and redeem chat turns' credits under the new slug. A
+  marketplace still running the old `openrouter-bot` / "OpenRouter
+  Inference" names is no longer found. The session-id HMAC label is
+  unchanged, so conversation ids stay stable.
+
+### The SDK carries the marketplace's quote and checkout operations
+
+- In `overpay-sdk`: `OrdersApi::accept_quote`, `decline_quote` and
+  `update_checkout` for the buyer API's new `POST
+  /api/v1/orders/{id}/accept_quote`, `.../decline_quote` and `PATCH
+  .../checkout` (a `request_quote` listing is now created `awaiting_quote`
+  with no `payment` key, and paying an order whose listing wants checkout
+  data — a shipping address — first fails with `checkout_incomplete`);
+  the `quote_required`, `quote_not_active`, `checkout_invalid` and
+  `checkout_incomplete` error codes; the new contract fixtures. The new
+  order fields (`quantity`, `quote`, `checkout`) and listing fields
+  (`listing_type`, `requires_shipping_address`, `checkout_required`) ride
+  in the models' `extra` for now. owallet's tools don't use any of this
+  yet: ordering such a listing works, but `pay_order` answers with the
+  marketplace's 422 and no tool sends checkout data or accepts a quote.
+
 ### `/mcp` purchases report their spend and honour a per-call limit
 
 - A `tools/call` result now carries `_meta["owallet/spent_cents"]` for
@@ -276,71 +303,7 @@ All notable changes to the Rust port of `owallet` are documented here.
   charged"). Older sellers' error deliveries carrying the same
   `reason_code` map the same way.
 
-### Keeping OpenRouter's prompt cache warm through `/v1`
-
-Synced from fathom-x/overpay#456 (the owallet side of overpay#445's notes).
-
-- **Cache counters in usage.** `usage.prompt_tokens_details` carries
-  OpenRouter's `cached_tokens` / `cache_write_tokens`, summed across a
-  request's orders — and only counts some order actually reported: absent
-  means unknown (the listing's rebuilt-from-generation usage has none), not
-  zero. `cached_tokens` is OpenAI's own field, so OpenAI-compatible clients
-  (the AI SDK, so norm) show cache reads with no change.
-- **Client cache markers survive.** `content` is no longer flattened: text
-  parts pass through with their `cache_control`, and a message-level
-  `cache_control` (how OpenAI-compatible clients mark single-text messages)
-  becomes a marked one-part array. At most 3 client markers are forwarded,
-  keeping the earliest — Anthropic allows 4 and the listing adds one on the
-  newest message. Text parts are no longer glued together with no
-  separator.
-- **`session_id` for sticky routing**, behind `OWALLET_V1_SESSION_ID=1`.
-  The client's conversation key — body `session_id`, then `x-session-id`,
-  then `prompt_cache_key` / `promptCacheKey` — becomes
-  `HMAC-SHA256(per-install secret, key)`, sent on every OpenRouter buyer
-  note of the request; never the raw key or a per-wallet constant. Without
-  a key: a random id for the server-side loop, nothing for passthrough.
-  `run_python` and listing-tool orders never carry it.
-- **Stable tool order.** Listing tools are sorted by name, so the tool
-  block that opens every prompt can't reorder between requests.
-
-Fixes from a live marketplace test session.
-
-### Long chat replies no longer fail after being paid for
-
-- Rails moves any `delivered_content` over 4 KB to object storage and
-  returns `delivered_content_url` in its place. `/v1` read only the inline
-  field, so every turn whose reply passed ~4 KB failed with `[owallet error]
-  order has no delivered_content` — already charged, reply lost. Every
-  `/v1` order poll — including one-shot tool executions — now goes through
-  `get_order_resolved`, which downloads the signed file back inline (no
-  credentials, marketplace origin only). This also restores the metered
-  `charged_cents` settlement for those turns, and a failed order reports
-  the seller's reason instead of the missing deliverable.
-
-### One-shot purchases never lose a paid order
-
-- A one-shot tool (`run_python` / `provider_tool` listings) whose seller
-  stalls now returns the paid order as a pending result — `order_id`,
-  statuses, `charged_cents`, "do not buy again", and a `wait_for_order`
-  hint — instead of an error without the order id.
-- On `/mcp`, in-flight polls emit `notifications/progress`, which resets
-  the MCP client's request timeout (opencode's 60s tripped on a silent
-  120s poll and dropped the result). A client that didn't opt into
-  progress gets the pending result at 50s, before its own timeout.
-- One-shot results render readably: JSON deliverables decoded instead of
-  double-encoded, `run_python` as exit code + stdout/stderr, followed by
-  an `order_id: …` line and what it charged.
-- Image (and other binary) deliveries succeed: a paid `generate_image`
-  failed with `delivered content: file is not UTF-8 text` although the
-  seller had delivered a valid PNG. A file delivery now comes back as
-  `delivered_content_url` + `delivered_content_type` +
-  `delivered_content_bytes` ("Delivered a file (image/png, 1.0 MB)" and
-  the download link); binary media types aren't downloaded at all.
-- A one-shot order that was paid but whose result then couldn't be read
-  returns its `order_id`, the charge, and "do not buy again" rather than
-  a bare error.
-
-### Compatible with Overpay's metered pricing (overpay#458-#466)
+### Compatible with metered pricing (#458-#466)
 
 - **Long OpenRouter turns are authorized for what they need.** The
   listing's price is now a per-turn *authorization*, and the seller's
@@ -359,15 +322,36 @@ Fixes from a live marketplace test session.
   it now ends the wait, and the error/next step carries the `rejection`
   reason and, for `authorization_too_low`, the authorization that would
   have been enough. Order projections keep `rejection` (field by field).
-- **Status filters are Rails's to validate** (overpay#466 answers an
-  unknown value with a 422 naming the allowed ones), so the order tools no
-  longer carry a hardcoded copy of the enums — that copy was already
-  missing `rejected`.
-- **Free orders pay through `pay_order`** again: Rails now settles a $0.00
-  order via the normal redemption, so the client-side "free order"
-  short-circuit is gone.
-- File deliveries take their size from Rails's
-  `delivered_content_byte_size` when the download doesn't state one.
+- File deliveries take their size from `delivered_content_byte_size`
+  when the download doesn't state one.
+
+### One-shot purchases never lose a paid order
+
+From a live norm test session and an agent's health-check pass over every
+listing.
+
+- A one-shot tool (`run_python` / `provider_tool` listings) whose seller
+  stalls now returns the paid order as a pending result — `order_id`,
+  statuses, `charged_cents`, "do not buy again", and a `wait_for_order`
+  hint — instead of an error without the order id.
+- On `/mcp`, in-flight polls emit `notifications/progress`, which resets
+  the MCP client's request timeout (opencode's 60s tripped on a silent
+  120s poll and dropped the result). A client that didn't opt into
+  progress gets the pending result at 50s, before its own timeout.
+- One-shot polls go through `get_order_resolved` too, so a file-delivered
+  one-shot result is read like a file-delivered chat reply.
+- One-shot results render readably: JSON deliverables decoded instead of
+  double-encoded, `run_python` as exit code + stdout/stderr, followed by
+  an `order_id: …` line and what it charged.
+- Image (and other binary) deliveries succeed: a paid `generate_image`
+  failed with `delivered content: file is not UTF-8 text` although the
+  seller had delivered a valid PNG. A file delivery now comes back as
+  `delivered_content_url` + `delivered_content_type` +
+  `delivered_content_bytes` ("Delivered a file (image/png, 1.0 MB)" and
+  the download link); binary media types aren't downloaded at all.
+- A one-shot order that was paid but whose result then couldn't be read
+  returns its `order_id`, the charge, and "do not buy again" rather than
+  a bare error.
 
 ### Prices, amounts, and schemas visible to the model
 
@@ -381,15 +365,147 @@ Fixes from a live marketplace test session.
   `structuredContent`, which the model never reads.
 - Listings sold through a one-shot tool are marked with its name.
 
-## 0.1.10
+### Keeping OpenRouter's prompt cache warm through `/v1`
+
+Implements the owallet side of #445's notes.
+
+- **Cache counters in usage.** `usage.prompt_tokens_details` carries
+  OpenRouter's `cached_tokens` / `cache_write_tokens`, summed across a
+  request's orders — and only counts some order actually reported: absent
+  means unknown (the listing's rebuilt-from-generation usage has none), not
+  zero. `cached_tokens` is OpenAI's own field, so OpenAI-compatible clients
+  (the AI SDK, so norm) show cache reads with no change.
+- **Client cache markers survive.** `content` is no longer flattened: text
+  parts pass through with their `cache_control`, and a message-level
+  `cache_control` (how OpenAI-compatible clients mark single-text messages)
+  becomes a marked one-part array. At most 3 client markers are forwarded,
+  keeping the earliest — Anthropic allows 4 and the listing adds one on the
+  newest message. Text parts are no longer glued together with no
+  separator.
+- **`session_id` for sticky routing**, behind `OWALLET_V1_SESSION_ID=1`
+  (turn it on once #445 is deployed — before it, the listing fails orders
+  with unknown buyer-note keys). The client's conversation key — body
+  `session_id`, then `x-session-id`, then `prompt_cache_key` /
+  `promptCacheKey` — becomes `HMAC-SHA256(per-install secret, key)`, sent
+  on every OpenRouter buyer note of the request; never the raw key or a
+  per-wallet constant. Without a key: a random id for the server-side
+  loop, nothing for passthrough. `run_python` and listing-tool orders never
+  carry it.
+- **Stable tool order.** Listing tools are sorted by name, so the tool
+  block that opens every prompt can't reorder between requests. (Tool
+  definitions were already built once per request; the live price stays
+  in descriptions by design, fathom-x/norm#17.)
+
+### Per-request spend limit; wallet spend in `/v1` usage
+
+Groundwork for per-conversation budgets in a client (norm's `/budget`).
+
+- **`x-owallet-spend-limit-usd`** lets a client *lower* one request's
+  allowance for the wallet spending tools. It can never raise it — the
+  wallet's own cap and the key's daily budget still apply. A limit of `0`
+  or less refuses the request with `402` before any order is placed (each
+  chat turn is itself a paid order); a non-numeric value is a `400`, not
+  silently ignored.
+- **`usage.wallet_spent_cents`** reports what the spending tools moved
+  during the request (credit purchases and redemptions), next to
+  `charged_cents`, the request's own operating cost — so a client can count
+  money that left the wallet, not just inference.
+- **`key_can_spend` in `GET /v1/status`** says whether the calling key has
+  the `spend` scope, so a client can notice it holds a chat-only key.
+
+### Brought over from norm's copy of owallet
+
+norm (fathom-x/norm) vendors this workspace under `owallet/` and syncs it
+from here; since the last sync (#416) some owallet work landed only there.
+This brings it back so the two copies match again (norm's README, CLAUDE.md,
+version numbers and vendored test fixture stay norm's):
+
+- **Real usage and cost on `/v1` chat completions** (fathom-x/norm#14).
+  Every completion, buffered and streamed, reports OpenAI's token counts
+  plus `cost` (USD) and `charged_cents` (the authoritative integer).
+  Streams send it as a final choices-less chunk before `[DONE]`, the
+  `stream_options.include_usage` shape. Cost covers the whole turn — every
+  OpenRouter order *and* every tool order — at the **settled** amount, the
+  same figure the key-budget refund uses. One-shot MCP purchases go through
+  the same accounting. Previously `/v1` reported no usage at all.
+- **`owallet provider-key create | list`**: mint and list the wallet-scoped
+  keys for the `/v1` provider from the CLI (`--label`, `--spend`,
+  `--budget-usd`, `--json`), sharing the dashboard's budget parser. norm's
+  bootstrap mints its key this way.
+- **Built-in staging URL for `dev-envs` builds**
+  (`defaults::OVERPAY_RAILS_URL_STAGING`), so `owallet --staging serve`
+  needs no `OVERPAY_RAILS_URL_STAGING` and no longer falls back to the
+  prod URL when it is missing. Only compiled with the `dev-envs` feature;
+  env vars still override.
+
+### `owallet authorize` works when the browser is on another machine
+
+- `authorize` only completed through its loopback redirect
+  (`http://127.0.0.1:<port>/callback`), so over SSH, in a VM or a container
+  — where the browser's redirect lands on *its* machine — login failed.
+  `authorize` now also reads the terminal: paste the address the browser
+  ended up on (or just its `code`) and the login completes. Whichever
+  arrives first wins, so local logins are unchanged. A pasted `state` must
+  match the attempt; a bare code is accepted because PKCE binds it to this
+  process. Bad input explains itself and keeps waiting.
+### Wallet setup can't leave a broken wallet behind
+
+- `generate` and `import` stored the wallet — and made it the default —
+  *before* prompting for the per-wallet (dashboard) password. A failed
+  prompt (no terminal, no `OWALLET_WALLET_PASSWORD`, a mistyped
+  confirmation) left an orphan default wallet whose seed phrase was never
+  shown. Both now collect the password first; a failed prompt writes
+  nothing.
+- New `owallet password set [--npub]` sets or replaces a wallet's
+  dashboard password. Before, a wallet stored without one could never log
+  in, and nothing could fix it.
+- No terminal to prompt on now says which variable to set
+  (`OWALLET_PASSWORD` / `OWALLET_WALLET_PASSWORD`) instead of "password
+  prompt failed: No such device or address (os error 6)".
+- `init` creates the database `0600`, and a directory it creates for it
+  `0700` (was the process umask, typically world-readable). A pre-existing
+  parent directory is left alone.
+
+### Chat-scoped keys can mint Lightning invoices for core credits
+
+- `load_core_credits` sat behind the `spend` scope with the tools that move
+  wallet funds. It moves none: it mints a Lightning invoice the user pays
+  from their own Lightning wallet. A chat-scoped key — what norm mints by
+  default — therefore had no in-chat way to top up the credits that pay for
+  chat. The scope gate still covers `create_order`, `pay_order`,
+  `redeem_merchant_credits` and `buy`; raw sends stay refused for every key.
+
+### "No credits" says how to get credits
+
+- Overpay refuses to place or settle an order for a wallet with no credits
+  as a bare 422 ("No available credits for this seller"). It is the most
+  common first-run failure — every model, `:free` ones included, is paid
+  from credits — and it surfaced verbatim. `/v1` now answers `402`
+  (`insufficient_quota`) with instructions: `owallet credits load` (noting
+  the `--staging`/`--dev` flag the server runs with) or the Overpay site.
+- The existing "insufficient merchant credits" advice pointed at the
+  `load_core_credits` MCP tool, which needs a paid model turn to invoke —
+  impossible at zero credits. It now gives the same, runnable advice.
+
+### `/v1` follows file-delivered results and reports failed orders
+
+- Rails can deliver an order's result as a file — a signed Active Storage
+  `delivered_content_url` — instead of inline `delivered_content`. The MCP
+  order tools already surfaced the link, but `/v1/chat/completions` read
+  inline content only, so those turns failed with "order has no
+  delivered_content" (on staging, 5 of 19 recent OpenRouter orders). `/v1`
+  now downloads the file once the order is delivered — without credentials
+  (the link is signed), only from the marketplace's own origin, following
+  its redirect to blob storage, capped at 16 MiB.
+- A `failed` / `cancelled` order now reports the seller's
+  `fulfillment_error` ("the marketplace order failed: …") instead of the
+  same misleading message.
 
 ### `overpay_connected` in `GET /v1/status`
 
 - The status payload now says whether the wallet is linked to an Overpay
   account (`account` fetch succeeded vs the authorize/sign-up hint), so
   norm's sidebar can tell the user to log in to Overpay to get started.
-
-## 0.1.9
 
 ### Core credits marked in status and balances
 
@@ -399,8 +515,6 @@ Fixes from a live marketplace test session.
   balance first. Requires an Overpay deploy that tags the row; absent
   the flag nothing changes.
 
-## 0.1.8
-
 ### Lenient ambient `.env` loading
 
 - The `.env` picked up from the current working directory belongs to
@@ -409,8 +523,6 @@ Fixes from a live marketplace test session.
   during norm's first-run wallet setup. Unparsable lines are now skipped
   with a stderr note; explicit `--config` and discovered `*.owallet`
   files stay strict.
-
-## 0.1.7
 
 ### Cost markers on every model-facing tool description (fathom-x/norm#17)
 
@@ -426,8 +538,6 @@ Fixes from a live marketplace test session.
   `redeem_merchant_credits`) say that the call itself is not billed but
   moves real money — so a client model can tell the three cost tiers
   apart from the roster alone instead of guessing.
-
-## 0.1.6
 
 ### Client-side tools (the norm agent work)
 
@@ -450,105 +560,6 @@ Fixes from a live marketplace test session.
   purchases (up-front exhaustion gate, after-the-fact recording,
   settlement netting, atomic `buy` reservation). OAuth and local
   sessions are unchanged.
-### Real usage and cost on `/v1` chat completions (fathom-x/norm#14)
-
-- **`usage` on every chat completion**, buffered and streamed: OpenAI's
-  `prompt_tokens` / `completion_tokens` / `total_tokens`, plus `cost`
-  (USD, the convention OpenRouter set) and `charged_cents`, the
-  authoritative integer — real money should not round-trip through a
-  float. Streams emit it as a final choices-less chunk just before
-  `[DONE]`, the same shape `stream_options.include_usage` produces, so
-  an unmodified OpenAI-compatible client parses it without special
-  casing. Previously the endpoint reported no usage at all, leaving a
-  client to estimate cost from a token price list it has no way to know
-  (norm's sidebar showed a flat `$0.00 spent`).
-- **Cost covers the whole turn, not just the model calls.** Every order
-  a completion places is charged against it — the OpenRouter turns *and*
-  each tool call, which is a separately paid marketplace order. A tool
-  call can cost far more than the inference around it (image
-  generation), so a total that counted only model turns would understate
-  real spend badly.
-- The figure is the **settled** charge: a seller that meters and states
-  `charged_cents` is billed at that, not at the gross deposit, mirroring
-  the refund that already goes back to the key budget. The two read the
-  same delivery, so the reported cost and the budget can never tell the
-  user different stories about what a turn cost. A delivery that states
-  no usage contributes zero rather than a guess.
-
-## 0.1.5
-
-No changes of its own. The `owallet-v0.1.5` tag was cut from 0.1.4's
-tree, so its binaries report `0.1.4` — the version numbering resumes at
-0.1.6 rather than reusing a published tag.
-
-## 0.1.4
-
-### Wallet status for norm's sidebar (fathom-x/overpay#415, fathom-x/norm#9)
-
-- **`GET /v1/status`** — chain-free wallet status beside `/v1/models`:
-  provider-key auth, balances and merchant credits projected through the
-  same allowlist as the `get_balances` wallet tool, the calling key's
-  daily-budget block, the wallet's configured `overpay_url`, and an
-  `as_of` stamp in the wallet's timezone. The per-request spend
-  allowance is deliberately absent — that ledger only exists inside a
-  chat request. Powers norm's sidebar widget; poll on the order of a
-  minute (the read hits the EVM RPC and Overpay live).
-
-## 0.1.3
-
-### Buyer-facing polish for metered orders (fathom-x/overpay#413)
-
-- **`GET /health`** — unauthenticated liveness + version probe. norm's
-  bootstrap compares it against the on-disk binary to restart a stale
-  running serve (replacing the binary never touched the running
-  process); serves predating the endpoint read as stale by the same
-  logic.
-- **`as_of` stamps on volatile `/v1` wallet-tool results**
-  (`get_balances` / `list_orders` / `get_order_status`), in the
-  wallet's timezone, plus point-in-time wording in the tool
-  descriptions — so a model resending conversation history stops
-  presenting an old balances snapshot as current.
-- **Dashboard timestamps render in the wallet's timezone** with the
-  zone abbreviation and a "3 minutes ago" hover title (purchases list,
-  order detail, provider keys). The `timefmt` helpers live in
-  owallet-mcp, shared by the dashboard and the `/v1` projections.
-- **`settled_amount_cents` passes through the order projections** — a
-  metered order's face value stays at the deposit, so wallets can now
-  show what the buyer actually paid after settlement refunds.
-
-## 0.1.2
-
-### Key budgets net out metered settlement refunds
-
-- **`/v1` place-and-pay now hands settlement refunds back to the
-  provider key's daily budget.** The marketplace's OpenRouter inference
-  listing meters each turn (OpenRouter cost + markup, settled against a
-  prepaid deposit; fathom-x/overpay#412), and the delivered payload
-  states the final `charged_cents`. Every pay site — buffered and
-  streaming chat turns, `run_python` and listing-tool sub-orders, and
-  the landing turn — releases the difference between the gross deposit
-  recorded at pay time and that final charge, so daily budgets bound
-  what a key actually cost instead of gross deposits. A failed turn
-  (upstream error, `charged_cents: 0` plus a credit refund) returns its
-  whole deposit; deliveries without `charged_cents` net nothing.
-- **`install` resolves the per-env Overpay URL the way `serve` does**
-  (synced from overpay), so `--staging`/`--dev` installs point the
-  OpenCode provider entry at the right marketplace.
-
-## 0.1.1
-
-### Staging-capable release binaries (pre-public-release)
-
-- **Release builds now compile with the `dev-envs` feature**
-  (`owallet-release.yml`), so the binaries norm bundles accept
-  `--dev`/`--staging`. Temporary for the pre-public-release phase —
-  drop the feature flag from the workflow at the public release.
-- **The staging environment has a built-in Overpay URL**
-  (`defaults::OVERPAY_RAILS_URL_STAGING`,
-  `https://overpay-eykm.onrender.com`), so `owallet --staging serve`
-  works with no `OVERPAY_RAILS_URL_STAGING` in the environment — and no
-  longer silently falls back to the **prod** Rails URL when that var is
-  missing. Env vars still override the built-in.
 
 ### Listing-backed provider tools on `/v1` (generalizing `run_python`)
 

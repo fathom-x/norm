@@ -13,6 +13,9 @@
       "quantity": -1,
       "main_image_url": null,
       "delivered_content_type": "text/plain",
+      "listing_type": "fixed_price",
+      "requires_shipping_address": true,
+      "checkout_required": true,
       "seller": {
         "name": "aliceuser",
         "slug": "alice-shop"
@@ -20,9 +23,9 @@
       "checkout_url": "http://localhost:4030/checkout/8af0bb18-58e4-5d80-b016-86e8c4426145",
       "delivery_eta": null,
       "provider_tool": null,
-      "published_at": "2026-10-02T21:00:18.000Z",
-      "created_at": "2026-10-02T21:00:18.000Z"
+      "published_at": "2026-10-21T19:04:06.000Z",
+      "created_at": "2026-10-21T19:04:06.000Z"
     }
   ],
-  "next_cursor": "eyJwdWJsaXNoZWRfYXQiOiIyMDI2LTEwLTAyVDIxOjAwOjE4LjAwMDAwMFoiLCJpZCI6IjhhZjBiYjE4LTU4ZTQtNWQ4MC1iMDE2LTg2ZThjNDQyNjE0NSJ9"
+  "next_cursor": "eyJwdWJsaXNoZWRfYXQiOiIyMDI2LTEwLTIxVDE5OjA0OjA2LjAwMDAwMFoiLCJpZCI6IjhhZjBiYjE4LTU4ZTQtNWQ4MC1iMDE2LTg2ZThjNDQyNjE0NSJ9"
 }

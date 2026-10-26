@@ -131,7 +131,7 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
 
 - **`/v1` OpenAI-compatible endpoint** (`owallet-mcp/src/openai_compat.rs`,
   mounted by `owallet-http`). Hardcoded to exactly two *listings*
-  — "OpenRouter Inference" (seller `openrouter-bot`, chat) and "Run Python
+  — "AI Inference" (seller `ai-inference`, chat) and "Run Python
   Code" (seller `exec`, the one listing-backed tool) — resolved via
   `resolve_listing_id_cached(state, seller_slug, title, cache)`.
   **The listing-tool side is generalized** (`ListingTool` /
@@ -172,11 +172,11 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   (`run_listing_tool` / `run_python_tool`, via `poll_one_shot`) never error
   on a stall — the paid order comes back as a pending result with its id —
   and on `/mcp` they stream progress, which is what resets the MCP
-  client's request timeout. **OpenRouter turns are metered**: the listing
+  client's request timeout. **Inference turns are metered**: the listing
   price is a default *authorization*, and the seller's exposure guard
   refuses a turn it can't cover. `place_and_pay_order` sizes each
-  OpenRouter turn from its model variant's `rate_card`
-  (`size_openrouter_authorization` mirrors the guard's arithmetic — keep
+  inference turn from its model variant's `rate_card`
+  (`size_inference_authorization` mirrors the guard's arithmetic — keep
   the two in step) and, above the default, creates+pays in one request
   with `authorization_cents` (Rails only takes it with `pay:
   merchant_credits`); a 402 on a hold *above the default* falls back to
@@ -208,7 +208,7 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   (find → order → settle with credits), all order-id-scoped. They're backed by `crate::tools::dispatch` but carry their own
   model-facing definitions and **allowlist projections**
   (`project_balances` & co.): every tool result lands in `messages` and
-  ships to the OpenRouter seller inside the next turn's `buyer_note`, so
+  ships to the AI Inference seller inside the next turn's `buyer_note`, so
   no on-chain data (txid, tx hash, address) may ever appear in a wallet
   tool result — order ids, amounts, statuses, and spending limits only.
   When touching these, extend the projections field-by-field (never copy
@@ -303,7 +303,7 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   reaches the HTTP caller — `run_agentic_loop` (buffered) / the streaming
   generator's own copy of the same loop shape executes `run_python` as a
   *second, real, separately-paid* order and feeds the result back for
-  another OpenRouter turn, capped at `MAX_TOOL_ITERATIONS` iterations (10 —
+  another inference turn, capped at `MAX_TOOL_ITERATIONS` iterations (10 —
   the full purchase loop needs five-plus, so don't tighten it back to the
   old 4 without re-checking that flow) and, for the wallet spending tools,
   by the per-request `SpendLedger` dollar ceiling (the two are
@@ -327,7 +327,7 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   MCP tool calls share). `owallet install --opencode-*`
   (`crates/owallet/src/commands/install.rs`) writes an OpenCode `provider`
   entry pointed at this endpoint, fetching the model list the same
-  drift-avoidance way — `fetch_models` reads the OpenRouter listing's own
+  drift-avoidance way — `fetch_models` reads the AI Inference listing's own
   `buyer_note_schema` straight off Overpay, *not* a second hardcoded copy
   and *not* the running server's `/v1/models`, so `owallet serve` does not
   have to be up for `install` to work. An unreachable Overpay is a warning,
@@ -369,7 +369,7 @@ TMP=$(mktemp -d) OWALLET_PASSWORD=pw OWALLET_DB_PATH=$TMP/test.db \
   first by `GET /v1/models` and always accepted by `validate_request`
   without a live catalog fetch — no real OpenRouter id can collide with it
   (those are always `vendor/model-name`). It's forwarded to the listing's
-  `buyer_note.model` unchanged; `OpenrouterInferenceListing#coerce_model`
+  `buyer_note.model` unchanged; `AiInferenceListing#coerce_model`
   (Ruby) is what actually resolves it to a concrete model, the same way it
   already treats any string outside its own `MODEL_OPTIONS`. `install`'s
   copy of this constant (`crates/owallet/src/commands/install.rs`) is a
