@@ -1061,14 +1061,14 @@ mod tests {
     #[test]
     fn orders_show_amount_and_metered_charge() {
         let data = json!({"data": [
-            {"order_id": "O1", "product_title": "OpenRouter Inference", "payment_status": "paid",
+            {"order_id": "O1", "product_title": "AI Inference", "payment_status": "paid",
              "fulfillment_status": "delivered", "total_usd": "$0.2000", "total_usd_cents": 20,
              "settled_amount_cents": 3.5},
             {"order_id": "O2", "payment_status": "paid", "fulfillment_status": "awaiting_seller",
              "total_usd": "$0.0500", "total_usd_cents": 5, "settled_amount_cents": 5},
         ]});
         let out = render("get_wallet_orders", &data);
-        assert!(out.contains("OpenRouter Inference"), "{out}");
+        assert!(out.contains("AI Inference"), "{out}");
         assert!(out.contains("$0.20 (charged $0.035 = 3.5¢)"), "{out}");
         assert!(
             out.contains("$0.05") && !out.contains("$0.05 (charged"),

@@ -134,7 +134,7 @@ package is the standard Vercel AI SDK OpenAI-compatible adapter):
     "overpay": {
       "npm": "@ai-sdk/openai-compatible",
       "options": { "baseURL": "http://127.0.0.1:8765/v1" },
-      // Fetched live from the "OpenRouter Inference" listing's own schema
+      // Fetched live from the "AI Inference" listing's own schema
       // at install time, not hardcoded — the catalog can grow without an
       // owallet rebuild.
       "models": {
@@ -151,7 +151,7 @@ and `install` edits it through a CST (the way the Codex target uses
 `toml_edit`), so comments, commented-out blocks, and unrelated keys survive
 untouched. Only `mcp.owallet*` and `provider.overpay*` are written.
 
-The `provider` block's model list is fetched straight from the "OpenRouter
+The `provider` block's model list is fetched straight from the "AI
 Inference" listing on Overpay (the same source `/v1/models` proxies), so
 `owallet serve` doesn't need to be running when `install` runs. If Overpay
 is unreachable — or no `OVERPAY_RAILS_URL` is configured for the active
@@ -182,11 +182,11 @@ key it finds there rather than overwriting it.)
 `"default"` isn't a real OpenRouter model id (every real one looks like
 `vendor/model-name`) — it's a sentinel `GET /v1/models` always lists first
 and `/v1/chat/completions` always accepts, without needing a live catalog
-fetch to validate it. The "OpenRouter Inference" listing's own
+fetch to validate it. The "AI Inference" listing's own
 `coerce_model` (Ruby) resolves it to a real, concrete model before ever
 calling OpenRouter, exactly the way it already treats any unrecognized or
 stale model id — see `MODEL_OPTIONS`'s doc comment in
-`openrouter_inference_listing.rb`. So `default` works as a request's model
+`ai_inference_listing.rb`. So `default` works as a request's model
 right away; rerun `install` once Overpay is reachable to get the real
 curated list instead. Merchant credits (`load_core_credits` MCP tool,
 or the dashboard) and `owallet authorize` still need to be in place before
@@ -240,7 +240,7 @@ prints**: the OAuth `redirect_uri` is built from that URL, and starting the
 flow on `localhost` while the callback returns to `127.0.0.1` drops both the
 session and pending-auth cookies, which looks like an endless login loop.
 
-**Run `install` after the OpenRouter listing exists on staging.** The model
+**Run `install` after the AI Inference listing exists on staging.** The model
 catalog is read from that listing at install time; if it isn't published yet
 you get a provider with only `"default"` in it and a `warning:` on stderr.
 That's a usable entry, not a broken one (see the sentinel note above) — but

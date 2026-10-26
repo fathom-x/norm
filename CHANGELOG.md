@@ -4,6 +4,17 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### `/v1` follows the inference seller's rename to "AI Inference"
+
+- The inference seller bot was renamed: its seller slug is now
+  `ai-inference` and its listing is titled "AI Inference". `/v1` and
+  `owallet install` look the listing up by exactly that slug and title
+  (`INFERENCE_SELLER_SLUG` / `INFERENCE_LISTING_TITLE`, formerly
+  `OPENROUTER_*`), and redeem chat turns' credits under the new slug. A
+  marketplace still running the old `openrouter-bot` / "OpenRouter
+  Inference" names is no longer found. The session-id HMAC label is
+  unchanged, so conversation ids stay stable.
+
 ### The SDK carries the marketplace's quote and checkout operations
 
 - In `overpay-sdk`: `OrdersApi::accept_quote`, `decline_quote` and

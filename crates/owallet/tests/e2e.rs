@@ -283,3 +283,108 @@ fn mcp_run_python_pays_from_a_fractional_balance() {
     assert_eq!(result["stdout"], "4\n", "{result}");
     assert_eq!(result["exit_code"], 0, "{result}");
 }
+
+/// `/v1` against the AI Inference seller: owallet resolves the listing by
+/// its hardcoded seller slug + title (`INFERENCE_SELLER_SLUG` /
+/// `INFERENCE_LISTING_TITLE`) through the real listings API, lists the
+/// listing's model enum on `/v1/models`, and runs one chat completion as a
+/// real credit-paid order that a real bot_manager seller poll delivers.
+///
+/// The seller slug and title must match the bot
+/// (`bots/bot_manager/lib/bots/ai_inference`), so no other scenario may
+/// seed slug `ai-inference`. The plain-completion header keeps the turn to
+/// one order, with no `run_python` roster (whose `exec` seller another
+/// scenario owns).
+#[test]
+#[ignore = "needs Rails + Postgres + bot_manager (run in owallet-rs-e2e workflow)"]
+fn v1_chat_runs_against_the_ai_inference_listing() {
+    let rails = RailsServer::start();
+
+    let models = ["test-vendor/model-a", "test-vendor/model-b"];
+    let seller = rails.seed(
+        "seed_seller",
+        json!({
+            "seller_slug": "ai-inference",
+            "with_usdc_wallet": true,
+            "listing_title": "AI Inference",
+            "price_cents": 25,
+            // The generic fulfill runner delivers `text/plain`; owallet
+            // parses the delivered string as JSON either way.
+            "delivered_content_type": "text/plain",
+            "buyer_note_schema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string" },
+                    "messages": { "type": "array" },
+                    "model": { "type": "string", "enum": models, "default": models[0] },
+                },
+            },
+        }),
+    );
+    let buyer = rails.seed("seed_buyer", json!({}));
+    rails.seed(
+        "seed_credits",
+        json!({
+            "buyer_id": buyer["user_id"],
+            "seller_id": seller["user_id"],
+            "balance_cents": 500,
+        }),
+    );
+
+    let owallet = OwalletServer::start(&rails.base_url, buyer["api_token"].as_str());
+
+    // 1. The catalog is the listing's own model enum.
+    let (status, listed) = owallet.v1_get("/models");
+    assert_eq!(status, 200, "{listed}");
+    let ids: Vec<&str> = listed["data"]
+        .as_array()
+        .expect("model list")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    for model in models {
+        assert!(
+            ids.contains(&model),
+            "{model} missing from /v1/models: {ids:?}"
+        );
+    }
+
+    // 2. One chat turn: a credit-paid order the seller delivers while
+    //    `/v1/chat/completions` waits on it.
+    let seller_token = seller["api_token"].as_str().unwrap();
+    let (status, completion) = std::thread::scope(|s| {
+        s.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(45);
+            while Instant::now() < deadline {
+                rails.run_job("FulfillPaidOrdersJob");
+                let delivered = json!({
+                    "description": "Hello from AI Inference",
+                    "model": models[1],
+                    "usage": { "prompt_tokens": 7, "completion_tokens": 5 },
+                });
+                if !fulfill_as_seller(&rails.base_url, seller_token, &delivered.to_string(), None)
+                    .is_empty()
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        });
+        owallet.v1_post(
+            "/chat/completions",
+            json!({
+                "model": models[1],
+                "messages": [{ "role": "user", "content": "Say hello" }],
+            }),
+            &[("x-owallet-tools", "none")],
+            Duration::from_secs(60),
+        )
+    });
+
+    assert_eq!(status, 200, "{completion}");
+    assert_eq!(
+        completion["choices"][0]["message"]["content"], "Hello from AI Inference",
+        "{completion}"
+    );
+    assert_eq!(completion["model"], models[1], "{completion}");
+}
