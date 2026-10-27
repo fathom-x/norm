@@ -420,3 +420,89 @@ test("harnessNote does not replay a relayed web page to the model", () => {
   expect(note.length).toBeLessThan(1000)
   expect(note).toContain('HTTP 403: the server answered with a web page instead of a reply ("403 - Forbidden").')
 })
+
+// A fake owallet: `--version` prints the version in `version`, `serve` runs a
+// real server on the requested port whose /health reports that version and
+// its own pid, so a test can tell a reused serve from a restarted one.
+async function fakeOwallet(root: string) {
+  const bin = path.join(root, "bin", "owallet")
+  const server = path.join(root, "fake-serve.ts")
+  const version = path.join(root, "version")
+  await fs.mkdir(root, { recursive: true })
+  await fs.writeFile(version, "0.1.10")
+  await fs.writeFile(
+    server,
+    `const port = Number(process.argv[process.argv.indexOf("--port") + 1])
+const version = (await Bun.file(${JSON.stringify(version)}).text()).trim()
+Bun.serve({ port, hostname: "127.0.0.1", fetch: () => Response.json({ version, pid: process.pid }) })
+`,
+  )
+  await fs.mkdir(path.dirname(bin), { recursive: true })
+  await fs.writeFile(
+    bin,
+    `#!/bin/sh
+case "$*" in
+  *--version*) read v < ${version}; echo "owallet $v" ;;
+  *serve*) exec ${process.execPath} ${server} "$@" ;;
+esac
+`,
+    { mode: 0o755 },
+  )
+  await fs.mkdir(path.join(root, "owallet"), { recursive: true })
+  await fs.writeFile(path.join(root, "owallet", "owallet.db"), "")
+  return { bin, version }
+}
+
+const health = async (base: string): Promise<{ version: string; pid: number }> =>
+  (await fetch(`${base}/health`)).json()
+
+test("a running serve is replaced when the binary on disk is newer, same version or not", async () => {
+  process.env.NORM_HOME = path.join(home, "sandbox")
+  const base = Norm.owalletUrl()
+  // The port derives from the sandbox path; never touch a serve someone else runs there.
+  if (await Norm.probe(base)) return
+  const originalPassword = process.env.OWALLET_PASSWORD
+  process.env.OWALLET_PASSWORD = "pw"
+  // The stale check finds the serve's process with lsof and ps.
+  const tools = ["lsof", "ps"].flatMap((tool) => Bun.which(tool, { PATH: originalPath }) ?? [])
+  if (tools.length < 2) return
+  process.env.PATH = [process.env.PATH, ...tools.map((tool) => path.dirname(tool))].join(path.delimiter)
+  const fake = await fakeOwallet(process.env.NORM_HOME)
+  const pids: number[] = []
+  try {
+    expect(await Norm.startServer(base)).toEqual({ ok: true })
+    const first = await health(base)
+    pids.push(first.pid)
+
+    // Nothing changed on disk: the running serve is reused.
+    expect(await Norm.startServer(base)).toEqual({ ok: true })
+    expect((await health(base)).pid).toBe(first.pid)
+
+    // Rebuilt without a version bump: the binary's mtime gives it away.
+    const later = new Date(Date.now() + 10_000)
+    await fs.utimes(fake.bin, later, later)
+    expect(await Norm.startServer(base)).toEqual({ ok: true })
+    const second = await health(base)
+    pids.push(second.pid)
+    expect(second.pid).not.toBe(first.pid)
+    expect(second.version).toBe("0.1.10")
+
+    // A newer version replaces it too, mtime or not.
+    await fs.writeFile(fake.version, "0.1.11")
+    const earlier = new Date(Date.now() - 60_000)
+    await fs.utimes(fake.bin, earlier, earlier)
+    expect(await Norm.startServer(base)).toEqual({ ok: true })
+    const third = await health(base)
+    pids.push(third.pid)
+    expect(third.pid).not.toBe(second.pid)
+    expect(third.version).toBe("0.1.11")
+  } finally {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGTERM")
+      } catch {}
+    }
+    if (originalPassword === undefined) delete process.env.OWALLET_PASSWORD
+    else process.env.OWALLET_PASSWORD = originalPassword
+  }
+}, 30_000)

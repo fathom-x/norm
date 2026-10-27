@@ -1188,7 +1188,9 @@ function portListeners(port: string): Promise<number[]> {
  * after the 0.1.2 upgrade). When the running serve reports a version older
  * than the local binary — or none at all, which means it predates the
  * /health endpoint — bring it down so the normal spawn path below starts
- * the current binary.
+ * the current binary. The version alone misses a binary replaced by a build
+ * of the same version (a dev rebuild, an owallet sync), so a serve that
+ * started before the binary on disk was last written is stale too.
  *
  * Only attempted when this bootstrap could actually respawn afterwards
  * (loopback URL, binary + DB + OWALLET_PASSWORD present, POSIX for lsof);
@@ -1204,17 +1206,21 @@ async function restartIfStale(base: string): Promise<boolean> {
   const binVer = parseVersion(await binaryVersion(bin))
   if (!binVer) return false
   const runningVer = parseVersion(await serveVersion(base))
-  if (runningVer && !versionLess(runningVer, binVer)) return false
-
   const port = new URL(base).port || ENV_PORTS[owalletEnv()]
   const pids = await portListeners(port)
+  const older = !runningVer || versionLess(runningVer, binVer)
+  const replaced = !older && (await replacedSince(bin, pids))
+  if (!older && !replaced) return false
+
   if (!pids.length) {
     debug(`owallet at ${base} looks stale but no listener found on port ${port} — leaving it`)
     return false
   }
   debug(
-    `owallet serve at ${base} is ${runningVer ? runningVer.join(".") : "pre-/health (old)"} ` +
-      `but the binary is ${binVer.join(".")} — restarting (pids ${pids.join(", ")})`,
+    replaced
+      ? `owallet serve at ${base} started before ${bin} was replaced — restarting (pids ${pids.join(", ")})`
+      : `owallet serve at ${base} is ${runningVer ? runningVer.join(".") : "pre-/health (old)"} ` +
+          `but the binary is ${binVer.join(".")} — restarting (pids ${pids.join(", ")})`,
   )
   for (const pid of pids) {
     try {
@@ -1228,6 +1234,35 @@ async function restartIfStale(base: string): Promise<boolean> {
   }
   debug("old owallet serve did not exit within 4s — leaving it running")
   return false
+}
+
+/**
+ * Whether the binary on disk was written after the serve's processes started.
+ * `ps` reports start times to the second, hence the slack; a start time it
+ * cannot report reads as "not replaced".
+ */
+async function replacedSince(bin: string, pids: number[]): Promise<boolean> {
+  if (!pids.length) return false
+  const starts = (await Promise.all(pids.map(processStart))).filter((start) => start !== undefined)
+  if (starts.length < pids.length) return false
+  const modified = (await fs.stat(bin).catch(() => undefined))?.mtimeMs
+  if (modified === undefined) return false
+  return starts.some((start) => modified > start + 2000)
+}
+
+/** A process's start time in ms (POSIX `ps`; Linux and macOS print the same `lstart` format). */
+function processStart(pid: number): Promise<number | undefined> {
+  return new Promise((resolve) => {
+    execFile(
+      "ps",
+      ["-o", "lstart=", "-p", String(pid)],
+      { timeout: 5_000, env: { ...process.env, LC_ALL: "C" } },
+      (error, stdout) => {
+        const time = error ? NaN : new Date(stdout.trim()).getTime()
+        resolve(Number.isFinite(time) ? time : undefined)
+      },
+    )
+  })
 }
 
 /**
