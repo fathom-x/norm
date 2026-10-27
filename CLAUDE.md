@@ -42,9 +42,13 @@ syncs stay cheap:
 - **What models cost** (`packages/core/src/norm-pricing.ts`): parsing,
   list-price estimates (per-turn minimum charge, cache reads,
   long-context tiers) and owallet's refusal floor for the per-message
-  limit. The TUI's owallet plugin reads `/v1/models` into it; the model
-  picker (`tui/src/component/norm-model-price.ts`, two calls in
-  `dialog-model.tsx`) shows list prices, or in a conversation "next ≈ $X"
+  limit. List prices are the priciest provider the seller admits (what
+  owallet authorizes against); `typical` (the cheapest provider's) drives
+  the "next ≈" estimates, and the picker shows both when they differ
+  ("$0.18/$1.44 per M, up to $0.54/$4.32"). The TUI's owallet plugin
+  reads `/v1/models` into it; the model picker
+  (`tui/src/component/norm-model-price.ts`, two calls in
+  `dialog-model.tsx`) shows those prices, or in a conversation "next ≈ $X"
   / "over your $1 limit" per model and a toast on a mid-conversation
   switch; the sidebar shows the next step's estimate.
 - **Housekeeping calls** — titles, compaction, summaries:
