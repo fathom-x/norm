@@ -70,10 +70,9 @@ jobs:
         if: matrix.cross
         run: cargo install cross --locked
 
-      # Pre-public-release: build with `dev-envs` so the bundled binary has
-      # the --dev/--staging selectors (and the baked-in staging Overpay URL)
-      # that norm's staging-by-default bootstrap relies on. Drop the feature
-      # flag from both build steps at the public release.
+      # Build with `dev-envs` so the bundled binary keeps the --dev/--staging
+      # selectors (and the baked-in staging Overpay URL) that
+      # NORM_OWALLET_ENV=staging relies on. Norm itself defaults to prod.
       - name: Build (cross)
         if: matrix.cross
         working-directory: owallet

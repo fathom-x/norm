@@ -354,10 +354,9 @@ test("auto-started serves forward the session id where the marketplace accepts i
     delete process.env.OWALLET_V1_SESSION_ID
     process.env.NORM_OWALLET_ENV = "staging"
     expect(Norm.serveEnv().OWALLET_V1_SESSION_ID).toBe("1")
-    // Prod hasn't shipped fathom-x/overpay#445 yet: an extra buyer-note key
-    // would fail its orders.
+    // Prod runs fathom-x/overpay#445 too.
     process.env.NORM_OWALLET_ENV = "prod"
-    expect(Norm.serveEnv().OWALLET_V1_SESSION_ID).toBeUndefined()
+    expect(Norm.serveEnv().OWALLET_V1_SESSION_ID).toBe("1")
     // An explicit setting always wins.
     process.env.NORM_OWALLET_ENV = "staging"
     process.env.OWALLET_V1_SESSION_ID = "0"
