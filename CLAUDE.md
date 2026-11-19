@@ -306,15 +306,15 @@ syncs stay cheap:
 
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
-`--<env>` flag for auto-started serves; **defaults to `staging` until
-the public release**, flip `DEFAULT_ENV` in `norm.ts` then),
+`--<env>` flag for auto-started serves; defaults to `prod`, which
+targets overpay.com),
 `NORM_OWALLET_URL` (explicit owallet URL, wins over the env default —
 ignored under `NORM_HOME`),
 `NORM_DEBUG=1` (bootstrap diagnostics on stderr), `NORM_HOME` (sandbox
 root, below). Staging/dev serve
-flags come from owallet's `dev-envs` feature — compiled into release
-binaries during the pre-release phase (staging Overpay URL baked in),
-see `owallet-release.yml`. Tests:
+flags come from owallet's `dev-envs` feature, still compiled into release
+binaries (staging Overpay URL baked in) so `NORM_OWALLET_ENV=staging`
+works, see `owallet-release.yml`. Tests:
 `packages/opencode/test/config/config.test.ts` (`norm defaults`
 describe block) and `packages/opencode/test/norm/norm.test.ts`.
 
