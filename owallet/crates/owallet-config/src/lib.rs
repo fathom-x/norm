@@ -16,12 +16,9 @@ pub mod defaults {
     pub const OVERPAY_RAILS_URL: &str = "https://overpay.com";
     pub const OWALLET_PORT: u16 = 8765;
     pub const OWALLET_HOST: &str = "127.0.0.1";
-    /// Staging Overpay deployment (dev-envs builds only). Baked in so
-    /// `owallet --staging serve` needs no `OVERPAY_RAILS_URL_STAGING` —
-    /// norm's bundled owallet must come up in staging with zero setup
-    /// during the pre-public-release phase. Env vars still override.
-    #[cfg(feature = "dev-envs")]
-    pub const OVERPAY_RAILS_URL_STAGING: &str = "https://overpay-eykm.onrender.com";
+    // Staging has no built-in URL on purpose: its hostname stays out of the
+    // source, so `--staging` needs `OVERPAY_RAILS_URL_STAGING` from the
+    // environment (see `ConfigError::MissingRailsUrl`).
 }
 
 /// Env var names that carry a per-environment `_<POSTFIX>` suffix as *inputs*
@@ -47,7 +44,8 @@ pub enum BuiltinEnv {
 pub struct BuiltinDefaults {
     pub label: &'static str,
     /// Built-in Overpay API URL for the environment; `OVERPAY_RAILS_URL`
-    /// / `OVERPAY_RAILS_URL_<POSTFIX>` env vars always win over it.
+    /// / `OVERPAY_RAILS_URL_<POSTFIX>` env vars always win over it. `None`
+    /// (staging) means the environment must supply one.
     pub rails_url: Option<&'static str>,
     pub port: u16,
 }
@@ -80,7 +78,7 @@ impl BuiltinEnv {
             #[cfg(feature = "dev-envs")]
             BuiltinEnv::Staging => BuiltinDefaults {
                 label: "staging",
-                rails_url: Some(defaults::OVERPAY_RAILS_URL_STAGING),
+                rails_url: None,
                 port: 8767,
             },
         }
@@ -165,6 +163,43 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "--{label} has no built-in Overpay URL; set {var} to the {label} Overpay server's URL"
+    )]
+    MissingRailsUrl { label: &'static str, var: String },
+}
+
+impl ConfigError {
+    /// The error for a built-in environment with no URL of its own and
+    /// none from the environment.
+    #[must_use]
+    pub fn missing_rails_url(env: BuiltinEnv) -> Self {
+        ConfigError::MissingRailsUrl {
+            label: env.config().label,
+            var: format!("OVERPAY_RAILS_URL_{}", env.postfix()),
+        }
+    }
+}
+
+/// The first built-in config that declares no Overpay URL and was given none
+/// by the environment (`lookup` reads an env var). The suffixed
+/// `OVERPAY_RAILS_URL_<POSTFIX>` always counts; the bare `OVERPAY_RAILS_URL`
+/// only when it is the sole active config, since with several the bare value
+/// may be another environment's. Without this a URL-less environment would
+/// fall through to prod's URL wherever a command reads `OVERPAY_RAILS_URL`.
+pub fn missing_rails_url(
+    configs: &[ResolvedConfig],
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<ConfigError> {
+    let set = |k: &str| lookup(k).is_some_and(|v| !v.is_empty());
+    configs.iter().find_map(|config| match config {
+        ResolvedConfig::Builtin(env) if env.config().rails_url.is_none() => {
+            let suffixed = format!("OVERPAY_RAILS_URL_{}", env.postfix());
+            let given = set(&suffixed) || (configs.len() == 1 && set("OVERPAY_RAILS_URL"));
+            (!given).then(|| ConfigError::missing_rails_url(*env))
+        }
+        _ => None,
+    })
 }
 
 /// Resolve CLI flags to a list of configs.
@@ -263,7 +298,10 @@ pub fn load_resolved_into_env(configs: &[ResolvedConfig]) -> Result<(), ConfigEr
         load_dot_env_lenient(&dot_env);
     }
 
-    Ok(())
+    match missing_rails_url(configs, |k| std::env::var(k).ok()) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Load the working directory's `.env`, tolerating lines owallet cannot parse.
@@ -565,12 +603,48 @@ OWALLET_TEST_DOTENV_B=second
                 Some("http://localhost:3001")
             );
             assert_eq!(BuiltinEnv::Dev.config().port, 8766);
-            assert_eq!(
-                BuiltinEnv::Staging.config().rails_url,
-                Some("https://overpay-eykm.onrender.com")
-            );
+            assert_eq!(BuiltinEnv::Staging.config().rails_url, None);
             assert_eq!(BuiltinEnv::Staging.config().port, 8767);
         }
+    }
+
+    #[cfg(feature = "dev-envs")]
+    #[test]
+    fn staging_needs_its_url_from_the_environment() {
+        use std::collections::HashMap;
+        let staging = vec![ResolvedConfig::Builtin(BuiltinEnv::Staging)];
+        let missing = |configs: &[ResolvedConfig], vars: &[(&str, &str)]| {
+            let vars: HashMap<String, String> = vars
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect();
+            missing_rails_url(configs, |k| vars.get(k).cloned())
+        };
+
+        let err = missing(&staging, &[]).expect("no URL anywhere");
+        assert!(
+            matches!(err, ConfigError::MissingRailsUrl { label: "staging", ref var }
+                if var == "OVERPAY_RAILS_URL_STAGING"),
+            "got {err:?}"
+        );
+        assert!(err.to_string().contains("set OVERPAY_RAILS_URL_STAGING"));
+        assert!(missing(&staging, &[("OVERPAY_RAILS_URL_STAGING", "")]).is_some());
+        assert!(missing(&staging, &[("OVERPAY_RAILS_URL_STAGING", "https://s.test")]).is_none());
+        // Single config: the suffixed var has already been copied to the
+        // bare one (`apply_env_overrides`), and a `.env` may set it too.
+        assert!(missing(&staging, &[("OVERPAY_RAILS_URL", "https://s.test")]).is_none());
+
+        // With prod active too, the bare var may be prod's own URL.
+        let both = vec![
+            ResolvedConfig::Builtin(BuiltinEnv::Prod),
+            ResolvedConfig::Builtin(BuiltinEnv::Staging),
+        ];
+        assert!(missing(&both, &[("OVERPAY_RAILS_URL", "https://overpay.com")]).is_some());
+        assert!(missing(&both, &[("OVERPAY_RAILS_URL_STAGING", "https://s.test")]).is_none());
+
+        // Environments with a URL of their own never need one.
+        assert!(missing(&[ResolvedConfig::Builtin(BuiltinEnv::Dev)], &[]).is_none());
+        assert!(missing(&[ResolvedConfig::Builtin(BuiltinEnv::Prod)], &[]).is_none());
     }
 
     #[test]

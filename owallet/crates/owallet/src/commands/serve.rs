@@ -273,7 +273,9 @@ fn server_from_builtin(
         .ok()
         .or_else(|| std::env::var("OVERPAY_RAILS_URL").ok())
         .or_else(|| cfg.rails_url.map(str::to_string))
-        .unwrap_or_else(|| defaults::OVERPAY_RAILS_URL.to_string());
+        // A builtin with no URL of its own (staging) must not fall back to
+        // prod's: that would serve a staging wallet against production.
+        .ok_or_else(|| CmdError::Config(owallet_config::ConfigError::missing_rails_url(env)))?;
     let public_url = std::env::var(format!("OVERPAY_PUBLIC_URL_{postfix}"))
         .ok()
         .or_else(|| std::env::var("OVERPAY_PUBLIC_URL").ok());
@@ -403,6 +405,31 @@ mod tests {
         fs::write(dir.join(name), contents).unwrap();
     }
 
+    /// Staging has no built-in Overpay URL, so a test that activates it
+    /// names one (restored on drop; callers are `#[serial]`).
+    #[cfg(feature = "dev-envs")]
+    struct StagingUrl(Option<std::ffi::OsString>);
+    #[cfg(feature = "dev-envs")]
+    impl StagingUrl {
+        fn set(url: Option<&str>) -> Self {
+            let prev = std::env::var_os("OVERPAY_RAILS_URL_STAGING");
+            match url {
+                Some(u) => std::env::set_var("OVERPAY_RAILS_URL_STAGING", u),
+                None => std::env::remove_var("OVERPAY_RAILS_URL_STAGING"),
+            }
+            Self(prev)
+        }
+    }
+    #[cfg(feature = "dev-envs")]
+    impl Drop for StagingUrl {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("OVERPAY_RAILS_URL_STAGING", v),
+                None => std::env::remove_var("OVERPAY_RAILS_URL_STAGING"),
+            }
+        }
+    }
+
     #[test]
     fn collect_configs_default_when_no_flags() {
         let cli = Cli {
@@ -422,7 +449,9 @@ mod tests {
 
     #[cfg(feature = "dev-envs")]
     #[test]
+    #[serial_test::serial]
     fn collect_configs_multi_uses_builtin_defaults() {
+        let _url = StagingUrl::set(Some("https://staging.test"));
         let cli = Cli {
             config: None,
             prod: false,
@@ -443,6 +472,29 @@ mod tests {
         assert!(ports.contains(&8767));
         let rails: Vec<&str> = confs.iter().map(|c| c.rails_url.as_str()).collect();
         assert!(rails.contains(&"http://localhost:3001"));
+        assert!(rails.contains(&"https://staging.test"));
+    }
+
+    #[cfg(feature = "dev-envs")]
+    #[test]
+    #[serial_test::serial]
+    fn staging_without_a_url_is_refused_not_pointed_at_prod() {
+        let _url = StagingUrl::set(None);
+        let cli = Cli {
+            config: None,
+            prod: false,
+            dev: true,
+            staging: true,
+            command: crate::cli::Command::Serve {
+                port: None,
+                host: None,
+            },
+        };
+        let err = collect_configs(&cli, None, Some("127.0.0.1")).unwrap_err();
+        assert!(
+            err.to_string().contains("set OVERPAY_RAILS_URL_STAGING"),
+            "got {err}"
+        );
     }
 
     #[test]
@@ -471,7 +523,9 @@ mod tests {
 
     #[cfg(feature = "dev-envs")]
     #[test]
+    #[serial_test::serial]
     fn collect_configs_port_override_must_match_active_count() {
+        let _url = StagingUrl::set(Some("https://staging.test"));
         let cli = Cli {
             config: None,
             prod: false,
@@ -491,7 +545,9 @@ mod tests {
 
     #[cfg(feature = "dev-envs")]
     #[test]
+    #[serial_test::serial]
     fn collect_configs_port_override_maps_positionally() {
+        let _url = StagingUrl::set(Some("https://staging.test"));
         let cli = Cli {
             config: None,
             prod: false,

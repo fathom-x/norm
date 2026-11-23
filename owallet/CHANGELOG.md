@@ -4,6 +4,15 @@ All notable changes to the Rust port of `owallet` are documented here.
 
 ## Unreleased
 
+### `--staging` takes its Overpay URL from the environment only
+
+- dev-envs builds no longer carry a built-in staging Overpay URL
+  (`defaults::OVERPAY_RAILS_URL_STAGING` is gone). `--staging` needs
+  `OVERPAY_RAILS_URL_STAGING` (or, with staging the only active config,
+  `OVERPAY_RAILS_URL`); without one every command stops with
+  `--staging has no built-in Overpay URL; set OVERPAY_RAILS_URL_STAGING …`
+  instead of quietly talking to production.
+
 ### `/v1` follows the inference seller's rename to "AI Inference"
 
 - The inference seller bot was renamed: its seller slug is now

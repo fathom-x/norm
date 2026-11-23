@@ -566,9 +566,9 @@ land any of these:
   to a GitHub release. (Bare `v*` tags belong to the opencode fork at
   the repo root.)
 - **Pre-public-release:** the workflow builds with `--features dev-envs`
-  so the bundled binaries accept `--dev`/`--staging` and carry the
-  baked-in staging Overpay URL (`defaults::OVERPAY_RAILS_URL_STAGING`)
-  — norm defaults to staging until launch. Drop the feature flag from
+  so the bundled binaries accept `--dev`/`--staging`. Staging has no
+  built-in Overpay URL: `--staging` needs `OVERPAY_RAILS_URL_STAGING`
+  from the environment and refuses to run without it. Drop the feature flag from
   both build steps (and flip norm's `DEFAULT_ENV`) at the public
   release.
 - Update `CHANGELOG.md` + bump `[workspace.package].version` in

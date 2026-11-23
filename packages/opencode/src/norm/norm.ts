@@ -60,9 +60,10 @@ const ENV_PORTS: Record<OwalletEnv, string> = { prod: "8765", dev: "8766", stagi
  * default; it picks the default port below and the `--<env>` flag passed to
  * an auto-started `owallet serve`. Prod, the default, is owallet's flagless
  * default and targets overpay.com. The staging/dev flags come from owallet's
- * `dev-envs` feature, still compiled into the bundled release binaries (with
- * the staging Overpay URL baked in) so `NORM_OWALLET_ENV=staging` works with
- * just OWALLET_PASSWORD.
+ * `dev-envs` feature, still compiled into the bundled release binaries.
+ * Staging has no built-in Overpay URL: `NORM_OWALLET_ENV=staging` needs
+ * `OVERPAY_RAILS_URL_STAGING` exported too (owallet refuses to start
+ * without it).
  */
 export function owalletEnv(): OwalletEnv {
   const env = process.env.NORM_OWALLET_ENV
