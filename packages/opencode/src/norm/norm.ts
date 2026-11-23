@@ -50,9 +50,7 @@ export function disabled() {
 
 export type OwalletEnv = "prod" | "dev" | "staging"
 
-// Pre-public-release default: point at owallet's staging environment.
-// Flip to "prod" (and drop this comment) when Overpay opens to the public.
-const DEFAULT_ENV: OwalletEnv = "staging"
+const DEFAULT_ENV: OwalletEnv = "prod"
 
 // Mirrors owallet-config's built-in per-environment ports.
 const ENV_PORTS: Record<OwalletEnv, string> = { prod: "8765", dev: "8766", staging: "8767" }
@@ -60,10 +58,11 @@ const ENV_PORTS: Record<OwalletEnv, string> = { prod: "8765", dev: "8766", stagi
 /**
  * Which owallet environment norm targets. `NORM_OWALLET_ENV` overrides the
  * default; it picks the default port below and the `--<env>` flag passed to
- * an auto-started `owallet serve`. The staging/dev flags come from owallet's
- * `dev-envs` feature — compiled into the bundled release binaries during the
- * pre-public-release phase (with the staging Overpay URL baked in), so a
- * bare launch works with just OWALLET_PASSWORD.
+ * an auto-started `owallet serve`. Prod, the default, is owallet's flagless
+ * default and targets overpay.com. The staging/dev flags come from owallet's
+ * `dev-envs` feature, still compiled into the bundled release binaries (with
+ * the staging Overpay URL baked in) so `NORM_OWALLET_ENV=staging` works with
+ * just OWALLET_PASSWORD.
  */
 export function owalletEnv(): OwalletEnv {
   const env = process.env.NORM_OWALLET_ENV
@@ -1284,11 +1283,11 @@ function processStart(pid: number): Promise<number | undefined> {
  * conversation on one provider and its prompt cache warm; owallet forwards
  * an opaque HMAC of it only with `OWALLET_V1_SESSION_ID=1`, because a
  * marketplace without fathom-x/overpay#445 fails orders whose buyer note
- * carries the extra key. Staging and dev run #445, so it is on there; prod
- * stays off until it ships. An explicit `OWALLET_V1_SESSION_ID` wins.
+ * carries the extra key. Every environment runs #445 now, production
+ * included. An explicit `OWALLET_V1_SESSION_ID` wins.
  */
 export function serveEnv(): NodeJS.ProcessEnv {
-  if (process.env.OWALLET_V1_SESSION_ID !== undefined || owalletEnv() === "prod") return process.env
+  if (process.env.OWALLET_V1_SESSION_ID !== undefined) return process.env
   return { ...process.env, OWALLET_V1_SESSION_ID: "1" }
 }
 
