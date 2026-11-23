@@ -155,7 +155,9 @@ pub enum Command {
         mcp: bool,
     },
 
-    /// Load core marketplace credits via a Lightning invoice QR code.
+    /// Load core marketplace credits via a Lightning invoice QR code (where the
+    /// server supports it; credits can also be bought with USDC on the Overpay
+    /// website).
     Credits {
         #[command(subcommand)]
         what: CreditsWhat,
