@@ -89,7 +89,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         ToolSpec {
             name: "get_account_info",
             description:
-                "Free read. Show the active wallet's balances (ETH / USDC / ZEC), Overpay link status, and merchant credit balances (when linked). Addresses and account identifiers are shown on the owallet dashboard, not here.",
+                "Free read. Show the active wallet's balances (ETH / USDC / ZEC), Overpay link status, and merchant credit balances (when linked). Addresses and account identifiers are shown on the owallet dashboard, not here. Overpay core credits (what chat and marketplace orders are paid from) belong to the linked Overpay account, however they were bought: the user can top them up with USDC on the Overpay website, or with a Lightning invoice (load_core_credits) where the server supports it.",
             input_schema: schema_object(json!({})),
         },
         ToolSpec {
@@ -222,7 +222,7 @@ pub fn catalog() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "load_core_credits",
-            description: "The call itself is not billed and moves no money — the returned invoice moves real money only when paid from a Lightning wallet. Create a Lightning invoice to load Overpay core credits. Returns a BOLT11 invoice with a scannable QR code. Pay from any Lightning wallet; credits are funded automatically once the invoice settles. Call get_order(order_id, wait_until=\"delivered\") to confirm the credits land.",
+            description: "The call itself is not billed and moves no money — the returned invoice moves real money only when paid from a Lightning wallet. Create a Lightning invoice to load Overpay core credits. This is one way to top up, not the only one: core credits belong to the Overpay account however they were paid for, and the user can also buy them with USDC on the Overpay website (on some servers, including prod today, that is the only way, and this call fails). Returns a BOLT11 invoice with a scannable QR code. Pay from any Lightning wallet; credits are funded automatically once the invoice settles. Call get_order(order_id, wait_until=\"delivered\") to confirm the credits land. If the call fails, point the user to the Overpay website to top up with USDC instead of retrying.",
             input_schema: schema_with_required(
                 json!({
                     "amount_usd": {"type": "number", "description": "Amount to load in USD (must meet the site minimum)"},
@@ -2078,7 +2078,8 @@ async fn sync_zcash(state: &McpState, _args: Value) -> Result<Value, ToolError> 
 }
 
 // ---------------------------------------------------------------------------
-// load_core_credits — Lightning invoice for Overpay core credits
+// load_core_credits — Lightning invoice for Overpay core credits (one way to
+// top up; USDC on the Overpay website is the other, and on prod the only one)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]

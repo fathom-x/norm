@@ -471,8 +471,9 @@ const RAISE_LIMIT_HINT: &str =
 /// path so the advice is the same wherever it surfaces. The CLI defaults to
 /// prod, so the env flag has to be spelled out for staging/dev serves.
 const LOAD_CREDITS_HINT: &str =
-    "load Overpay credits with `owallet credits load --amount-cents 500 --wait` \
-     (pass the same --staging/--dev flag this server runs with) or top up on the Overpay site";
+    "top up Overpay credits with USDC on the Overpay website, or with Lightning via \
+     `owallet credits load --amount-cents 500 --wait` where the server supports it \
+     (pass the same --staging/--dev flag this server runs with)";
 
 impl From<OverpayError> for OpenAiError {
     fn from(e: OverpayError) -> Self {

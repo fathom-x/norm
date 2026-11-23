@@ -933,7 +933,10 @@ export function systemPrompt(): string {
     "  around it.",
     "- Wallet addresses, account numbers and tx hashes are never shown to you;",
     `  they are on the owallet dashboard (${owalletUrl()}/wallet). To top up`,
-    "  credits in chat, load_core_credits returns a Lightning invoice.",
+    "  credits, the user buys them with USDC on the Overpay website; in chat,",
+    "  load_core_credits returns a Lightning invoice where the server supports",
+    "  it. Credits belong to the user's Overpay account however they were paid",
+    "  for, so USDC-bought credits pay for chat exactly like Lightning ones.",
   ].join("\n")
 }
 
