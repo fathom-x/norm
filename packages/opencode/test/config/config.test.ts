@@ -420,18 +420,18 @@ describe("norm defaults", () => {
   // every other test; these tests lift that to exercise the norm layer.
   const withNorm = <A, E, R>(effect: Effect.Effect<A, E, R>) => withProcessEnv("NORM_DISABLE", undefined, effect)
 
-  it.instance("seeds the overpay provider and owallet mcp server (staging by default, pre-release)", () =>
+  it.instance("seeds the overpay provider and owallet mcp server (prod by default)", () =>
     withNorm(
       Effect.gen(function* () {
         const config = yield* Config.use.get()
         expect(config.provider?.overpay).toMatchObject({
           npm: "@ai-sdk/openai-compatible",
-          options: { baseURL: "http://127.0.0.1:8767/v1" },
+          options: { baseURL: "http://127.0.0.1:8765/v1" },
         })
         expect(config.provider?.overpay?.models).toHaveProperty("default")
         expect(config.mcp?.owallet).toMatchObject({
           type: "remote",
-          url: "http://127.0.0.1:8767/mcp",
+          url: "http://127.0.0.1:8765/mcp",
           enabled: true,
         })
       }),
@@ -460,7 +460,7 @@ describe("norm defaults", () => {
         Effect.gen(function* () {
           const config = yield* Config.use.get()
           const base = config.provider?.overpay?.options?.baseURL as string
-          // A sandbox must not default to 8767 — that serve is the real
+          // A sandbox must not default to 8765 — that serve is the real
           // wallet's, and ensureServer would happily reuse it.
           const port = Number(new URL(base).port)
           expect(port).toBeGreaterThanOrEqual(8800)

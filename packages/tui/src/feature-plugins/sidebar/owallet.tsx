@@ -31,7 +31,7 @@ const FETCH_TIMEOUT_MS = 15_000
 // polled the real serve on 8767 with the sandbox's key and rendered
 // "provider key rejected" for every sandboxed run.
 const ENV_PORTS = { prod: 8765, dev: 8766, staging: 8767 } as const
-const DEFAULT_ENV: keyof typeof ENV_PORTS = "staging"
+const DEFAULT_ENV: keyof typeof ENV_PORTS = "prod"
 const SANDBOX_PORT_BASE = 8800
 const SANDBOX_PORT_SPAN = 1000
 

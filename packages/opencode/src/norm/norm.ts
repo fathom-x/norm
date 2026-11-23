@@ -50,9 +50,9 @@ export function disabled() {
 
 export type OwalletEnv = "prod" | "dev" | "staging"
 
-// Pre-public-release default: point at owallet's staging environment.
-// Flip to "prod" (and drop this comment) when Overpay opens to the public.
-const DEFAULT_ENV: OwalletEnv = "staging"
+// Overpay is public: norm targets production (https://overpay.com) unless
+// NORM_OWALLET_ENV says otherwise.
+const DEFAULT_ENV: OwalletEnv = "prod"
 
 // Mirrors owallet-config's built-in per-environment ports.
 const ENV_PORTS: Record<OwalletEnv, string> = { prod: "8765", dev: "8766", staging: "8767" }
@@ -60,10 +60,10 @@ const ENV_PORTS: Record<OwalletEnv, string> = { prod: "8765", dev: "8766", stagi
 /**
  * Which owallet environment norm targets. `NORM_OWALLET_ENV` overrides the
  * default; it picks the default port below and the `--<env>` flag passed to
- * an auto-started `owallet serve`. The staging/dev flags come from owallet's
- * `dev-envs` feature — compiled into the bundled release binaries during the
- * pre-public-release phase (with the staging Overpay URL baked in), so a
- * bare launch works with just OWALLET_PASSWORD.
+ * an auto-started `owallet serve` (none for prod, owallet's flagless
+ * default). The staging/dev flags come from owallet's `dev-envs` feature,
+ * which the bundled release binaries are still built with (staging Overpay
+ * URL baked in), so `NORM_OWALLET_ENV=staging` keeps working.
  */
 export function owalletEnv(): OwalletEnv {
   const env = process.env.NORM_OWALLET_ENV

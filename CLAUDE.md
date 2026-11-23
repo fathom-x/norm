@@ -306,14 +306,15 @@ syncs stay cheap:
 
 Env knobs: `NORM_DISABLE=1` (turn the layer off), `NORM_OWALLET_ENV`
 (`prod`/`dev`/`staging` — picks the default port 8765/8766/8767 and the
-`--<env>` flag for auto-started serves; **defaults to `staging` until
-the public release**, flip `DEFAULT_ENV` in `norm.ts` then),
+`--<env>` flag for auto-started serves; defaults to `prod` since
+Overpay's public launch — `DEFAULT_ENV` in `norm.ts`, duplicated in the
+TUI's `feature-plugins/sidebar/owallet.tsx`),
 `NORM_OWALLET_URL` (explicit owallet URL, wins over the env default —
 ignored under `NORM_HOME`),
 `NORM_DEBUG=1` (bootstrap diagnostics on stderr), `NORM_HOME` (sandbox
 root, below). Staging/dev serve
-flags come from owallet's `dev-envs` feature — compiled into release
-binaries during the pre-release phase (staging Overpay URL baked in),
+flags come from owallet's `dev-envs` feature — still compiled into release
+binaries so `NORM_OWALLET_ENV=staging` works (staging Overpay URL baked in),
 see `owallet-release.yml`. Tests:
 `packages/opencode/test/config/config.test.ts` (`norm defaults`
 describe block) and `packages/opencode/test/norm/norm.test.ts`.
@@ -325,7 +326,7 @@ owallet's own state and `*.owallet` config, exported to child processes
 as `OWALLET_HOME`/`OWALLET_DB_PATH`/`OWALLET_CONFIG_DIR`), and `bin/`
 (what the installer writes when the same variable is set). The
 auto-started serve also gets its own port, derived from the root path
-(8800-9799): defaulting to 8767 would make `ensureServer` reuse the
+(8800-9799): defaulting to 8765 would make `ensureServer` reuse the
 *real* wallet's running serve and silently undo the isolation. For the
 same reason the sandbox is **absolute**: ambient `OWALLET_HOME` /
 `OWALLET_DB_PATH` / `OWALLET_CONFIG_DIR` pointing outside the root and

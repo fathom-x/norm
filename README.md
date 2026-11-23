@@ -14,11 +14,13 @@ Norm is not a human, so he cannot have a bank account. He pays for his expenses 
 Not many businesses accept crypto yet, so Norm shops at Overpay to pay for things like servers, domain names, and even the cost of his own thinking - something known as "AI inference."
 
 > [!IMPORTANT]
-> Until Overpay opens to the public, norm ships pointed at Overpay's
-> **staging** environment: <https://overpay-eykm.onrender.com>. Create your
-> account there — an account on `overpay.com` is a different environment and
-> norm will not see it. `NORM_OWALLET_ENV=prod` switches to production once
-> it is open.
+> Norm uses Overpay's production marketplace, <https://overpay.com>. Earlier
+> builds pointed at a staging environment (`overpay-eykm.onrender.com`);
+> staging accounts and credits do not carry over. If you set norm up on one
+> of those builds, run `owallet authorize` once to link your wallet to your
+> overpay.com account (norm won't re-offer the login, because it remembers
+> the staging link), and load credits there. `NORM_OWALLET_ENV=staging`
+> still selects staging.
 
 This page describes how to wake up Norm on your computer, so he can start helping you out with whatever you need.
 
@@ -82,11 +84,11 @@ Load credits either way:
 - **From the terminal**, paying a Lightning invoice:
 
   ```bash
-  owallet --staging credits load --amount-cents 500 --wait
+  owallet credits load --amount-cents 500 --wait
   ```
 
-  Keep `--staging` while Norm targets staging: plain `owallet` talks to
-  production, a different account balance.
+  If you run Norm with `NORM_OWALLET_ENV=staging`, add `--staging` (plain
+  `owallet` talks to production, a different account balance).
 
 Your wallet also holds on-chain funds (USDC and ETH on Base, and ZEC — see
 `owallet account`). Those are **not** spent on inference. The key Norm mints
@@ -138,7 +140,7 @@ Norm keeps opencode's configuration surface (`opencode.json`, `.opencode/` dirs,
 | --- | --- |
 | `OWALLET_PASSWORD` | Wallet admin password. Export it to skip the launch prompt. |
 | `NORM_HOME` | Put everything norm owns under one directory (see above). |
-| `NORM_OWALLET_ENV` | `staging` (default), `prod`, or `dev` — picks the Overpay environment and owallet port. |
+| `NORM_OWALLET_ENV` | `prod` (default), `staging`, or `dev` — picks the Overpay environment and owallet port. |
 | `NORM_OWALLET_URL` | Point at an owallet server explicitly. Ignored under `NORM_HOME`. |
 | `NORM_DISABLE=1` | Turn the norm layer off and run as plain opencode. |
 | `NORM_DEBUG=1` | Bootstrap diagnostics on stderr. |
