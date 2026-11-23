@@ -132,7 +132,7 @@ Norm keeps opencode's configuration surface (`opencode.json`, `.opencode/` dirs,
 | --- | --- |
 | `OWALLET_PASSWORD` | Wallet admin password. Export it to skip the launch prompt. |
 | `NORM_HOME` | Put everything norm owns under one directory (see above). |
-| `NORM_OWALLET_ENV` | `prod` (default, overpay.com), `staging`, or `dev` — picks the Overpay environment and owallet port. |
+| `NORM_OWALLET_ENV` | `prod` (default, overpay.com), `staging`, or `dev` — picks the Overpay environment and owallet port. `staging` also needs `OVERPAY_RAILS_URL_STAGING` set to the staging server's URL. |
 | `NORM_OWALLET_URL` | Point at an owallet server explicitly. Ignored under `NORM_HOME`. |
 | `NORM_DISABLE=1` | Turn the norm layer off and run as plain opencode. |
 | `NORM_DEBUG=1` | Bootstrap diagnostics on stderr. |

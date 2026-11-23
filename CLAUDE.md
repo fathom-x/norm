@@ -313,8 +313,8 @@ ignored under `NORM_HOME`),
 `NORM_DEBUG=1` (bootstrap diagnostics on stderr), `NORM_HOME` (sandbox
 root, below). Staging/dev serve
 flags come from owallet's `dev-envs` feature, still compiled into release
-binaries (staging Overpay URL baked in) so `NORM_OWALLET_ENV=staging`
-works, see `owallet-release.yml`. Tests:
+binaries, see `owallet-release.yml`; staging has no built-in Overpay URL,
+so `NORM_OWALLET_ENV=staging` also needs `OVERPAY_RAILS_URL_STAGING`. Tests:
 `packages/opencode/test/config/config.test.ts` (`norm defaults`
 describe block) and `packages/opencode/test/norm/norm.test.ts`.
 

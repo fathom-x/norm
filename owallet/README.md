@@ -402,7 +402,7 @@ Every command accepts `--prod` (built-in production defaults) or
 | `OWALLET_PORT` | `8765` | `serve`, `install`, `config` |
 | `OWALLET_HOST` | `127.0.0.1` | `serve` |
 | `OWALLET_MCP_BASE_URL` | derived from bind addr | OAuth issuer URL |
-| `OVERPAY_RAILS_URL[_<ENV>]` | `https://overpay-eykm.onrender.com` | `account`, `authorize`, `list marketplace`, MCP tools (suffixed form required as an env override when a config is active) |
+| `OVERPAY_RAILS_URL[_<ENV>]` | `https://overpay.com` (prod; staging has none, so `OVERPAY_RAILS_URL_STAGING` is required) | `account`, `authorize`, `list marketplace`, MCP tools (suffixed form required as an env override when a config is active) |
 | `OVERPAY_PUBLIC_URL[_<ENV>]` | = `OVERPAY_RAILS_URL` | browser-targeted URL rewriting |
 | `EVM_RPC_URL` | `https://mainnet.base.org` | `send`, MCP `send_usdc` |
 | `EVM_NETWORK` | `eip155:8453` (Base mainnet) | chain table lookup |
